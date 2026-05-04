@@ -1,0 +1,18 @@
+# Streamlit 公式設定ファイル
+# Cloud で実行されたときの見た目・挙動を統一する
+
+[theme]
+# テーマカラー（経営者ダッシュボードに合わせて落ち着いた青）
+primaryColor = "#2563eb"
+backgroundColor = "#ffffff"
+secondaryBackgroundColor = "#f8fafc"
+textColor = "#1e293b"
+font = "sans serif"
+
+[server]
+# アップロードできるファイルサイズの上限
+maxUploadSize = 50
+
+[browser]
+# テレメトリは送信しない
+gatherUsageStats = false
