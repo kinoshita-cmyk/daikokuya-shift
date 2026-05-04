@@ -1,0 +1,41 @@
+# ============================================================
+# 機密データ（公開しない・GitHubに上げない）
+# ============================================================
+data/sample_employee_contract.docx
+data/may_2026_shift.xlsx
+backups/
+output/
+
+# Streamlit シークレット（API キー等）
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+
+# 環境変数
+.env
+.env.local
+
+# 設定ファイル（個人特有のもの）
+config/employees.json
+config/employee_history.jsonl
+config/rule_config.json
+config/rule_history.jsonl
+locks/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code
+.claude/settings.local.json
