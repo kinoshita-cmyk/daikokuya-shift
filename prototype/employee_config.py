@@ -36,9 +36,18 @@ EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
 
 def _employment_status_from_value(value: str | None) -> EmploymentStatus:
     """保存済みの旧表記も含めて雇用形態を復元する。"""
-    if value == "在籍":
-        return EmploymentStatus.ACTIVE
-    return EmploymentStatus(value or EmploymentStatus.ACTIVE.value)
+    aliases = {
+        "在籍": EmploymentStatus.ACTIVE,
+        "ACTIVE": EmploymentStatus.ACTIVE,
+        "PART_TIME": EmploymentStatus.PART_TIME,
+        "ADVISOR": EmploymentStatus.ADVISOR,
+        "AUXILIARY": EmploymentStatus.AUXILIARY,
+        "ON_LEAVE": EmploymentStatus.ON_LEAVE,
+        "RETIRED": EmploymentStatus.RETIRED,
+    }
+    if value in aliases:
+        return aliases[value]
+    return _enum_from_value(EmploymentStatus, value, EmploymentStatus.ACTIVE)
 
 
 def _enum_from_value(enum_cls, value, default):
@@ -78,18 +87,39 @@ def _store_from_value(value: str | None) -> Optional[Store]:
     if not value:
         return None
     value_str = str(value)
-    try:
-        return Store[value_str]
-    except KeyError:
-        pass
-    try:
-        return Store(value_str)
-    except ValueError:
-        pass
-    for store in Store:
-        if store.display_name == value_str:
-            return store
-    return None
+    aliases = {
+        "AKABANE": Store.AKABANE,
+        "HIGASHIGUCHI": Store.HIGASHIGUCHI,
+        "OMIYA": Store.OMIYA,
+        "NISHIGUCHI": Store.NISHIGUCHI,
+        "SUZURAN": Store.SUZURAN,
+        "OFF": Store.OFF,
+        "○": Store.AKABANE,
+        "〇": Store.AKABANE,
+        "□": Store.HIGASHIGUCHI,
+        "△": Store.OMIYA,
+        "☆": Store.NISHIGUCHI,
+        "◆": Store.SUZURAN,
+        "×": Store.OFF,
+        "赤羽": Store.AKABANE,
+        "赤羽駅前": Store.AKABANE,
+        "赤羽駅前店": Store.AKABANE,
+        "東口": Store.HIGASHIGUCHI,
+        "赤羽東口": Store.HIGASHIGUCHI,
+        "赤羽東口店": Store.HIGASHIGUCHI,
+        "大宮": Store.OMIYA,
+        "大宮駅前": Store.OMIYA,
+        "大宮駅前店": Store.OMIYA,
+        "西口": Store.NISHIGUCHI,
+        "大宮西口": Store.NISHIGUCHI,
+        "大宮西口店": Store.NISHIGUCHI,
+        "すずらん": Store.SUZURAN,
+        "すずらん通り": Store.SUZURAN,
+        "大宮すずらん通り": Store.SUZURAN,
+        "大宮すずらん通り店": Store.SUZURAN,
+        "休み": Store.OFF,
+    }
+    return aliases.get(value_str)
 
 
 # ============================================================
@@ -125,10 +155,10 @@ def employee_from_dict(data: dict) -> Employee:
     """JSON dict から Employee を復元"""
     affinities = {}
     for store_name, aff_value in data.get("affinities", {}).items():
-        try:
-            affinities[Store[store_name]] = Affinity(aff_value)
-        except (KeyError, ValueError):
-            pass
+        store = _store_from_value(store_name)
+        if store is None or store == Store.OFF:
+            continue
+        affinities[store] = _enum_from_value(Affinity, aff_value, Affinity.NONE)
     return Employee(
         name=data["name"],
         full_name=data.get("full_name"),
@@ -255,16 +285,16 @@ class EmployeeConfigManager:
             elif k == "skill" and isinstance(v, str):
                 v = Skill(v)
             elif k == "home_store" and isinstance(v, str):
-                v = Store[v] if v else None
+                v = _store_from_value(v)
             elif k == "station_type" and isinstance(v, str):
-                v = StationType(v)
+                v = _enum_from_value(StationType, v, StationType.FLEXIBLE)
             elif k == "affinities" and isinstance(v, dict):
                 aff_dict = {}
                 for store_name, aff_value in v.items():
-                    try:
-                        aff_dict[Store[store_name]] = Affinity(aff_value)
-                    except (KeyError, ValueError):
-                        pass
+                    store = _store_from_value(store_name)
+                    if store is None or store == Store.OFF:
+                        continue
+                    aff_dict[store] = _enum_from_value(Affinity, aff_value, Affinity.NONE)
                 v = aff_dict
             setattr(all_emps[idx], k, v)
         after = employee_to_dict(all_emps[idx])
