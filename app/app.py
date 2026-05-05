@@ -665,16 +665,31 @@ if mode == "📊 経営者ビュー":
         ):
             # ========================================================
             # シフト生成（例外を必ずキャッチしてユーザーに表示する）
+            # 生成前に target_year/month を保存（生成中のリセットに対する保険）
             # ========================================================
+            _saved_target_year = int(target_year)
+            _saved_target_month = int(target_month)
+            st.session_state["target_year"] = _saved_target_year
+            st.session_state["target_month"] = _saved_target_month
+
+            # ステップ進捗の状態表示エリア
+            progress_area = st.empty()
             try:
                 from calendar import monthrange as _mr
-                days_in_m = _mr(int(target_year), int(target_month))[1]
+                days_in_m = _mr(_saved_target_year, _saved_target_month)[1]
 
-                with st.spinner("AIがシフト案を生成中... (1〜2分かかる場合があります)"):
+                progress_area.info(
+                    f"⏳ ステップ 1/4: {_saved_target_year}年{_saved_target_month}月の提出データを読み込み中..."
+                )
+                with st.spinner(f"AIがシフト案を生成中... (最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"):
                     # 実際の提出データを読み込む
                     from prototype.submission_loader import load_submissions_for_month
                     sub_data = load_submissions_for_month(
-                        int(target_year), int(target_month), expected_employees,
+                        _saved_target_year, _saved_target_month, expected_employees,
+                    )
+                    progress_area.info(
+                        f"⏳ ステップ 2/4: 提出データを処理中... "
+                        f"（提出 {sub_data.submission_count}名 / 未提出 {len(sub_data.pending_employees)}名）"
                     )
 
                     # ヘルパー関数: 月内の有効日のみに絞り込む
@@ -759,10 +774,18 @@ if mode == "📊 経営者ビュー":
                             "本番では従業員から希望が届いた後に生成してください。"
                         )
 
-                    modes = determine_operation_modes(target_year, target_month)
+                    progress_area.info(
+                        f"⏳ ステップ 3/4: 営業モードを判定中..."
+                    )
+                    modes = determine_operation_modes(_saved_target_year, _saved_target_month)
+
+                    progress_area.info(
+                        f"⏳ ステップ 4/4: AIソルバー実行中... "
+                        f"(最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"
+                    )
                     shift = generate_shift(
-                        year=int(target_year),
-                        month=int(target_month),
+                        year=_saved_target_year,
+                        month=_saved_target_month,
                         off_requests=use_off_requests,
                         work_requests=use_work_requests,
                         prev_month=use_prev_month,
@@ -771,20 +794,27 @@ if mode == "📊 経営者ビュー":
                         operation_modes=modes,
                         consec_exceptions=use_consec_exceptions,
                         max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
-                        time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 120),
+                        time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 30),
                         random_seed=rule_cfg.parameters.get("solver_seed", 42),
                         verbose=False,
                     )
 
+                # session_state を再度確実にセット（生成中にリセットされた場合の保険）
+                st.session_state["target_year"] = _saved_target_year
+                st.session_state["target_month"] = _saved_target_month
+
                 if shift is not None:
                     save_session_shift(shift)
+                    progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                 else:
                     # ソルバーが解を見つけられなかった場合
+                    progress_area.empty()
                     diag_lines = [
                         "❌ **シフトを生成できませんでした**",
                         "",
-                        "ソルバーが制約を全て満たすシフトを見つけられませんでした。",
+                        f"ソルバーが {rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒以内に "
+                        "制約を全て満たすシフトを見つけられませんでした。",
                         "",
                         "**考えられる原因:**",
                     ]
@@ -794,17 +824,27 @@ if mode == "📊 経営者ビュー":
                                 diag_lines.append(
                                     f"- ⚠ **{emp_name}** の休み希望が {len(off_days)}日と多すぎる可能性"
                                 )
+                        # 総休日数チェック
+                        total_off = sum(len(v) for v in use_off_requests.values())
+                        diag_lines.append(
+                            f"- 提出された休み希望の合計: {total_off}日"
+                        )
+                    else:
+                        diag_lines.append("- 提出データなしで生成しようとした可能性")
                     diag_lines.extend([
                         "",
                         "**対処方法:**",
                         "1. 「⚙️ 設定 → 🏖 有給使用状況」で各従業員の希望休日を確認",
                         "2. 矛盾する希望があれば該当従業員に再提出を依頼",
-                        "3. 「⚙️ 設定 → 🔧 ルール設定」で「最大連勤日数」を増やすなど制約緩和",
+                        "3. 「⚙️ 設定 → 🔧 ルール設定」で",
+                        "   - 「最大連勤日数」を 5→6 や 7 に増やす",
+                        "   - 「ソルバー最大実行時間」を 30→60 秒に増やす",
                         "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
                     ])
                     st.error("\n".join(diag_lines))
             except Exception as _gen_err:
                 # 想定外の例外（KeyError など）も画面に表示
+                progress_area.empty()
                 import traceback
                 error_detail = traceback.format_exc()
                 st.error(
@@ -819,6 +859,10 @@ if mode == "📊 経営者ビュー":
                 )
                 with st.expander("🔧 技術者向け: 詳細エラーログ", expanded=False):
                     st.code(error_detail)
+            finally:
+                # 例外が発生してもターゲット月をリセットしない
+                st.session_state["target_year"] = _saved_target_year
+                st.session_state["target_month"] = _saved_target_month
 
     with bcol2:
         # 確定版を読み込む
