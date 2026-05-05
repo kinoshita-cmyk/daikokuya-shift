@@ -17,8 +17,12 @@ import os
 from pathlib import Path
 from typing import Optional
 
-# プロジェクトルートをPythonパスに追加
-sys.path.insert(0, str(Path(__file__).parent.parent))
+# パス設定: プロジェクトルートと app ディレクトリの両方を Python パスに追加
+# これにより `from prototype.X` と `from auth` 両方の形式が動く
+_THIS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _THIS_DIR.parent
+sys.path.insert(0, str(_PROJECT_ROOT))   # for: from prototype.X import Y
+sys.path.insert(0, str(_THIS_DIR))       # for: from auth import Z
 
 import streamlit as st
 from datetime import date, datetime
@@ -28,8 +32,8 @@ from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
 )
 
-# 認証モジュール
-from app.auth import require_auth, render_logout_button, is_manager, get_user_role
+# 認証モジュール（同じ app/ ディレクトリに配置）
+from auth import require_auth, render_logout_button, is_manager, get_user_role
 
 
 def get_anthropic_api_key() -> Optional[str]:
@@ -1143,7 +1147,7 @@ elif mode == "👤 従業員ビュー":
     st.title("👤 希望シフト提出")
 
     # マジックリンクでログインしている場合は、その従業員に固定
-    from app.auth import get_logged_in_employee, is_employee, is_manager
+    from auth import get_logged_in_employee, is_employee, is_manager
     logged_in_emp = get_logged_in_employee()
 
     if is_employee() and logged_in_emp:
