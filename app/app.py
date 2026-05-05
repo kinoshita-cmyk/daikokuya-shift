@@ -347,11 +347,51 @@ if mode == "📊 経営者ビュー":
     else:
         prev_month_year, prev_month_month = today.year, today.month - 1
 
-    # セッションに対象年月を保持（リロードしても維持）
-    if "target_year" not in st.session_state:
-        st.session_state["target_year"] = next_month_year
-    if "target_month" not in st.session_state:
-        st.session_state["target_month"] = next_month_month
+    # ============================================================
+    # URL パラメータ ?ym=YYYY-MM を最優先（セッションリセット対策）
+    # Streamlit Cloud で WebSocket がタイムアウトして session_state が
+    # 失われても、URL に月情報が残っていれば復元できる。
+    # ============================================================
+    def _set_target_ym(y: int, m: int) -> None:
+        """対象年月を session_state と URL に同時保存"""
+        st.session_state["target_year"] = int(y)
+        st.session_state["target_month"] = int(m)
+        try:
+            st.query_params["ym"] = f"{int(y):04d}-{int(m):02d}"
+        except Exception:
+            pass
+
+    # URL から ym を読み取り、session_state を初期化
+    _url_ym = None
+    try:
+        _url_ym_raw = st.query_params.get("ym")
+        if _url_ym_raw:
+            _y_str, _m_str = str(_url_ym_raw).split("-", 1)
+            _url_ym = (int(_y_str), int(_m_str))
+            if not (2024 <= _url_ym[0] <= 2030 and 1 <= _url_ym[1] <= 12):
+                _url_ym = None
+    except Exception:
+        _url_ym = None
+
+    if _url_ym is not None:
+        # URL の値を最優先（セッションリセットされていても復元）
+        if (st.session_state.get("target_year") != _url_ym[0]
+                or st.session_state.get("target_month") != _url_ym[1]):
+            st.session_state["target_year"] = _url_ym[0]
+            st.session_state["target_month"] = _url_ym[1]
+    else:
+        # URL に無ければ翌月を初期値とし、URL にも書き込む
+        if "target_year" not in st.session_state:
+            st.session_state["target_year"] = next_month_year
+        if "target_month" not in st.session_state:
+            st.session_state["target_month"] = next_month_month
+        try:
+            st.query_params["ym"] = (
+                f"{int(st.session_state['target_year']):04d}-"
+                f"{int(st.session_state['target_month']):02d}"
+            )
+        except Exception:
+            pass
 
     # クイック切替ボタン
     st.markdown("##### 📅 表示する対象月")
@@ -359,28 +399,24 @@ if mode == "📊 経営者ビュー":
     with qcol1:
         if st.button(f"前月\n({prev_month_year}/{prev_month_month})",
                      key="qb_prev", use_container_width=True):
-            st.session_state["target_year"] = prev_month_year
-            st.session_state["target_month"] = prev_month_month
+            _set_target_ym(prev_month_year, prev_month_month)
             st.rerun()
     with qcol2:
         if st.button(f"今月\n({today.year}/{today.month})",
                      key="qb_curr", use_container_width=True):
-            st.session_state["target_year"] = today.year
-            st.session_state["target_month"] = today.month
+            _set_target_ym(today.year, today.month)
             st.rerun()
     with qcol3:
         # 翌月ボタン（デフォルト＝強調表示）
         if st.button(f"📌 翌月\n({next_month_year}/{next_month_month})",
                      key="qb_next", type="primary", use_container_width=True,
                      help="通常はこちらを選択（提出締切は今月25日）"):
-            st.session_state["target_year"] = next_month_year
-            st.session_state["target_month"] = next_month_month
+            _set_target_ym(next_month_year, next_month_month)
             st.rerun()
     with qcol4:
         if st.button(f"翌々月\n({nn_year}/{nn_month})",
                      key="qb_nnext", use_container_width=True):
-            st.session_state["target_year"] = nn_year
-            st.session_state["target_month"] = nn_month
+            _set_target_ym(nn_year, nn_month)
             st.rerun()
 
     # 任意の年月を選択するための数値入力（折りたたみ式）
@@ -401,8 +437,7 @@ if mode == "📊 経営者ビュー":
                 )
             if (custom_year != st.session_state["target_year"]
                     or custom_month != st.session_state["target_month"]):
-                st.session_state["target_year"] = int(custom_year)
-                st.session_state["target_month"] = int(custom_month)
+                _set_target_ym(int(custom_year), int(custom_month))
                 st.rerun()
 
     # 確定した対象年月
@@ -666,11 +701,18 @@ if mode == "📊 経営者ビュー":
             # ========================================================
             # シフト生成（例外を必ずキャッチしてユーザーに表示する）
             # 生成前に target_year/month を保存（生成中のリセットに対する保険）
+            # URL にも書き込んで、セッションが切れても月情報が残るようにする
             # ========================================================
             _saved_target_year = int(target_year)
             _saved_target_month = int(target_month)
             st.session_state["target_year"] = _saved_target_year
             st.session_state["target_month"] = _saved_target_month
+            try:
+                st.query_params["ym"] = (
+                    f"{_saved_target_year:04d}-{_saved_target_month:02d}"
+                )
+            except Exception:
+                pass
 
             # ステップ進捗の状態表示エリア
             progress_area = st.empty()
@@ -863,6 +905,13 @@ if mode == "📊 経営者ビュー":
                 # 例外が発生してもターゲット月をリセットしない
                 st.session_state["target_year"] = _saved_target_year
                 st.session_state["target_month"] = _saved_target_month
+                # URL にも再度書き込み（セッションリセットに完全対応）
+                try:
+                    st.query_params["ym"] = (
+                        f"{_saved_target_year:04d}-{_saved_target_month:02d}"
+                    )
+                except Exception:
+                    pass
 
     with bcol2:
         # 確定版を読み込む
