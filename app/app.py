@@ -1150,9 +1150,15 @@ elif mode == "👤 従業員ビュー":
     from auth import get_logged_in_employee, is_employee, is_manager
     logged_in_emp = get_logged_in_employee()
 
+    # employee_names は後でボタンキー生成に使うので、ここで必ず定義しておく
+    employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+
     if is_employee() and logged_in_emp:
         # 従業員モード（マジックリンク経由）: 自分に固定
         selected = logged_in_emp
+        # ログイン中の従業員が在籍リストに含まれていない場合（退職など）の救済
+        if selected not in employee_names:
+            employee_names = employee_names + [selected]
         st.markdown(
             f'<div style="background:#dcfce7; padding:12px 16px; border-radius:8px; '
             f'border-left:4px solid #16a34a; margin-bottom:12px;">'
@@ -1168,7 +1174,6 @@ elif mode == "👤 従業員ビュー":
             "💡 経営者として閲覧中です。実運用では従業員はマジックリンク経由で"
             "自動的に自分の画面が開きます。動作確認のため任意の従業員を選択できます。"
         )
-        employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
         selected = st.selectbox(
             "【プレビュー】従業員を選択",
             options=employee_names,
