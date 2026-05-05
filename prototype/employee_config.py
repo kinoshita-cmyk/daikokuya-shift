@@ -211,7 +211,11 @@ class EmployeeConfigManager:
                 with open(self.config_file, encoding="utf-8") as f:
                     data = json.load(f)
                 return [employee_from_dict(d) for d in data.get("employees", [])]
-            except (json.JSONDecodeError, OSError):
+            except Exception as e:
+                # config/employees.json は運用中に手動編集・GitHubアップロードされるため、
+                # 1箇所でも表記ゆれがあるとアプリ全体が起動不能になる。
+                # 読み込みに失敗した場合はデフォルト従業員マスタへ戻して画面を起動する。
+                print(f"[employee_config] config load failed; using defaults: {type(e).__name__}: {e}")
                 pass
         # デフォルトを返す
         return list(_default_employees.ALL_EMPLOYEES)
