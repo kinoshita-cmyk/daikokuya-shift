@@ -4,7 +4,7 @@
 employees.py のハードコード値を「初期値」として、JSON でオーバーライドする仕組み。
 
 操作可能な変更:
-- 雇用形態の変更（在籍 → パート、退職、休職など）
+- 雇用形態の変更（正社員 → パート、退職、休職など）
 - 新入社員の追加
 - 既存従業員のフィールド更新（年間目標日数・スキル・店舗適性など）
 - 完全削除（推奨せず、RETIRED 状態にする）
@@ -32,6 +32,13 @@ from .paths import CONFIG_DIR
 
 EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
+
+
+def _employment_status_from_value(value: str | None) -> EmploymentStatus:
+    """保存済みの旧表記も含めて雇用形態を復元する。"""
+    if value == "在籍":
+        return EmploymentStatus.ACTIVE
+    return EmploymentStatus(value or EmploymentStatus.ACTIVE.value)
 
 
 # ============================================================
@@ -83,7 +90,7 @@ def employee_from_dict(data: dict) -> Employee:
         affinities=affinities,
         annual_target_days=data.get("annual_target_days"),
         notes=data.get("notes", ""),
-        employment_status=EmploymentStatus(data.get("employment_status", "在籍")),
+        employment_status=_employment_status_from_value(data.get("employment_status")),
         hired_at=data.get("hired_at"),
         retired_at=data.get("retired_at"),
         status_changed_at=data.get("status_changed_at"),
@@ -185,7 +192,7 @@ class EmployeeConfigManager:
         for k, v in updates.items():
             if k == "employment_status":
                 if isinstance(v, str):
-                    v = EmploymentStatus(v)
+                    v = _employment_status_from_value(v)
                 # 退職処理の場合は退職日を記録
                 if v == EmploymentStatus.RETIRED and not all_emps[idx].retired_at:
                     all_emps[idx].retired_at = datetime.now().date().isoformat()

@@ -394,7 +394,10 @@ def _check_consecutive_off(
                             severity="ERROR",
                             category="3連休禁止",
                             day=third_day, employee=emp.name,
-                            message=f"{consec_off}連休（5/{off_block[0]}〜5/{off_block[-1]}）",
+                            message=(
+                                f"{consec_off}連休"
+                                f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
+                            ),
                         ))
                 consec_off = 0
 

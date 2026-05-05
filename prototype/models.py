@@ -69,7 +69,7 @@ class Role(str, Enum):
 
 class EmploymentStatus(str, Enum):
     """雇用形態（シフト稼働可否を決定）"""
-    ACTIVE = "在籍"           # 通常勤務（正社員・店長）。年間目標日数あり
+    ACTIVE = "正社員"         # 通常勤務（正社員・店長）。年間目標日数あり
     PART_TIME = "パート"      # パート・アルバイト。年間目標日数なし、限定的稼働
     ADVISOR = "顧問"          # 非常勤・緊急時のみ稼働
     AUXILIARY = "補助"        # 山本さんなどの特別枠。シフトに数えない補助要員
