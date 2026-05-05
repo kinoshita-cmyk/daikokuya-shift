@@ -1698,32 +1698,50 @@ if mode == "📊 経営者ビュー":
                     "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
-                st.caption(
-                    f"💡 例: 「{shift.month}/15 の大宮駅前店に田中さんを入れたい」"
-                    "「鈴木さんと黒澤さんの 20 日のシフトを入れ替えるとどうなる？」"
-                    "「板倉さんの月内出勤数を教えて」"
-                )
-
                 # チャットエンジン初期化（セッションに保持）
                 if "chat_engine" not in st.session_state or st.session_state.get("chat_shift_id") != id(shift):
                     st.session_state.chat_engine = ShiftChatEngine(shift, api_key=api_key)
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_messages = []
 
-                # 入力欄
-                # st.chat_input は画面最下部に固定され、タブ内では入力欄を見失いやすいため、
-                # AI対話タブの中で完結する通常フォームにする。
+                pending = len(st.session_state.chat_engine.pending_changes)
+                chat_toolbar_left, chat_toolbar_right = st.columns([3, 1])
+                with chat_toolbar_left:
+                    if pending:
+                        st.info(
+                            f"⏳ 仮変更が {pending} 件あります。"
+                            "「変更を確定して」と送ると本シフトに反映されます。"
+                        )
+                with chat_toolbar_right:
+                    if st.button("会話をクリア", key="chat_clear", width="stretch"):
+                        st.session_state.chat_messages = []
+                        st.rerun()
+
+                st.markdown("###### 会話")
+                chat_container = st.container(height=420, border=True)
+                with chat_container:
+                    if not st.session_state.chat_messages:
+                        with st.chat_message("assistant"):
+                            st.write(
+                                "シフト表を見ながら相談できます。"
+                                f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
+                                "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
+                            )
+                    for msg in st.session_state.chat_messages:
+                        with st.chat_message(msg["role"]):
+                            st.write(msg["content"])
+
                 with st.form(
                     f"chat_prompt_form_{shift.year}_{shift.month}",
                     clear_on_submit=True,
                 ):
                     prompt = st.text_area(
-                        "AIへの質問・指示",
+                        "メッセージ",
                         placeholder=(
-                            f"例: {shift.month}/15 の大宮駅前店に田中さんを入れたい\n"
-                            "例: 鈴木さんと黒澤さんの20日のシフトを入れ替えるとどうなる？"
+                            f"{shift.month}/15 の大宮に田中さんを入れたい\n"
+                            "鈴木さんと黒澤さんの20日を入れ替えるとどうなる？"
                         ),
-                        height=100,
+                        height=110,
                         key=f"chat_prompt_text_{shift.year}_{shift.month}",
                     )
                     send_prompt = st.form_submit_button(
@@ -1749,29 +1767,6 @@ if mode == "📊 経営者ビュー":
                                 )
                         st.session_state.chat_messages.append({"role": "assistant", "content": response})
                         st.rerun()
-
-                st.markdown("##### 対話履歴")
-                chat_container = st.container(height=350, border=True)
-                with chat_container:
-                    if not st.session_state.chat_messages:
-                        st.caption("上の入力欄から質問・指示してください")
-                    for msg in st.session_state.chat_messages:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
-
-                # 操作ボタン
-                col_x, col_y = st.columns([1, 3])
-                with col_x:
-                    if st.button("🗑 会話履歴をクリア", key="chat_clear"):
-                        st.session_state.chat_messages = []
-                        st.rerun()
-                with col_y:
-                    pending = len(st.session_state.chat_engine.pending_changes)
-                    if pending:
-                        st.info(
-                            f"⏳ 仮変更が {pending} 件あります。"
-                            "「変更を確定して」と AI に伝えると本シフトに反映されます。"
-                        )
                 # チャット中にシフトが書き換えられた場合、セッションのシフトも同期
                 if st.session_state.chat_engine.shift is not shift:
                     save_session_shift(st.session_state.chat_engine.shift)
