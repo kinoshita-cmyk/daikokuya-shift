@@ -141,7 +141,7 @@ class ShiftChatEngine:
         self,
         shift: MonthlyShift,
         api_key: Optional[str] = None,
-        model: str = "claude-sonnet-4-5",
+        model: str = "claude-opus-4-7",
     ):
         if not HAS_ANTHROPIC:
             raise ImportError("anthropic パッケージが必要です")
