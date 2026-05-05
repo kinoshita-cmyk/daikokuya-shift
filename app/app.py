@@ -946,6 +946,14 @@ if mode == "📊 経営者ビュー":
 
                 if shift is not None:
                     save_session_shift(shift)
+                    # 検証で使うために、実際に使った制約も保存
+                    st.session_state["last_validation_inputs"] = {
+                        "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
+                        "off_requests": dict(use_off_requests),
+                        "work_requests": list(use_work_requests),
+                        "prev_month": list(use_prev_month),
+                        "holiday_overrides": dict(use_holiday_overrides),
+                    }
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                     st.session_state[_gen_result_key] = {
@@ -1244,11 +1252,29 @@ if mode == "📊 経営者ビュー":
             st.session_state["excel_footer"] = footer_text
 
         with tab2:
+            # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
+            _vi = st.session_state.get("last_validation_inputs", {})
+            _vi_match = (
+                _vi.get("ym")
+                == f"{int(shift.year):04d}-{int(shift.month):02d}"
+            )
+            if _vi_match:
+                _v_work = _vi.get("work_requests", [])
+                _v_off = _vi.get("off_requests", {})
+                _v_prev = _vi.get("prev_month", [])
+                _v_holiday = _vi.get("holiday_overrides", {})
+            else:
+                # シフトの月と検証データの月が違う場合は何もチェックしない
+                # （= 5月のテストデータで6月のシフトを検証してエラー大量発生を防ぐ）
+                _v_work = []
+                _v_off = {}
+                _v_prev = []
+                _v_holiday = {}
             result = validate(
-                shift=shift, work_requests=WORK_REQUESTS,
-                off_requests=OFF_REQUESTS, prev_month=PREVIOUS_MONTH_CARRYOVER,
-                holiday_overrides=MAY_2026_HOLIDAY_OVERRIDES,
-                max_consec=5,
+                shift=shift, work_requests=_v_work,
+                off_requests=_v_off, prev_month=_v_prev,
+                holiday_overrides=_v_holiday,
+                max_consec=rule_cfg.parameters.get("max_consec_work", 5),
             )
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("エラー", result.error_count, delta_color="inverse")
@@ -1373,12 +1399,27 @@ if mode == "📊 経営者ビュー":
             # ============================================================
             # 上部: シフト表（コンパクト版）+ 検証結果サマリー
             # ============================================================
-            # まず検証を実行してエラー・警告を取得
+            # まず検証を実行してエラー・警告を取得（実際の生成時データを使用）
+            _cv_inputs = st.session_state.get("last_validation_inputs", {})
+            _cv_match = (
+                _cv_inputs.get("ym")
+                == f"{int(shift.year):04d}-{int(shift.month):02d}"
+            )
+            if _cv_match:
+                _cv_work = _cv_inputs.get("work_requests", [])
+                _cv_off = _cv_inputs.get("off_requests", {})
+                _cv_prev = _cv_inputs.get("prev_month", [])
+                _cv_holiday = _cv_inputs.get("holiday_overrides", {})
+            else:
+                _cv_work = []
+                _cv_off = {}
+                _cv_prev = []
+                _cv_holiday = {}
             chat_result = validate(
-                shift=shift, work_requests=WORK_REQUESTS,
-                off_requests=OFF_REQUESTS, prev_month=PREVIOUS_MONTH_CARRYOVER,
-                holiday_overrides=MAY_2026_HOLIDAY_OVERRIDES,
-                max_consec=5,
+                shift=shift, work_requests=_cv_work,
+                off_requests=_cv_off, prev_month=_cv_prev,
+                holiday_overrides=_cv_holiday,
+                max_consec=rule_cfg.parameters.get("max_consec_work", 5),
             )
 
             # サマリー行（コンパクト表示）
