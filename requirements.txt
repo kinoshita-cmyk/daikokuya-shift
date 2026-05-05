@@ -8,3 +8,4 @@ anthropic==0.97.0
 reportlab==4.4.6
 pandas==2.3.3
 numpy==2.0.2
+requests>=2.31

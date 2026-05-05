@@ -204,13 +204,13 @@ AI機能（自然言語解析・対話）を使うために必要です。
 
    ```toml
    # Claude API キー（AI対話・自然言語解析用）
-   ANTHROPIC_API_KEY = "sk-ant-あなたのAPIキー"
+   ANTHROPIC_API_KEY = ""
 
    # 経営者用パスワード（経営陣・代表のみに共有）
-   MANAGER_PASSWORD = "ここに経営者パスワード"
+   MANAGER_PASSWORD = "tuiteru7304"
 
    # マジックリンク用の秘密の塩（外部に絶対漏らさない）
-   MAGIC_LINK_SALT = "daikokuya-secret-salt-2026-長い文字列"
+   MAGIC_LINK_SALT = "daikokuya-secret-salt-2026-chtrust16291629Ch"
    ```
 
    #### パスワードと塩の決め方（推奨）
@@ -240,6 +240,65 @@ AI機能（自然言語解析・対話）を使うために必要です。
 6. LINE で各従業員に**個別に**送信
 
 → 従業員はLINEで届いたURLをタップするだけで、自分専用の希望提出画面が開きます。
+
+### 4-5. GitHub 自動バックアップを設定（強く推奨）
+
+⚠ **重要**: Streamlit Cloud の保存領域は**コード更新時にリセット**されるため、GitHub への自動バックアップを設定することを強く推奨します。設定後は、従業員が希望を提出するたびに自動的に GitHub にデータが保存され、データ消失リスクがほぼゼロになります。
+
+#### ① バックアップ用リポジトリを作成（プライベート）
+
+1. https://github.com/new を開く
+2. 以下を入力：
+   - **Repository name**: `daikokuya-shift-data`
+   - **Description**: （任意）「シフト管理データのバックアップ」
+   - **Public/Private**: **必ず Private を選択！**（従業員データが入るため）
+   - 他はデフォルトのまま
+3. 「**Create repository**」をクリック
+
+#### ② Personal Access Token (PAT) を作成
+
+1. https://github.com/settings/tokens?type=beta を開く
+   - これは **Fine-grained tokens** の作成ページ（推奨・より安全）
+2. 「**Generate new token**」をクリック
+3. 以下を設定：
+   - **Token name**: `Daikokuya Shift Backup`
+   - **Expiration**: 1 year（または 365 days）
+   - **Resource owner**: 自分のアカウント（kinoshita-cmyk）
+4. **Repository access** で：
+   - **「Only select repositories」** を選択
+   - 「Select repositories」のドロップダウンから **`daikokuya-shift-data`** を選択
+5. **Permissions** セクション：
+   - **Repository permissions** を展開
+   - **Contents** を **「Read and write」** に変更
+   - 他はそのままでOK
+6. ページ最下部の「**Generate token**」をクリック
+7. **表示されたトークン**（`github_pat_...` で始まる長い文字列）を**必ずコピー**
+   - ⚠ この画面を閉じると二度と見られません
+   - メモ帳などに一時保存してください
+
+#### ③ Streamlit Secrets にトークンを追加
+
+1. https://share.streamlit.io/ で自分のアプリを開く
+2. 右上「⋮」 → 「**Settings**」 → 「**Secrets**」
+3. 既存の Secrets に**追加**（既存のものは消さない）：
+
+   ```toml
+   GITHUB_TOKEN = "github_pat_あなたがコピーしたトークン"
+   GITHUB_BACKUP_REPO = "kinoshita-cmyk/daikokuya-shift-data"
+   ```
+
+4. 「**Save**」をクリック
+5. アプリが自動再起動（30秒〜1分）
+
+#### ④ 接続テスト
+
+1. アプリで経営者ログイン
+2. **「⚙️ 設定」 → 「💾 バックアップ」** タブを開く
+3. 上部に **「✅ GitHub 自動バックアップ 有効」** と表示されることを確認
+4. **「🔌 接続テスト」** ボタンをクリック
+5. 「✅ 接続OK！」と出れば設定完了
+
+これ以降、従業員が希望を提出するたびに、自動的に `daikokuya-shift-data` リポジトリにデータが保存されます。経営者は何もしなくて大丈夫です！
 
 ---
 
