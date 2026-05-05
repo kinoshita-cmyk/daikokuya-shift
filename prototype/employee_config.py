@@ -41,6 +41,57 @@ def _employment_status_from_value(value: str | None) -> EmploymentStatus:
     return EmploymentStatus(value or EmploymentStatus.ACTIVE.value)
 
 
+def _enum_from_value(enum_cls, value, default):
+    """Enum の name/value どちらで保存されていても復元する。"""
+    if value is None or value == "":
+        return default
+    if isinstance(value, enum_cls):
+        return value
+    value_str = str(value)
+    try:
+        return enum_cls(value_str)
+    except ValueError:
+        pass
+    try:
+        return enum_cls[value_str]
+    except KeyError:
+        return default
+
+
+def _skill_from_value(value: str | None) -> Skill:
+    """スキル欄の表記ゆれを吸収する。"""
+    aliases = {
+        "ECO": Skill.ECO,
+        "ECO_SUPPORT": Skill.ECO_SUPPORT,
+        "TICKET": Skill.TICKET,
+        "エコ": Skill.ECO,
+        "エコサポート": Skill.ECO_SUPPORT,
+        "チケット": Skill.TICKET,
+    }
+    if value in aliases:
+        return aliases[value]
+    return _enum_from_value(Skill, value, Skill.TICKET)
+
+
+def _store_from_value(value: str | None) -> Optional[Store]:
+    """ホーム店舗の name/value/display_name 表記を吸収する。"""
+    if not value:
+        return None
+    value_str = str(value)
+    try:
+        return Store[value_str]
+    except KeyError:
+        pass
+    try:
+        return Store(value_str)
+    except ValueError:
+        pass
+    for store in Store:
+        if store.display_name == value_str:
+            return store
+    return None
+
+
 # ============================================================
 # シリアライズ・デシリアライズ
 # ============================================================
@@ -82,11 +133,12 @@ def employee_from_dict(data: dict) -> Employee:
         name=data["name"],
         full_name=data.get("full_name"),
         employee_id=data.get("employee_id"),
-        role=Role(data["role"]) if data.get("role") else Role.STAFF,
-        skill=Skill(data["skill"]) if data.get("skill") else Skill.TICKET,
-        home_store=Store[data["home_store"]] if data.get("home_store") else None,
-        station_type=StationType(data["station_type"]) if data.get("station_type")
-                     else StationType.FLEXIBLE,
+        role=_enum_from_value(Role, data.get("role"), Role.STAFF),
+        skill=_skill_from_value(data.get("skill")),
+        home_store=_store_from_value(data.get("home_store")),
+        station_type=_enum_from_value(
+            StationType, data.get("station_type"), StationType.FLEXIBLE,
+        ),
         affinities=affinities,
         annual_target_days=data.get("annual_target_days"),
         notes=data.get("notes", ""),
