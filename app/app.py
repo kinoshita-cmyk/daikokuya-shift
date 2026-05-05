@@ -300,6 +300,34 @@ def render_short_staff_marks(stores: set[Store]) -> str:
     return "".join(chips)
 
 
+def render_shift_legend() -> None:
+    """店舗記号の凡例を、色付き記号と文字記号の形を揃えて表示する。"""
+    items = [
+        ("○", "赤羽駅前店", "#f59e0b"),
+        ("□", "赤羽東口店", "#2563eb"),
+        ("△", "大宮駅前店", "#16a34a"),
+        ("☆", "大宮西口店", "#db2777"),
+        ("◆", "大宮すずらん通り店", "#4f46e5"),
+        ("×", "休み", "#64748b"),
+    ]
+    html = (
+        '<div style="display:flex; flex-wrap:wrap; gap:10px 14px; '
+        'align-items:center; margin:4px 0 12px 0;">'
+        '<strong style="margin-right:2px;">凡例</strong>'
+    )
+    for mark, label, color in items:
+        html += (
+            '<span style="display:inline-flex; align-items:center; gap:5px; '
+            'white-space:nowrap; font-size:14px;">'
+            f'<span style="color:{color}; font-size:20px; font-weight:900; '
+            f'line-height:1;">{mark}</span>'
+            f'<span>{mark} = {label}</span>'
+            '</span>'
+        )
+    html += '</div>'
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def render_shift_table(
     shift: MonthlyShift,
     short_staff_days: Optional[set[int]] = None,
@@ -1383,12 +1411,7 @@ if mode == "📊 経営者ビュー":
 
             st.markdown("---")
 
-            # 凡例
-            st.markdown(
-                "**凡例**　"
-                "🟡 〇 = 赤羽駅前店　🔵 □ = 赤羽東口店　🟢 △ = 大宮駅前店　"
-                "🟣 ☆ = 大宮西口店　🔷 ◆ = 大宮すずらん通り店　⚪ × = 休み"
-            )
+            render_shift_legend()
 
             # 人員不足日を計算
             short_staff_by_store = detect_short_staff_by_store(shift)
@@ -1675,12 +1698,7 @@ if mode == "📊 経営者ビュー":
 
             st.markdown("##### 📋 現在のシフト表")
 
-            # 凡例
-            st.markdown(
-                "**凡例**　"
-                "🟡 〇 = 赤羽駅前店　🔵 □ = 赤羽東口店　🟢 △ = 大宮駅前店　"
-                "🟣 ☆ = 大宮西口店　🔷 ◆ = 大宮すずらん通り店　⚪ × = 休み"
-            )
+            render_shift_legend()
             render_shift_table(
                 shift,
                 short_staff_by_store=short_staff_by_store_chat,
