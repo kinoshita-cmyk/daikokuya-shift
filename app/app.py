@@ -645,9 +645,15 @@ if mode == "📊 経営者ビュー":
                     int(target_year), int(target_month), expected_employees,
                 )
 
+                # 5月2026年（テストデータ用）かどうかで分岐
+                is_test_may_2026 = (
+                    int(target_year) == 2026 and int(target_month) == 5
+                    and sub_data.submission_count == 0
+                )
+
                 # 提出があればそれを使い、なければテストデータにフォールバック
                 if sub_data.submission_count > 0:
-                    # 実データで生成
+                    # 実データで生成（任意の月で動く）
                     use_off_requests = sub_data.off_requests
                     use_work_requests = sub_data.work_requests
                     use_flexible_off = sub_data.flexible_off
@@ -665,6 +671,9 @@ if mode == "📊 経営者ビュー":
                                 use_holiday_overrides[emp_name] = base_holidays + paid_days
                         except Exception:
                             pass
+                    # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
+                    use_prev_month = []
+                    use_consec_exceptions = []
                     data_source_msg = (
                         f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                     )
@@ -675,14 +684,27 @@ if mode == "📊 経営者ビュー":
                             f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
                             "は希望未指定として自由配置）"
                         )
-                else:
-                    # テストデータ使用
+                elif is_test_may_2026:
+                    # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                     use_off_requests = OFF_REQUESTS
                     use_work_requests = WORK_REQUESTS
                     use_flexible_off = FLEXIBLE_OFF_REQUESTS
                     use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                    use_prev_month = PREVIOUS_MONTH_CARRYOVER
+                    use_consec_exceptions = ["野澤"]
                     data_source_msg = (
-                        "💡 提出データがないため、サンプルテストデータで生成しました。"
+                        "💡 提出データがないため、2026年5月のサンプルテストデータで生成しました。"
+                    )
+                else:
+                    # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
+                    use_off_requests = {}
+                    use_work_requests = []
+                    use_flexible_off = []
+                    use_holiday_overrides = {}
+                    use_prev_month = []
+                    use_consec_exceptions = []
+                    data_source_msg = (
+                        f"💡 提出データがないため、希望なしで {int(target_year)}年{int(target_month)}月のシフトを生成しました。"
                         "本番では従業員から希望が届いた後に生成してください。"
                     )
 
@@ -692,11 +714,11 @@ if mode == "📊 経営者ビュー":
                     month=target_month,
                     off_requests=use_off_requests,
                     work_requests=use_work_requests,
-                    prev_month=PREVIOUS_MONTH_CARRYOVER,
+                    prev_month=use_prev_month,
                     flexible_off=use_flexible_off,
                     holiday_overrides=use_holiday_overrides,
                     operation_modes=modes,
-                    consec_exceptions=["野澤"] if not sub_data.submission_count else [],
+                    consec_exceptions=use_consec_exceptions,
                     max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
                     time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 120),
                     random_seed=rule_cfg.parameters.get("solver_seed", 42),
@@ -706,11 +728,33 @@ if mode == "📊 経営者ビュー":
                     save_session_shift(shift)
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                 else:
-                    st.error(
-                        "❌ シフト生成に失敗しました。"
-                        "提出データが矛盾している可能性があります。"
-                        "「✅ 検証結果」タブのエラーを確認するか、希望データを見直してください。"
-                    )
+                    # 失敗時の詳細診断
+                    diag_lines = [
+                        "❌ **シフト生成に失敗しました**",
+                        "",
+                        "以下の原因が考えられます：",
+                    ]
+                    # 提出データが矛盾している可能性
+                    if sub_data.submission_count > 0:
+                        # 各従業員の×日数をチェック
+                        from calendar import monthrange
+                        days_in_m = monthrange(int(target_year), int(target_month))[1]
+                        for emp_name, off_days in use_off_requests.items():
+                            if len(off_days) > days_in_m - 5:
+                                diag_lines.append(
+                                    f"- ⚠ **{emp_name}** の休み希望が {len(off_days)}日と多すぎる可能性"
+                                )
+                    diag_lines.extend([
+                        "",
+                        "**対処方法：**",
+                        "1. 「⚙️ 設定 → 🏖 有給使用状況」で各従業員の希望休日を確認",
+                        "2. 矛盾する希望（例：×が多すぎる）があれば該当従業員に再提出を依頼",
+                        "3. 制約が厳しすぎる場合は「⚙️ 設定 → 🔧 ルール設定」で",
+                        "   「最大連勤日数」を増やす、「既定の月内最低休日数」を減らすなど調整",
+                        "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
+                        "5. それでも解決しない場合、技術者にお問い合わせください",
+                    ])
+                    st.error("\n".join(diag_lines))
 
     with bcol2:
         # 確定版を読み込む
@@ -1529,12 +1573,70 @@ elif mode == "👤 従業員ビュー":
         help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
     )
 
-    if paid_leave_days > 0 and base_holidays is not None:
+    # 現在の入力状況を集計
+    x_count = sum(1 for m in prefs.values() if m == "×")
+    triangle_count = sum(1 for m in prefs.values() if m == "△")
+    ok_count = sum(1 for m in prefs.values() if m == "○")
+
+    if base_holidays is not None:
+        # 「希望休日合計」のリアルタイム表示
         total_holidays = base_holidays + paid_leave_days
-        st.info(
-            f"📝 希望休日合計: **{total_holidays}日**"
-            f"（基準{base_holidays}日 + 有給{paid_leave_days}日）"
-        )
+
+        # ケース1: 有給入力済み → 補足情報表示
+        if paid_leave_days > 0:
+            st.info(
+                f"📝 希望休日合計: **{total_holidays}日**"
+                f"（基準{base_holidays}日 + 有給{paid_leave_days}日）"
+            )
+
+        # ケース2: ×日数 > 基準休日数 + 有給日数 → 警告（有給忘れの可能性）
+        if x_count > total_holidays:
+            shortage = x_count - total_holidays
+            if paid_leave_days == 0:
+                # 有給日数を全く入力していない
+                st.warning(
+                    f"⚠ **有給日数の入力をお忘れではありませんか？**\n\n"
+                    f"現在の状況:\n"
+                    f"- ×（休み希望）: **{x_count}日**\n"
+                    f"- 今月の基準休日数: **{base_holidays}日**\n"
+                    f"- 希望有給日数: **0日**\n\n"
+                    f"基準より **{shortage}日多く** 休みを希望されています。"
+                    f"基準を超える分は有給で消化する必要があるため、"
+                    f"上の **「希望有給日数」** に **{shortage}** を入力してください。\n\n"
+                    f"💡 もし基準より多く休みたいわけでなければ、× の数を{base_holidays}日に減らしてください。"
+                )
+            else:
+                # 有給は入れているが、まだ足りない
+                st.warning(
+                    f"⚠ **有給日数が不足しています**\n\n"
+                    f"現在の状況:\n"
+                    f"- ×（休み希望）: **{x_count}日**\n"
+                    f"- 今月の基準休日数: **{base_holidays}日**\n"
+                    f"- 希望有給日数: **{paid_leave_days}日**\n"
+                    f"- 合計許容休日: **{total_holidays}日**\n\n"
+                    f"× の数（{x_count}日）が、基準＋有給（{total_holidays}日）を**{shortage}日超えています**。\n"
+                    f"以下のいずれかをご検討ください：\n"
+                    f"- 上の「希望有給日数」を **{paid_leave_days + shortage}** に増やす\n"
+                    f"- × の数を{total_holidays}日に減らす"
+                )
+
+        # ケース3: ×日数 < 基準休日数（基準より働きたい）
+        elif x_count < base_holidays and paid_leave_days == 0 and x_count > 0:
+            st.caption(
+                f"📊 現在 ×（休み希望）{x_count}日 / 基準休日{base_holidays}日。"
+                f"基準内に収まっています。"
+            )
+
+        # ケース4: ×日数 > 基準＋有給 ではないが、有給だけ入れている（過剰申請）
+        elif paid_leave_days > 0 and x_count <= base_holidays:
+            st.warning(
+                f"⚠ **有給日数が多すぎる可能性があります**\n\n"
+                f"× で休み希望にしている日（{x_count}日）が "
+                f"基準休日数（{base_holidays}日）以下です。\n"
+                f"有給を申請する必要は通常ありません（基準内なら有給を使わずに休めます）。\n\n"
+                f"もし{base_holidays + paid_leave_days}日休みたいのであれば、"
+                f"× の数を{base_holidays + paid_leave_days}日に増やしてください。"
+            )
 
     st.markdown("---")
     st.subheader("自由記述（任意）")
