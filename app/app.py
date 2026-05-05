@@ -14,7 +14,6 @@
 
 import sys
 import os
-import html
 from pathlib import Path
 from typing import Optional
 
@@ -246,9 +245,21 @@ def render_shift_table(
         short_staff_days = detect_short_staff_days(shift)
 
     # ヘッダー
-    html = '<div style="overflow-x:auto;"><table style="border-collapse:collapse; font-family:sans-serif; font-size:14px;">'
-    html += '<thead><tr style="background:#1e3a8a; color:white;">'
-    html += '<th style="padding:8px; border:1px solid #999;">日</th>'
+    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
+    html = (
+        '<div style="overflow-x:auto;">'
+        '<table style="border-collapse:collapse; font-family:sans-serif; '
+        'font-size:14px;">'
+    )
+    html += '<thead>'
+    html += (
+        f'<tr style="background:#0f172a; color:white;">'
+        f'<th colspan="{column_count}" style="padding:10px 12px; '
+        f'border:1px solid #999; text-align:left; font-size:16px;">'
+        f'{int(shift.year)}年{int(shift.month)}月 シフト表</th></tr>'
+    )
+    html += '<tr style="background:#1e3a8a; color:white;">'
+    html += '<th style="padding:8px; border:1px solid #999;">月日</th>'
     html += '<th style="padding:8px; border:1px solid #999;">曜</th>'
     for name in EXPORT_COLUMN_ORDER:
         html += f'<th style="padding:8px; border:1px solid #999;">{name}</th>'
@@ -266,7 +277,8 @@ def render_shift_table(
     }
 
     for d in range(1, days_in_month + 1):
-        wd = weekday_jp[date(shift.year, shift.month, d).weekday()]
+        current_date = date(shift.year, shift.month, d)
+        wd = weekday_jp[current_date.weekday()]
         # 人員不足日は背景強調
         is_short = d in short_staff_days
         if is_short:
@@ -274,7 +286,10 @@ def render_shift_table(
         else:
             bg = "#fee2e2" if wd == "日" else ("#dbeafe" if wd == "土" else "white")
         html += f'<tr style="background:{bg};">'
-        html += f'<td style="padding:6px; border:1px solid #ccc; text-align:center; font-weight:bold;">{d}</td>'
+        html += (
+            f'<td style="padding:6px; border:1px solid #ccc; '
+            f'text-align:center; font-weight:bold;">{int(shift.month)}/{d}</td>'
+        )
         html += f'<td style="padding:6px; border:1px solid #ccc; text-align:center;">{wd}</td>'
 
         # 各従業員
@@ -350,8 +365,8 @@ if mode == "📊 経営者ビュー":
 
     # ============================================================
     # 対象年月の同期
-    # 月切替は ?ym=YYYY-MM のリンクで行う。Streamlit Cloud で
-    # session_state が切れても、URL の月を正として復元できる。
+    # 月切替はページ遷移させず、Streamlit の session_state だけを更新する。
+    # これにより、月ボタンを押してもログイン状態を保ったまま操作できる。
     # ============================================================
     def _parse_ym(value) -> Optional[tuple[int, int]]:
         """YYYY-MM 形式を安全にパースする。"""
@@ -366,64 +381,83 @@ if mode == "📊 経営者ビュー":
             pass
         return None
 
-    def _ym_url(y: int, m: int) -> str:
-        """同じページで対象年月だけを切り替えるURL。"""
-        return f"?ym={int(y):04d}-{int(m):02d}"
-
     def _is_selected_ym(y: int, m: int) -> bool:
         return (
             int(st.session_state.get("target_year", 0)) == int(y)
             and int(st.session_state.get("target_month", 0)) == int(m)
         )
 
-    def _render_ym_link(label: str, y: int, m: int, help_text: str = "") -> None:
-        """同じタブで対象年月へ移動するボタン風リンク。"""
-        selected = _is_selected_ym(y, m)
-        bg = "#2563eb" if selected else "#ffffff"
-        fg = "#ffffff" if selected else "#1e293b"
-        border = "#2563eb" if selected else "#d0d7de"
-        title_attr = f' title="{html.escape(help_text)}"' if help_text else ""
-        text = html.escape(label).replace("\n", "<br>")
-        st.markdown(
-            f'<a href="{_ym_url(y, m)}" target="_self"{title_attr} '
-            f'style="display:block; width:100%; min-height:54px; padding:8px 10px; '
-            f'border:1px solid {border}; border-radius:6px; background:{bg}; '
-            f'color:{fg}; text-align:center; text-decoration:none; font-weight:700; '
-            f'line-height:1.45; box-sizing:border-box;">{text}</a>',
-            unsafe_allow_html=True,
+    def _select_target_ym(y: int, m: int) -> None:
+        """対象年月をセッション内で切り替える。"""
+        st.session_state["target_year"] = int(y)
+        st.session_state["target_month"] = int(m)
+        # 任意年月の入力欄も、最後に選択した年月へ揃えておく
+        st.session_state["custom_year_input"] = int(y)
+        st.session_state["custom_month_input"] = int(m)
+
+    def _button_type_for_ym(y: int, m: int) -> str:
+        return "primary" if _is_selected_ym(y, m) else "secondary"
+
+    def _apply_custom_target_ym() -> None:
+        _select_target_ym(
+            int(st.session_state.get("custom_year_input", next_month_year)),
+            int(st.session_state.get("custom_month_input", next_month_month)),
         )
 
-    # URL から ym を読み取り、session_state を初期化
-    _url_ym = None
-    try:
-        _url_ym = _parse_ym(st.query_params.get("ym"))
-    except Exception:
+    # URL の ym は初回表示時だけ採用する。以後はボタン操作を優先する。
+    if "target_year" not in st.session_state or "target_month" not in st.session_state:
         _url_ym = None
+        try:
+            _url_ym = _parse_ym(st.query_params.get("ym"))
+        except Exception:
+            _url_ym = None
 
-    if _url_ym is not None:
-        st.session_state["target_year"] = _url_ym[0]
-        st.session_state["target_month"] = _url_ym[1]
-    elif "target_year" not in st.session_state or "target_month" not in st.session_state:
-        st.session_state["target_year"] = next_month_year
-        st.session_state["target_month"] = next_month_month
+        if _url_ym is not None:
+            _select_target_ym(_url_ym[0], _url_ym[1])
+        else:
+            _select_target_ym(next_month_year, next_month_month)
 
     # クイック切替ボタン
     st.markdown("##### 📅 表示する対象月")
     qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns([1, 1, 1, 1, 3])
     with qcol1:
-        _render_ym_link(f"前月\n({prev_month_year}/{prev_month_month})", prev_month_year, prev_month_month)
+        st.button(
+            f"前月\n({prev_month_year}/{prev_month_month})",
+            key="target_prev_month",
+            type=_button_type_for_ym(prev_month_year, prev_month_month),
+            width="stretch",
+            on_click=_select_target_ym,
+            args=(prev_month_year, prev_month_month),
+        )
     with qcol2:
-        _render_ym_link(f"今月\n({today.year}/{today.month})", today.year, today.month)
+        st.button(
+            f"今月\n({today.year}/{today.month})",
+            key="target_this_month",
+            type=_button_type_for_ym(today.year, today.month),
+            width="stretch",
+            on_click=_select_target_ym,
+            args=(today.year, today.month),
+        )
     with qcol3:
         # 翌月ボタン（デフォルト＝強調表示）
-        _render_ym_link(
+        st.button(
             f"📌 翌月\n({next_month_year}/{next_month_month})",
-            next_month_year,
-            next_month_month,
-            help_text="通常はこちらを選択（提出締切は今月25日）",
+            key="target_next_month",
+            type=_button_type_for_ym(next_month_year, next_month_month),
+            width="stretch",
+            help="通常はこちらを選択（提出締切は今月25日）",
+            on_click=_select_target_ym,
+            args=(next_month_year, next_month_month),
         )
     with qcol4:
-        _render_ym_link(f"翌々月\n({nn_year}/{nn_month})", nn_year, nn_month)
+        st.button(
+            f"翌々月\n({nn_year}/{nn_month})",
+            key="target_month_after_next",
+            type=_button_type_for_ym(nn_year, nn_month),
+            width="stretch",
+            on_click=_select_target_ym,
+            args=(nn_year, nn_month),
+        )
 
     # 任意の年月を選択するための数値入力（折りたたみ式）
     with qcol5:
@@ -432,16 +466,20 @@ if mode == "📊 経営者ビュー":
             with ec1:
                 custom_year = st.number_input(
                     "年", min_value=2024, max_value=2030,
-                    value=st.session_state["target_year"],
                     key="custom_year_input",
                 )
             with ec2:
                 custom_month = st.number_input(
                     "月", min_value=1, max_value=12,
-                    value=st.session_state["target_month"],
                     key="custom_month_input",
                 )
-            _render_ym_link("この年月を表示", int(custom_year), int(custom_month))
+            st.button(
+                "この年月を表示",
+                key="target_custom_month",
+                type=_button_type_for_ym(int(custom_year), int(custom_month)),
+                width="stretch",
+                on_click=_apply_custom_target_ym,
+            )
 
     # 確定した対象年月
     target_year = st.session_state["target_year"]
@@ -495,41 +533,6 @@ if mode == "📊 経営者ビュー":
         f'<span style="font-size:16px; font-weight:bold;">'
         f'🎯 表示中: <strong style="color:#1e3a8a;">{target_year}年{target_month}月</strong>'
         f'</span>　{deadline_msg}'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    # ============================================================
-    # 🔧 強制可視化デバッグバー（不一致を即座に検出）
-    # session_state の target_year-target_month と表示中シフトの
-    # year-month が一致しているか確認する。
-    # ============================================================
-    try:
-        _dbg_url = st.query_params.get("ym") or "(なし)"
-    except Exception:
-        _dbg_url = "(取得失敗)"
-    _dbg_sess_y = st.session_state.get("target_year")
-    _dbg_sess_m = st.session_state.get("target_month")
-    _dbg_sess_ym = (
-        f"{int(_dbg_sess_y):04d}-{int(_dbg_sess_m):02d}"
-        if _dbg_sess_y and _dbg_sess_m else "(なし)"
-    )
-    _dbg_shift = st.session_state.get("current_shift")
-    _dbg_shift_ym = (
-        f"{int(_dbg_shift.year):04d}-{int(_dbg_shift.month):02d}"
-        if _dbg_shift else "(未生成)"
-    )
-    _dbg_all_ok = (_dbg_shift is None or _dbg_shift_ym == _dbg_sess_ym)
-    _dbg_color = "#dcfce7" if _dbg_all_ok else "#fee2e2"
-    _dbg_border = "#16a34a" if _dbg_all_ok else "#dc2626"
-    _dbg_icon = "✅" if _dbg_all_ok else "⚠"
-    st.markdown(
-        f'<div style="background:{_dbg_color}; padding:6px 10px; border-radius:4px; '
-        f'margin:4px 0; border-left:3px solid {_dbg_border}; font-size:12px; '
-        f'font-family:monospace;">'
-        f'{_dbg_icon} URL ym=<strong>{_dbg_url}</strong> '
-        f'/ session=<strong>{_dbg_sess_ym}</strong> '
-        f'/ 表示中シフト=<strong>{_dbg_shift_ym}</strong>'
         f'</div>',
         unsafe_allow_html=True,
     )
