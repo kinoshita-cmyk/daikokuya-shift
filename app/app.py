@@ -140,6 +140,25 @@ mode = st.sidebar.radio(
 st.sidebar.markdown("---")
 # ログアウトボタン
 render_logout_button()
+
+# 経営者向け: 提出データ件数の表示（バックアップ意識喚起）
+if is_manager():
+    try:
+        from prototype.data_export import get_all_data_summary as _ds
+        _data = _ds()
+        if _data["submissions_total"] > 0:
+            st.sidebar.markdown(
+                f'<div style="background:#fef3c7; padding:8px 10px; '
+                f'border-radius:6px; border-left:3px solid #f59e0b; '
+                f'font-size:12px; margin:8px 0;">'
+                f'💾 提出データ <strong>{_data["submissions_total"]}件</strong> 保存中<br>'
+                f'<span style="color:#78350f;">「⚙️ 設定 → 💾 バックアップ」から定期DL推奨</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+    except Exception:
+        pass
+
 st.sidebar.markdown("---")
 st.sidebar.caption("v0.1 プロトタイプ")
 st.sidebar.caption(f"今日: {date.today()}")
@@ -487,6 +506,7 @@ if mode == "📊 経営者ビュー":
             f'</div>'
             f'<div style="font-size:13px; color:#166534; margin-top:4px;">'
             f'シフト生成の準備が整いました。'
+            f'<br>💾 <strong>「⚙️ 設定」→「💾 バックアップ」</strong>から、提出データをダウンロードしてPCに保存することをお勧めします。'
             f'</div></div>',
             unsafe_allow_html=True,
         )
@@ -1186,9 +1206,97 @@ elif mode == "👤 従業員ビュー":
         )
         st.stop()
 
-    target_year = 2026
-    target_month = 6  # 翌月の希望
+    # ============================================================
+    # 対象月の選択（テスト目的でも本番でも使える月選択）
+    # ============================================================
+    today = date.today()
+    # 翌月計算
+    if today.month == 12:
+        next_year, next_month = today.year + 1, 1
+    else:
+        next_year, next_month = today.year, today.month + 1
+    # 翌々月
+    if next_month == 12:
+        nn_year, nn_month = next_year + 1, 1
+    else:
+        nn_year, nn_month = next_year, next_month + 1
+    # 前月
+    if today.month == 1:
+        prev_year, prev_month = today.year - 1, 12
+    else:
+        prev_year, prev_month = today.year, today.month - 1
+    # 前々月
+    if prev_month == 1:
+        pp_year, pp_month = prev_year - 1, 12
+    else:
+        pp_year, pp_month = prev_year, prev_month - 1
+
+    # セッションに対象月を保存
+    if "emp_target_year" not in st.session_state:
+        st.session_state["emp_target_year"] = next_year
+    if "emp_target_month" not in st.session_state:
+        st.session_state["emp_target_month"] = next_month
+
+    st.markdown("##### 📅 提出する対象月を選んでください")
+
+    # クイック選択ボタン
+    qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
+    with qb_col1:
+        if st.button(
+            f"前々月\n({pp_year}/{pp_month})",
+            key="emp_qb_pp",
+            use_container_width=True,
+            help="テスト用：過去月でも提出可能",
+        ):
+            st.session_state["emp_target_year"] = pp_year
+            st.session_state["emp_target_month"] = pp_month
+            st.rerun()
+    with qb_col2:
+        if st.button(
+            f"前月\n({prev_year}/{prev_month})",
+            key="emp_qb_prev",
+            use_container_width=True,
+            help="テスト用：過去月でも提出可能",
+        ):
+            st.session_state["emp_target_year"] = prev_year
+            st.session_state["emp_target_month"] = prev_month
+            st.rerun()
+    with qb_col3:
+        if st.button(
+            f"今月\n({today.year}/{today.month})",
+            key="emp_qb_curr",
+            use_container_width=True,
+        ):
+            st.session_state["emp_target_year"] = today.year
+            st.session_state["emp_target_month"] = today.month
+            st.rerun()
+    with qb_col4:
+        # 翌月（デフォルト・本番運用想定）
+        if st.button(
+            f"📌 翌月\n({next_year}/{next_month})",
+            key="emp_qb_next",
+            type="primary",
+            use_container_width=True,
+            help="通常はこちら（本番運用）",
+        ):
+            st.session_state["emp_target_year"] = next_year
+            st.session_state["emp_target_month"] = next_month
+            st.rerun()
+
+    target_year = st.session_state["emp_target_year"]
+    target_month = st.session_state["emp_target_month"]
     days_in_month = monthrange(target_year, target_month)[1]
+
+    # テスト月（過去・今月）の場合は注意表示
+    is_test_month = (
+        (target_year < today.year)
+        or (target_year == today.year and target_month <= today.month)
+    )
+    if is_test_month:
+        st.info(
+            f"💡 **テスト用の月（{target_year}年{target_month}月）を選択中**です。"
+            "本番運用時は「📌 翌月」を選んでください。"
+        )
 
     st.markdown(f"### {target_year}年{target_month}月の希望")
     st.write("各日の希望を **3つのボタンから1つ** 選んでください：")
@@ -1340,11 +1448,53 @@ elif mode == "👤 従業員ビュー":
                     prefs[d] = "△"
                     st.rerun()
 
+    # ============================================================
+    # 希望有給日数の入力（任意）
+    # ============================================================
+    st.markdown("---")
+    st.subheader("🏖 希望有給日数（任意）")
+
+    # 当該従業員の月間基準日数を取得
+    try:
+        from prototype.employees import get_employee as _get_emp
+        _emp_obj = _get_emp(selected)
+        annual_target = _emp_obj.annual_target_days
+    except Exception:
+        annual_target = None
+
+    if annual_target:
+        monthly_target = round(annual_target / 12)
+        base_holidays = days_in_month - monthly_target
+        st.caption(
+            f"💡 **{selected}さんの今月の基準**: 勤務 {monthly_target}日 / 休み {base_holidays}日"
+            f"（{target_year}年{target_month}月は{days_in_month}日間）\n\n"
+            f"基準より多く休みたい場合は、その差分（=有給で消化したい日数）を入力してください。"
+            f"例：休みを{base_holidays+1}日にしたい場合は「1」と入力。"
+        )
+    else:
+        monthly_target = None
+        base_holidays = None
+        st.caption(
+            f"💡 基準日数が設定されていない方は、希望有給日数を入力する必要はありません。"
+        )
+
+    paid_leave_days = st.number_input(
+        "希望有給日数（任意）",
+        min_value=0, max_value=31, value=0, step=1,
+        help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
+    )
+
+    if paid_leave_days > 0 and base_holidays is not None:
+        total_holidays = base_holidays + paid_leave_days
+        st.info(
+            f"📝 希望休日合計: **{total_holidays}日**"
+            f"（基準{base_holidays}日 + 有給{paid_leave_days}日）"
+        )
+
     st.markdown("---")
     st.subheader("自由記述（任意）")
     st.caption(
-        "💡 出勤店舗は会社側で決定するため、店舗の希望は不要です。"
-        "連勤の上限・特定日の事情など、考慮してほしい点を書いてください。"
+        "💡 連勤の上限・特定日の事情など、シフト作成時に考慮してほしい点があればご記入ください。"
     )
     free_text = st.text_area(
         "自然言語で希望を書いてください",
@@ -1355,20 +1505,58 @@ elif mode == "👤 従業員ビュー":
         height=120,
     )
 
-    if st.button("📤 提出する", type="primary", use_container_width=True):
+    if st.button(
+        f"📤 {target_year}年{target_month}月分 を提出する",
+        type="primary",
+        use_container_width=True,
+    ):
         # 入力内容を保存
         backup = ShiftBackup()
         off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
         flexible_days = [d for d, m in prefs.items() if m == "△"]
-        backup.save_preferences(
+        # 有給日数とコメントを備考の構造化データに含める
+        natural_language_notes = {selected: free_text}
+        # 拡張データ（有給など）も保存
+        save_path = backup.save_preferences(
             year=target_year, month=target_month,
             off_requests=off_requests,
             work_requests=[],
             flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
-            natural_language_notes={selected: free_text},
+            natural_language_notes=natural_language_notes,
             author=selected,
         )
-        st.success("✅ 希望を受け付けました！")
+        # 有給日数を別ファイルとして追記保存（既存のJSONを編集して有給フィールド追加）
+        try:
+            import json
+            with open(save_path, encoding="utf-8") as f:
+                _data = json.load(f)
+            _data["paid_leave_days"] = int(paid_leave_days)
+            _data["monthly_target_workdays"] = monthly_target
+            _data["base_holidays"] = base_holidays
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        # GitHub にも自動バックアップ（設定されていれば）
+        try:
+            from prototype.github_backup import push_preference_to_github
+            push_preference_to_github(
+                save_path, employee_name=selected,
+                year=target_year, month=target_month,
+            )
+        except Exception:
+            pass
+
+        # 集計サマリー
+        x_count = sum(1 for m in prefs.values() if m == "×")
+        triangle_count = sum(1 for m in prefs.values() if m == "△")
+        ok_count = sum(1 for m in prefs.values() if m == "○")
+        leave_msg = f" / 🏖 希望有給 {paid_leave_days}日" if paid_leave_days > 0 else ""
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました！\n\n"
+            f"📊 入力内容: ○ 出勤可能 {ok_count}日 / × 休み希望 {x_count}日 / △ できれば休み {triangle_count}日{leave_msg}"
+        )
         st.balloons()
 
 
@@ -1406,12 +1594,124 @@ elif mode == "⚙️ 設定":
     (
         setting_tab_links,
         setting_tab1, setting_tab2,
-        setting_tab3, setting_tab4, setting_tab5,
+        setting_tab3, setting_tab_leave, setting_tab4, setting_tab5,
     ) = st.tabs([
         "🔗 マジックリンク",
         "🔧 ルール設定", "📜 ルール変更履歴",
-        "👥 従業員マスタ", "🔑 APIキー", "💾 バックアップ",
+        "👥 従業員マスタ", "🏖 有給使用状況", "🔑 APIキー", "💾 バックアップ",
     ])
+
+    # ============================================================
+    # タブ: 有給使用状況（経営者専用）
+    # ============================================================
+    with setting_tab_leave:
+        st.markdown("### 🏖 有給使用状況（経営者のみ閲覧可能）")
+        st.caption(
+            "従業員から提出された希望有給日数の集計です。"
+            "提出データの `paid_leave_days` フィールドから自動集計しています。"
+        )
+
+        import json as _json
+        from collections import defaultdict
+        backup_dir = BACKUP_DIR
+
+        # 月別・従業員別の有給集計
+        # data[ym][employee] = {paid_leave_days, submitted_at, base_holidays, ...}
+        leave_data: dict[str, dict[str, dict]] = defaultdict(dict)
+        if backup_dir.exists():
+            for month_dir in sorted(backup_dir.iterdir()):
+                if not month_dir.is_dir():
+                    continue
+                ym = month_dir.name  # "2026-05"
+                # 従業員ごとに最新の提出を記録
+                for f in sorted(month_dir.glob("preferences_*.json")):
+                    try:
+                        with open(f, encoding="utf-8") as fp:
+                            d = _json.load(fp)
+                        author = d.get("author", "")
+                        if not author or author == "system":
+                            continue
+                        saved_at = d.get("saved_at", "")
+                        # 最新のもののみ採用
+                        if (author not in leave_data[ym]
+                                or saved_at > leave_data[ym][author].get("saved_at", "")):
+                            leave_data[ym][author] = {
+                                "paid_leave_days": int(d.get("paid_leave_days", 0)),
+                                "monthly_target_workdays": d.get("monthly_target_workdays"),
+                                "base_holidays": d.get("base_holidays"),
+                                "saved_at": saved_at,
+                            }
+                    except Exception:
+                        continue
+
+        if not leave_data:
+            st.info("まだ提出データがありません。従業員が希望を提出すると集計が表示されます。")
+        else:
+            # 月選択
+            available_months = sorted(leave_data.keys(), reverse=True)
+            selected_ym = st.selectbox(
+                "表示する月",
+                options=["すべて"] + available_months,
+                index=1 if available_months else 0,
+            )
+
+            display_months = available_months if selected_ym == "すべて" else [selected_ym]
+
+            for ym in display_months:
+                # 月内サマリー
+                month_data = leave_data[ym]
+                total_paid_leave = sum(
+                    info["paid_leave_days"] for info in month_data.values()
+                )
+                total_users = sum(
+                    1 for info in month_data.values() if info["paid_leave_days"] > 0
+                )
+
+                st.markdown(f"#### 📅 {ym}")
+                # サマリー
+                lc1, lc2, lc3 = st.columns(3)
+                with lc1:
+                    st.metric("提出済み従業員数", f"{len(month_data)} 名")
+                with lc2:
+                    st.metric("有給申請者数", f"{total_users} 名")
+                with lc3:
+                    st.metric("月間有給合計", f"{total_paid_leave} 日")
+
+                # 従業員別テーブル
+                table_data = []
+                for emp, info in sorted(month_data.items()):
+                    table_data.append({
+                        "氏名": emp,
+                        "希望有給日数": info["paid_leave_days"],
+                        "基準勤務日数": info.get("monthly_target_workdays") or "-",
+                        "基準休日数": info.get("base_holidays") or "-",
+                        "希望休日合計": (
+                            (info.get("base_holidays") or 0) + info["paid_leave_days"]
+                            if info.get("base_holidays") is not None else "-"
+                        ),
+                        "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
+                    })
+                st.dataframe(table_data, use_container_width=True, hide_index=True)
+
+                # 有給を申請している人だけ強調表示
+                applicants = [
+                    (emp, info) for emp, info in month_data.items()
+                    if info["paid_leave_days"] > 0
+                ]
+                if applicants:
+                    st.markdown("**🏖 有給申請者の詳細**")
+                    for emp, info in applicants:
+                        st.markdown(
+                            f'<div style="background:#fef3c7; padding:8px 12px; '
+                            f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
+                            f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日 '
+                            f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
+                            f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                st.markdown("---")
 
     # ============================================================
     # タブ0: マジックリンク（従業員配布用URL）
@@ -2217,20 +2517,224 @@ elif mode == "⚙️ 設定":
     # タブ5: バックアップ状況
     # ============================================================
     with setting_tab5:
-        st.markdown("### 💾 バックアップ状況")
-        backup_dir = BACKUP_DIR
-        if backup_dir.exists():
-            month_dirs = sorted(backup_dir.iterdir())
-            if month_dirs:
-                for month_dir in month_dirs:
-                    if month_dir.is_dir():
-                        files = list(month_dir.iterdir())
-                        st.write(f"📁 **{month_dir.name}**: {len(files)} ファイル")
-            else:
-                st.info("まだバックアップはありません")
-        else:
-            st.info("まだバックアップはありません")
+        from prototype.data_export import (
+            create_backup_zip, restore_from_zip,
+            get_backup_filename, get_all_data_summary,
+        )
+        from prototype.github_backup import (
+            is_github_backup_enabled, test_connection as gh_test_connection,
+        )
 
+        st.markdown("### 💾 データバックアップ")
+
+        # ============================================================
+        # GitHub 自動バックアップの状態表示
+        # ============================================================
+        st.markdown("#### ☁ GitHub 自動バックアップの状態")
+        if is_github_backup_enabled():
+            st.success(
+                "✅ **GitHub 自動バックアップ 有効**\n\n"
+                "従業員が希望を提出するたびに、自動的に GitHub の専用リポジトリへ"
+                "バックアップされています。Streamlit Cloud のデータが消えても、"
+                "GitHub には残っているので安心です。"
+            )
+            if st.button("🔌 接続テスト", key="test_gh_conn"):
+                with st.spinner("GitHub に接続中..."):
+                    success, msg = gh_test_connection()
+                if success:
+                    st.success(msg)
+                else:
+                    st.error(f"❌ {msg}")
+        else:
+            st.warning(
+                "⚠ **GitHub 自動バックアップ 未設定**\n\n"
+                "Streamlit Cloud の保存領域は揮発性のため、コード更新時にデータが消える"
+                "可能性があります。**GitHub の専用リポジトリに自動バックアップを設定**することで、"
+                "データ消失リスクをほぼゼロにできます。"
+            )
+            with st.expander("📖 GitHub 自動バックアップを設定する手順", expanded=False):
+                st.markdown(
+                    """
+                    ### 手順（10〜15分）
+
+                    #### 1. バックアップ用リポジトリを作成
+
+                    1. https://github.com/new を開く
+                    2. **Repository name**: `daikokuya-shift-data`
+                    3. **Private** を選択（重要！従業員データが入るため）
+                    4. その他はデフォルトのまま「Create repository」
+
+                    #### 2. Personal Access Token (PAT) を作成
+
+                    1. https://github.com/settings/tokens?type=beta を開く
+                    2. 「**Generate new token**」をクリック
+                    3. **Token name**: `Daikokuya Shift Backup`
+                    4. **Expiration**: 1 year（推奨）
+                    5. **Repository access**: `Only select repositories` → `daikokuya-shift-data` を選択
+                    6. **Permissions** → **Repository permissions** → **Contents**: `Read and write`
+                    7. ページ最下部の「**Generate token**」をクリック
+                    8. 表示されたトークン（`github_pat_...` で始まる長い文字列）を **必ずコピーして保存**
+                       （この画面を閉じると二度と見られません）
+
+                    #### 3. Streamlit Secrets に追加
+
+                    https://share.streamlit.io/ で自分のアプリの Settings → Secrets に以下を追加：
+
+                    ```toml
+                    GITHUB_TOKEN = "github_pat_あなたのトークン"
+                    GITHUB_BACKUP_REPO = "kinoshita-cmyk/daikokuya-shift-data"
+                    ```
+
+                    （他のシークレットはそのまま残してください）
+
+                    #### 4. 「Save」をクリック
+
+                    アプリが自動再起動した後、このページに戻ってきて
+                    上に「✅ GitHub 自動バックアップ 有効」と表示されれば完了！
+                    """
+                )
+
+        st.markdown("---")
+
+        # ⚠ 重要な警告
+        st.warning(
+            "🚨 **重要**: このシステムが動いているサーバー（Streamlit Cloud）の保存領域は"
+            "**コード更新時にリセット**されることがあります。"
+            "**従業員から提出された希望データを失わないよう、定期的に下のボタンで"
+            "バックアップをダウンロードしてご自分のPCに保存してください。**"
+        )
+
+        # ============================================================
+        # 現在のデータ状況サマリー
+        # ============================================================
+        st.markdown("#### 📊 現在の保存データ状況")
+        data_summary = get_all_data_summary()
+
+        sm_col1, sm_col2, sm_col3, sm_col4 = st.columns(4)
+        with sm_col1:
+            st.metric("従業員提出", f"{data_summary['submissions_total']} 件")
+        with sm_col2:
+            st.metric("確定シフト", f"{data_summary['finalized_shifts']} 件")
+        with sm_col3:
+            st.metric("ロック済み月", f"{data_summary['locked_months']} 件")
+        with sm_col4:
+            st.metric("従業員変更履歴", f"{data_summary['employees_modified']} 件")
+
+        # 月別の提出状況
+        if data_summary["submissions_by_month"]:
+            st.markdown("##### 月別の提出データ件数")
+            month_data = []
+            for ym in sorted(data_summary["submissions_by_month"].keys(), reverse=True):
+                month_data.append({
+                    "年月": ym,
+                    "提出ファイル数": data_summary["submissions_by_month"][ym],
+                })
+            st.dataframe(month_data, use_container_width=True, hide_index=True)
+
+        # ============================================================
+        # ダウンロード（エクスポート）
+        # ============================================================
+        st.markdown("---")
+        st.markdown("#### ⬇ データをまとめてダウンロード（バックアップ作成）")
+        st.caption(
+            "全データを ZIP ファイルにまとめてダウンロードします。"
+            "**従業員提出データを失う前に必ず実行してください。**"
+        )
+
+        dl_col1, dl_col2 = st.columns([2, 3])
+        with dl_col1:
+            include_output = st.checkbox(
+                "生成済みExcel/PDFも含める",
+                value=False,
+                help="output/ ディレクトリの生成ファイルも含めます。容量が大きくなります。",
+            )
+        with dl_col2:
+            st.caption(
+                "💡 **おすすめのバックアップ頻度**: \n"
+                "- 提出締切日（毎月25日）の翌日\n"
+                "- シフト確定後\n"
+                "- コードを更新する前"
+            )
+
+        # ZIP 生成（クリックで作成 → ダウンロードボタン表示）
+        if st.button("📦 バックアップZIPを作成", type="primary", use_container_width=True):
+            with st.spinner("ZIPファイルを作成中..."):
+                zip_bytes, summary = create_backup_zip(include_output=include_output)
+            st.session_state["backup_zip_bytes"] = zip_bytes
+            st.session_state["backup_summary"] = summary
+            st.success(
+                f"✅ バックアップ作成完了！\n"
+                f"- ファイル数: **{summary.total_files} 件** "
+                f"（提出データ {summary.submission_files} / "
+                f"確定シフト {summary.finalized_shifts} / "
+                f"ロック {summary.locked_months}）\n"
+                f"- 圧縮後サイズ: **{len(zip_bytes) / 1024:.1f} KB**"
+            )
+
+        # ダウンロードボタン
+        if "backup_zip_bytes" in st.session_state:
+            st.download_button(
+                label="⬇ バックアップZIPをダウンロード",
+                data=st.session_state["backup_zip_bytes"],
+                file_name=get_backup_filename(),
+                mime="application/zip",
+                use_container_width=True,
+                key="dl_backup_zip",
+            )
+            st.caption(
+                "↑ ダウンロードしたZIPは **PC・iCloud Drive・Google Drive など信頼できる場所**に保存してください。"
+            )
+
+        # ============================================================
+        # 復元（インポート）
+        # ============================================================
+        st.markdown("---")
+        st.markdown("#### ⬆ バックアップから復元")
+        st.caption(
+            "以前ダウンロードしたバックアップZIPをアップロードして復元します。"
+            "**コード更新後にデータが消えた場合の復旧用です。**"
+        )
+
+        with st.expander("⚠ 復元の操作（クリックで展開）", expanded=False):
+            uploaded_file = st.file_uploader(
+                "バックアップZIPファイルを選択",
+                type="zip",
+                help="以前ダウンロードした daikokuya-shift-backup-*.zip を選択",
+            )
+            if uploaded_file:
+                overwrite = st.checkbox(
+                    "既存ファイルを上書きする",
+                    value=False,
+                    help="チェックを外すと、既に存在するファイルはスキップされます（安全モード）",
+                )
+                if st.button("📥 復元を実行", type="primary"):
+                    with st.spinner("復元中..."):
+                        zip_bytes = uploaded_file.read()
+                        result = restore_from_zip(zip_bytes, overwrite=overwrite)
+                    if result.success:
+                        st.success(
+                            f"✅ 復元完了！\n"
+                            f"- 復元されたファイル: **{result.restored_files}** 件\n"
+                            f"- スキップ: {result.skipped_files} 件"
+                        )
+                        if result.metadata:
+                            exported_at = result.metadata.get("exported_at", "")
+                            st.caption(f"バックアップ作成日時: {exported_at[:19]}")
+                        if result.errors:
+                            st.warning(
+                                f"⚠ 一部エラーがありました:\n"
+                                + "\n".join(f"- {e}" for e in result.errors)
+                            )
+                        st.info("✨ 画面をリロード（Cmd+R）すると復元されたデータが反映されます。")
+                    else:
+                        st.error(
+                            f"❌ 復元に失敗しました:\n"
+                            + "\n".join(f"- {e}" for e in result.errors)
+                        )
+
+        # ============================================================
+        # ロック状況
+        # ============================================================
         st.markdown("---")
         st.markdown("### 🔒 ロック状況")
         lock_mgr = ShiftLockManager()
