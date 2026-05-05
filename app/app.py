@@ -28,6 +28,9 @@ from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
 )
 
+# 認証モジュール
+from app.auth import require_auth, render_logout_button, is_manager, get_user_role
+
 
 def get_anthropic_api_key() -> Optional[str]:
     """
@@ -80,6 +83,12 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ============================================================
+# 認証チェック（認証していなければログイン画面を表示してここで停止）
+# ============================================================
+if not require_auth():
+    st.stop()
+
 # CSS カスタマイズ（高齢者にも見やすい大きさ）
 st.markdown("""
 <style>
@@ -109,12 +118,24 @@ st.markdown("""
 st.sidebar.title("📅 大黒屋シフト管理")
 st.sidebar.markdown("---")
 
+# 役割に応じてアクセス可能なモードを制御
+# 経営者: すべて閲覧可
+# 従業員: 「従業員ビュー」と「過去シフト閲覧」のみ
+if is_manager():
+    available_modes = ["📊 経営者ビュー", "👤 従業員ビュー", "📁 過去シフト閲覧", "⚙️ 設定"]
+else:
+    # 従業員ロールは設定画面・経営者画面にアクセスできない
+    available_modes = ["👤 従業員ビュー", "📁 過去シフト閲覧"]
+
 mode = st.sidebar.radio(
     "モードを選択",
-    options=["📊 経営者ビュー", "👤 従業員ビュー", "📁 過去シフト閲覧", "⚙️ 設定"],
+    options=available_modes,
     index=0,
 )
 
+st.sidebar.markdown("---")
+# ログアウトボタン
+render_logout_button()
 st.sidebar.markdown("---")
 st.sidebar.caption("v0.1 プロトタイプ")
 st.sidebar.caption(f"今日: {date.today()}")
@@ -1121,30 +1142,40 @@ if mode == "📊 経営者ビュー":
 elif mode == "👤 従業員ビュー":
     st.title("👤 希望シフト提出")
 
-    # マジックリンクの仕様説明
-    with st.expander("ℹ️ 本番運用時のログイン方法（クリックで説明）"):
+    # マジックリンクでログインしている場合は、その従業員に固定
+    from app.auth import get_logged_in_employee, is_employee, is_manager
+    logged_in_emp = get_logged_in_employee()
+
+    if is_employee() and logged_in_emp:
+        # 従業員モード（マジックリンク経由）: 自分に固定
+        selected = logged_in_emp
         st.markdown(
-            """
-            **本番運用ではマジックリンク方式になります。**
-
-            1. 経営者から LINE で「あなた専用のURL」が届きます（一度きりの設定）
-            2. URLをタップすると **自動的にあなたの希望入力画面**が開きます
-            3. URLは個別なので、自分以外の希望は触れません（誤操作防止）
-
-            **現在のプルダウン選択は、プロトタイプ（試作版）の確認用です。**
-            本番デプロイ時には削除され、URLにユーザー識別子が含まれる仕組みに切り替わります。
-            """
+            f'<div style="background:#dcfce7; padding:12px 16px; border-radius:8px; '
+            f'border-left:4px solid #16a34a; margin-bottom:12px;">'
+            f'👋 こんにちは、<strong>{selected}さん</strong>。<br>'
+            f'<span style="font-size:13px; color:#166534;">'
+            f'このページからシフト希望を提出してください。'
+            f'</span></div>',
+            unsafe_allow_html=True,
         )
-
-    st.markdown("---")
-
-    # 従業員選択（マジックリンク代わりの試作版）
-    employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
-    selected = st.selectbox(
-        "【プロトタイプ】あなたのお名前を選んでください",
-        options=employee_names,
-        help="本番ではこの選択は不要になり、URL から自動判定されます",
-    )
+    elif is_manager():
+        # 経営者がプレビューする場合: 従業員を選択可能
+        st.info(
+            "💡 経営者として閲覧中です。実運用では従業員はマジックリンク経由で"
+            "自動的に自分の画面が開きます。動作確認のため任意の従業員を選択できます。"
+        )
+        employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+        selected = st.selectbox(
+            "【プレビュー】従業員を選択",
+            options=employee_names,
+        )
+    else:
+        # 想定外の状態（認証なしでここに来た場合）
+        st.error(
+            "⚠ ログイン情報が確認できません。"
+            "経営者から送られたマジックリンクからアクセスし直してください。"
+        )
+        st.stop()
 
     target_year = 2026
     target_month = 6  # 翌月の希望
@@ -1363,10 +1394,124 @@ elif mode == "⚙️ 設定":
     st.title("⚙️ システム設定")
 
     # タブで分割（情報量が多いので）
-    setting_tab1, setting_tab2, setting_tab3, setting_tab4, setting_tab5 = st.tabs([
+    (
+        setting_tab_links,
+        setting_tab1, setting_tab2,
+        setting_tab3, setting_tab4, setting_tab5,
+    ) = st.tabs([
+        "🔗 マジックリンク",
         "🔧 ルール設定", "📜 ルール変更履歴",
         "👥 従業員マスタ", "🔑 APIキー", "💾 バックアップ",
     ])
+
+    # ============================================================
+    # タブ0: マジックリンク（従業員配布用URL）
+    # ============================================================
+    with setting_tab_links:
+        from prototype.employee_tokens import (
+            generate_token, get_magic_link, get_line_message, is_salt_configured,
+        )
+        from prototype.employees import shift_active_employees as _link_active_emps
+
+        st.markdown("### 🔗 従業員マジックリンク管理")
+        st.caption(
+            "各従業員に LINE で送る個別URLを管理する画面です。"
+            "URLにはトークンが含まれており、タップだけでログインできます。"
+        )
+
+        if not is_salt_configured():
+            st.error(
+                "⚠ **マジックリンク用の秘密の塩 `MAGIC_LINK_SALT` が設定されていません。**\n\n"
+                "Streamlit Cloud の Settings → Secrets で設定するか、"
+                "ローカル開発時は環境変数 `MAGIC_LINK_SALT` を設定してください。\n\n"
+                "**例（Streamlit Secrets）**:\n"
+                "```\nMAGIC_LINK_SALT = \"daikokuya-secret-salt-2026\"\n```\n\n"
+                "塩を変更すると全URLが一括無効化されます（一斉再発行に使えます）。"
+            )
+        else:
+            # アプリの URL を入力（Streamlit Cloud のURL）
+            base_url = st.text_input(
+                "アプリの公開URL",
+                value=st.session_state.get(
+                    "magic_link_base_url",
+                    "https://daikokuya-shift.streamlit.app",
+                ),
+                help="https://〜〜.streamlit.app の形式で入力してください",
+            )
+            st.session_state["magic_link_base_url"] = base_url
+
+            st.markdown("---")
+            st.markdown("#### 📋 全従業員のマジックリンク一覧")
+
+            # 在籍中の従業員のみ
+            active_emps = _link_active_emps()
+            display_emps = [e for e in active_emps if not e.is_auxiliary]
+
+            # 一覧テーブル
+            link_data = []
+            for emp in display_emps:
+                link = get_magic_link(emp.name, base_url)
+                link_data.append({
+                    "氏名": emp.name,
+                    "フルネーム": emp.full_name or "-",
+                    "雇用形態": emp.employment_status.value,
+                    "マジックリンク": link,
+                })
+            st.dataframe(
+                link_data,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "マジックリンク": st.column_config.LinkColumn(
+                        "マジックリンク（クリックでテスト可）"
+                    ),
+                },
+            )
+
+            st.markdown("---")
+            st.markdown("#### 📨 LINE送信用テンプレート")
+            st.caption(
+                "従業員ごとの LINE 送信用メッセージです。"
+                "各カードの「コピー」アイコンを押すと、そのままLINEに貼り付けできます。"
+            )
+
+            # 個別の LINE メッセージを表示（コピー可能）
+            for emp in display_emps:
+                msg = get_line_message(emp.name, base_url)
+                with st.expander(f"📤 {emp.name}さん（{emp.full_name or '-'}）への送信メッセージ", expanded=False):
+                    st.code(msg, language=None)
+
+            # 一括コピー用：全員分まとめて表示
+            st.markdown("---")
+            with st.expander("📋 全員分のリンクをまとめて見る（一括コピー用）", expanded=False):
+                all_links_text = "\n\n---\n\n".join(
+                    f"【{emp.name}さん】\nURL: {get_magic_link(emp.name, base_url)}"
+                    for emp in display_emps
+                )
+                st.code(all_links_text, language=None)
+
+            # セキュリティに関する注意
+            st.markdown("---")
+            with st.expander("🔐 セキュリティに関する注意", expanded=False):
+                st.markdown(
+                    """
+                    **マジックリンクの仕組み:**
+                    - 各URLには「従業員名」を秘密の塩でハッシュ化したトークンが含まれます
+                    - URLを見ても他人の名前は推測できません
+                    - 同じ従業員には常に同じURLが発行されます
+
+                    **注意事項:**
+                    - 各従業員には**自分専用のURL**を渡してください
+                    - URLを他人と共有しないよう周知してください（特に転送・SNS投稿に注意）
+                    - URLが流出した疑いがある場合は、`MAGIC_LINK_SALT` を変更すれば**全URLが無効化**されます
+                      （その後、全員に新しいURLを再配布する必要があります）
+
+                    **退職者のURL:**
+                    - 退職処理した従業員のURLは「在籍中の従業員」リストから自動的に除外されます
+                    - ただし `MAGIC_LINK_SALT` を変更しない限り、トークン自体は有効なままです
+                    - 完全に無効化したい場合は `MAGIC_LINK_SALT` を変更して全員に再配布してください
+                    """
+                )
 
     rule_mgr = RuleConfigManager()
     cfg = rule_mgr.load()
