@@ -494,6 +494,31 @@ if mode == "📊 経営者ビュー":
     )
     summary = submission_status["summary"]
 
+    # 診断: 各月に保存されている提出ファイル数（デバッグ表示）
+    with st.expander("🔧 診断: 各月の保存データ件数（クリックで展開）", expanded=False):
+        try:
+            from prototype.data_export import get_all_data_summary
+            _ds = get_all_data_summary()
+            st.write(f"全提出件数: {_ds['submissions_total']} 件")
+            if _ds.get("submissions_by_month"):
+                st.write("月別:")
+                for ym, cnt in sorted(_ds["submissions_by_month"].items(), reverse=True):
+                    marker = " ← 表示中" if ym == f"{int(target_year):04d}-{int(target_month):02d}" else ""
+                    st.write(f"  - {ym}: {cnt} 件{marker}")
+            else:
+                st.caption(
+                    "⚠ 保存されている提出データがありません。"
+                    "Streamlit Cloud のサーバー再起動でデータが消えた可能性があります。"
+                    "GitHub 自動バックアップを設定済みであれば、別途復旧可能です。"
+                )
+            st.caption(
+                f"現在の表示対象: **{int(target_year)}年{int(target_month)}月** "
+                f"(target_year={st.session_state.get('target_year')}, "
+                f"target_month={st.session_state.get('target_month')})"
+            )
+        except Exception as _e:
+            st.caption(f"診断情報取得失敗: {_e}")
+
     # 提出状況サマリーを目立つボックスで表示
     completion_pct = int(summary["completion_rate"] * 100)
     if summary["total_pending"] == 0:
@@ -638,107 +663,132 @@ if mode == "📊 経営者ビュー":
             disabled=gen_disabled,
             help=gen_help,
         ):
-            with st.spinner("AIがシフト案を生成中... (1〜2分かかる場合があります)"):
-                # 実際の提出データを読み込む
-                from prototype.submission_loader import load_submissions_for_month
-                sub_data = load_submissions_for_month(
-                    int(target_year), int(target_month), expected_employees,
-                )
+            # ========================================================
+            # シフト生成（例外を必ずキャッチしてユーザーに表示する）
+            # ========================================================
+            try:
+                from calendar import monthrange as _mr
+                days_in_m = _mr(int(target_year), int(target_month))[1]
 
-                # 5月2026年（テストデータ用）かどうかで分岐
-                is_test_may_2026 = (
-                    int(target_year) == 2026 and int(target_month) == 5
-                    and sub_data.submission_count == 0
-                )
-
-                # 提出があればそれを使い、なければテストデータにフォールバック
-                if sub_data.submission_count > 0:
-                    # 実データで生成（任意の月で動く）
-                    use_off_requests = sub_data.off_requests
-                    use_work_requests = sub_data.work_requests
-                    use_flexible_off = sub_data.flexible_off
-                    use_holiday_overrides = {}  # 提出データに有給情報があれば反映
-                    # 有給日数を holiday_overrides に反映（基準＋有給日数）
-                    for emp_name, paid_days in sub_data.paid_leave_days.items():
-                        try:
-                            from prototype.employees import get_employee
-                            emp = get_employee(emp_name)
-                            if emp.annual_target_days:
-                                from calendar import monthrange
-                                days_in_m = monthrange(int(target_year), int(target_month))[1]
-                                base_target = round(emp.annual_target_days / 12)
-                                base_holidays = days_in_m - base_target
-                                use_holiday_overrides[emp_name] = base_holidays + paid_days
-                        except Exception:
-                            pass
-                    # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
-                    use_prev_month = []
-                    use_consec_exceptions = []
-                    data_source_msg = (
-                        f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
+                with st.spinner("AIがシフト案を生成中... (1〜2分かかる場合があります)"):
+                    # 実際の提出データを読み込む
+                    from prototype.submission_loader import load_submissions_for_month
+                    sub_data = load_submissions_for_month(
+                        int(target_year), int(target_month), expected_employees,
                     )
-                    if sub_data.pending_employees:
-                        data_source_msg += (
-                            f"\n（未提出 {len(sub_data.pending_employees)}名: "
-                            f"{', '.join(sub_data.pending_employees[:5])}"
-                            f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
-                            "は希望未指定として自由配置）"
+
+                    # ヘルパー関数: 月内の有効日のみに絞り込む
+                    def _filter_valid_days(days_list, max_day):
+                        return [d for d in days_list if 1 <= d <= max_day]
+
+                    # 5月2026年（テストデータ用）かどうかで分岐
+                    is_test_may_2026 = (
+                        int(target_year) == 2026 and int(target_month) == 5
+                        and sub_data.submission_count == 0
+                    )
+
+                    # 提出があればそれを使い、なければテストデータにフォールバック
+                    if sub_data.submission_count > 0:
+                        # 実データで生成（任意の月で動く）
+                        # 不正な日（その月に存在しない日）をフィルタリング
+                        use_off_requests = {
+                            emp: _filter_valid_days(days, days_in_m)
+                            for emp, days in sub_data.off_requests.items()
+                        }
+                        use_off_requests = {
+                            emp: days for emp, days in use_off_requests.items() if days
+                        }
+                        use_work_requests = [
+                            (emp, d, store) for (emp, d, store) in sub_data.work_requests
+                            if 1 <= d <= days_in_m
+                        ]
+                        use_flexible_off = []
+                        for fo in sub_data.flexible_off:
+                            if isinstance(fo, tuple) and len(fo) >= 3:
+                                emp, cands, n = fo[0], fo[1], fo[2]
+                                cands = _filter_valid_days(cands, days_in_m)
+                                if cands:
+                                    use_flexible_off.append((emp, cands, n))
+                        use_holiday_overrides = {}
+                        # 有給日数を holiday_overrides に反映（基準＋有給日数）
+                        for emp_name, paid_days in sub_data.paid_leave_days.items():
+                            try:
+                                from prototype.employees import get_employee
+                                emp = get_employee(emp_name)
+                                if emp.annual_target_days:
+                                    base_target = round(emp.annual_target_days / 12)
+                                    base_holidays = days_in_m - base_target
+                                    use_holiday_overrides[emp_name] = base_holidays + paid_days
+                            except Exception:
+                                pass
+                        # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
+                        use_prev_month = []
+                        use_consec_exceptions = []
+                        data_source_msg = (
+                            f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                         )
-                elif is_test_may_2026:
-                    # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
-                    use_off_requests = OFF_REQUESTS
-                    use_work_requests = WORK_REQUESTS
-                    use_flexible_off = FLEXIBLE_OFF_REQUESTS
-                    use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
-                    use_prev_month = PREVIOUS_MONTH_CARRYOVER
-                    use_consec_exceptions = ["野澤"]
-                    data_source_msg = (
-                        "💡 提出データがないため、2026年5月のサンプルテストデータで生成しました。"
-                    )
-                else:
-                    # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
-                    use_off_requests = {}
-                    use_work_requests = []
-                    use_flexible_off = []
-                    use_holiday_overrides = {}
-                    use_prev_month = []
-                    use_consec_exceptions = []
-                    data_source_msg = (
-                        f"💡 提出データがないため、希望なしで {int(target_year)}年{int(target_month)}月のシフトを生成しました。"
-                        "本番では従業員から希望が届いた後に生成してください。"
+                        if sub_data.pending_employees:
+                            data_source_msg += (
+                                f"\n（未提出 {len(sub_data.pending_employees)}名: "
+                                f"{', '.join(sub_data.pending_employees[:5])}"
+                                f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
+                                "は希望未指定として自由配置）"
+                            )
+                    elif is_test_may_2026:
+                        # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
+                        use_off_requests = OFF_REQUESTS
+                        use_work_requests = WORK_REQUESTS
+                        use_flexible_off = FLEXIBLE_OFF_REQUESTS
+                        use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                        use_prev_month = PREVIOUS_MONTH_CARRYOVER
+                        use_consec_exceptions = ["野澤"]
+                        data_source_msg = (
+                            "💡 提出データがないため、2026年5月のサンプルテストデータで生成しました。"
+                        )
+                    else:
+                        # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
+                        use_off_requests = {}
+                        use_work_requests = []
+                        use_flexible_off = []
+                        use_holiday_overrides = {}
+                        use_prev_month = []
+                        use_consec_exceptions = []
+                        data_source_msg = (
+                            f"💡 提出データがないため、希望なしで "
+                            f"{int(target_year)}年{int(target_month)}月のシフトを生成しました。"
+                            "本番では従業員から希望が届いた後に生成してください。"
+                        )
+
+                    modes = determine_operation_modes(target_year, target_month)
+                    shift = generate_shift(
+                        year=int(target_year),
+                        month=int(target_month),
+                        off_requests=use_off_requests,
+                        work_requests=use_work_requests,
+                        prev_month=use_prev_month,
+                        flexible_off=use_flexible_off,
+                        holiday_overrides=use_holiday_overrides,
+                        operation_modes=modes,
+                        consec_exceptions=use_consec_exceptions,
+                        max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
+                        time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 120),
+                        random_seed=rule_cfg.parameters.get("solver_seed", 42),
+                        verbose=False,
                     )
 
-                modes = determine_operation_modes(target_year, target_month)
-                shift = generate_shift(
-                    year=target_year,
-                    month=target_month,
-                    off_requests=use_off_requests,
-                    work_requests=use_work_requests,
-                    prev_month=use_prev_month,
-                    flexible_off=use_flexible_off,
-                    holiday_overrides=use_holiday_overrides,
-                    operation_modes=modes,
-                    consec_exceptions=use_consec_exceptions,
-                    max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
-                    time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 120),
-                    random_seed=rule_cfg.parameters.get("solver_seed", 42),
-                    verbose=False,
-                )
                 if shift is not None:
                     save_session_shift(shift)
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                 else:
-                    # 失敗時の詳細診断
+                    # ソルバーが解を見つけられなかった場合
                     diag_lines = [
-                        "❌ **シフト生成に失敗しました**",
+                        "❌ **シフトを生成できませんでした**",
                         "",
-                        "以下の原因が考えられます：",
+                        "ソルバーが制約を全て満たすシフトを見つけられませんでした。",
+                        "",
+                        "**考えられる原因:**",
                     ]
-                    # 提出データが矛盾している可能性
                     if sub_data.submission_count > 0:
-                        # 各従業員の×日数をチェック
-                        from calendar import monthrange
-                        days_in_m = monthrange(int(target_year), int(target_month))[1]
                         for emp_name, off_days in use_off_requests.items():
                             if len(off_days) > days_in_m - 5:
                                 diag_lines.append(
@@ -746,15 +796,29 @@ if mode == "📊 経営者ビュー":
                                 )
                     diag_lines.extend([
                         "",
-                        "**対処方法：**",
+                        "**対処方法:**",
                         "1. 「⚙️ 設定 → 🏖 有給使用状況」で各従業員の希望休日を確認",
-                        "2. 矛盾する希望（例：×が多すぎる）があれば該当従業員に再提出を依頼",
-                        "3. 制約が厳しすぎる場合は「⚙️ 設定 → 🔧 ルール設定」で",
-                        "   「最大連勤日数」を増やす、「既定の月内最低休日数」を減らすなど調整",
+                        "2. 矛盾する希望があれば該当従業員に再提出を依頼",
+                        "3. 「⚙️ 設定 → 🔧 ルール設定」で「最大連勤日数」を増やすなど制約緩和",
                         "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
-                        "5. それでも解決しない場合、技術者にお問い合わせください",
                     ])
                     st.error("\n".join(diag_lines))
+            except Exception as _gen_err:
+                # 想定外の例外（KeyError など）も画面に表示
+                import traceback
+                error_detail = traceback.format_exc()
+                st.error(
+                    f"❌ **シフト生成中にエラーが発生しました**\n\n"
+                    f"エラー種別: `{type(_gen_err).__name__}`\n\n"
+                    f"エラー内容: `{str(_gen_err)}`\n\n"
+                    f"**よくある原因:**\n"
+                    f"- 提出データに不正な日付が含まれている（例: 4月に31日が入っている）\n"
+                    f"- 提出データの形式が古い・破損している\n"
+                    f"- システム内部の不具合\n\n"
+                    f"**対処方法:** 該当従業員に再提出を依頼するか、技術者にお問い合わせください。"
+                )
+                with st.expander("🔧 技術者向け: 詳細エラーログ", expanded=False):
+                    st.code(error_detail)
 
     with bcol2:
         # 確定版を読み込む
