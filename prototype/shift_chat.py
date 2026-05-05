@@ -51,7 +51,8 @@ SYSTEM_PROMPT = """\
 # 振る舞いルール
 - 経営者の質問・指示に対し、まず現状を確認するためツールを呼び出す
 - 変更案を提案する際は、必ず影響を分析して伝える（連勤になる、希望に反する等）
-- 経営者が「実行して」「変更して」と明示するまで、apply_change は呼ばない
+- 変更は必ず「仮変更」として作る。確定・取り消しは画面下のボタンで行う
+- 経営者が「実行して」「変更して」と書いても、確定操作は画面の「反映する」ボタンを案内する
 - 制約違反のリスクがある場合は警告する
 - 簡潔で実用的な日本語で答える
 
@@ -60,8 +61,7 @@ SYSTEM_PROMPT = """\
 2. get_day_assignments / get_employee_schedule で現状確認
 3. swap_assignments を仮実行
 4. validate_change で違反チェック
-5. 結果を経営者に報告（賛否両論を含めて）
-6. 経営者の承認後に apply_change
+5. 結果を経営者に報告し、画面下の「反映する」または「取り消す」ボタンを案内する
 """
 
 
@@ -127,16 +127,6 @@ TOOLS = [
         "description": "現在の（仮）シフトの制約違反をチェックして要約を返します",
         "input_schema": {"type": "object", "properties": {}},
     },
-    {
-        "name": "apply_changes",
-        "description": "仮の変更をすべて確定します。ユーザーが明示的に承認した時のみ呼び出す",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "discard_changes",
-        "description": "仮の変更をすべて取り消します",
-        "input_schema": {"type": "object", "properties": {}},
-    },
 ]
 
 
@@ -165,8 +155,74 @@ class ShiftChatEngine:
         self.shift = shift
         self.pending_changes: list[ShiftAssignment] = []
         self.message_history: list[dict] = []
+        self.undo_stack: list[tuple[str, MonthlyShift]] = []
+        self.redo_stack: list[tuple[str, MonthlyShift]] = []
+        self.last_status_message = ""
 
     # ========== 内部ヘルパ ==========
+
+    def _clone_shift(self, shift: MonthlyShift) -> MonthlyShift:
+        """シフトを履歴保存用にコピーする。"""
+        return MonthlyShift(
+            year=shift.year,
+            month=shift.month,
+            assignments=[
+                ShiftAssignment(
+                    employee=a.employee,
+                    day=a.day,
+                    store=a.store,
+                    is_paid_leave=a.is_paid_leave,
+                )
+                for a in shift.assignments
+            ],
+            operation_modes=dict(shift.operation_modes),
+        )
+
+    def _replace_shift_contents(self, source: MonthlyShift) -> None:
+        """既存の MonthlyShift オブジェクトを保ったまま中身だけ差し替える。"""
+        self.shift.year = source.year
+        self.shift.month = source.month
+        self.shift.assignments = [
+            ShiftAssignment(
+                employee=a.employee,
+                day=a.day,
+                store=a.store,
+                is_paid_leave=a.is_paid_leave,
+            )
+            for a in source.assignments
+        ]
+        self.shift.operation_modes = dict(source.operation_modes)
+
+    def _dedup_pending_changes(self) -> list[ShiftAssignment]:
+        """同じ人・同じ日の仮変更は最後の内容だけを有効にする。"""
+        changes: dict[tuple[str, int], ShiftAssignment] = {}
+        for p in self.pending_changes:
+            changes[(p.employee, p.day)] = p
+        return list(changes.values())
+
+    def get_pending_change_count(self) -> int:
+        return len(self._dedup_pending_changes())
+
+    def get_pending_change_keys(self) -> set[tuple[str, int]]:
+        return {(p.employee, p.day) for p in self._dedup_pending_changes()}
+
+    def get_pending_change_summary(self, limit: int = 8) -> list[str]:
+        """画面表示用に仮変更を短く要約する。"""
+        summary = []
+        for p in sorted(self._dedup_pending_changes(), key=lambda x: (x.day, x.employee)):
+            before = self.shift.get_assignment(p.employee, p.day)
+            before_store = before.store.display_name if before else "未配置"
+            after_store = p.store.display_name
+            summary.append(
+                f"{self.shift.month}/{p.day} {p.employee}: {before_store} → {after_store}"
+            )
+        if len(summary) > limit:
+            return summary[:limit] + [f"...他 {len(summary) - limit} 件"]
+        return summary
+
+    def get_preview_shift(self) -> MonthlyShift:
+        """仮変更を反映したプレビュー用シフトを返す。"""
+        return self._apply_pending_to_shift()
 
     def _get_effective_assignment(self, employee: str, day: int) -> Optional[ShiftAssignment]:
         """確定 + 仮変更を反映した配属を取得"""
@@ -178,11 +234,9 @@ class ShiftChatEngine:
 
     def _apply_pending_to_shift(self) -> MonthlyShift:
         """仮変更を反映したシフトのコピーを返す（検証用）"""
-        copy = MonthlyShift(year=self.shift.year, month=self.shift.month)
-        copy.operation_modes = dict(self.shift.operation_modes)
-        copy.assignments = list(self.shift.assignments)
+        copy = self._clone_shift(self.shift)
         # 仮変更を反映
-        for p in self.pending_changes:
+        for p in self._dedup_pending_changes():
             # 同じ (employee, day) の既存を削除
             copy.assignments = [
                 a for a in copy.assignments
@@ -249,23 +303,62 @@ class ShiftChatEngine:
         return "\n".join(out)
 
     def _tool_apply_changes(self) -> str:
-        if not self.pending_changes:
+        pending = self._dedup_pending_changes()
+        if not pending:
             return "適用すべき変更はありません"
-        n = len(self.pending_changes)
+        n = len(pending)
+        before = self._clone_shift(self.shift)
         # 確定シフトに反映
-        for p in self.pending_changes:
+        for p in pending:
             self.shift.assignments = [
                 a for a in self.shift.assignments
                 if not (a.employee == p.employee and a.day == p.day)
             ]
             self.shift.assignments.append(p)
         self.pending_changes.clear()
-        return f"✅ {n} 件の変更を確定しました"
+        self.undo_stack.append((f"{n}件の変更", before))
+        self.undo_stack = self.undo_stack[-20:]
+        self.redo_stack.clear()
+        self.last_status_message = f"✅ {n}件の仮変更を本シフトに反映しました"
+        return self.last_status_message
 
     def _tool_discard_changes(self) -> str:
-        n = len(self.pending_changes)
+        n = self.get_pending_change_count()
         self.pending_changes.clear()
-        return f"🗑 {n} 件の仮変更を取り消しました"
+        self.last_status_message = f"🗑 {n}件の仮変更を取り消しました"
+        return self.last_status_message
+
+    def apply_pending_changes(self) -> str:
+        """画面ボタンから仮変更を確定する。"""
+        return self._tool_apply_changes()
+
+    def discard_pending_changes(self) -> str:
+        """画面ボタンから仮変更を取り消す。"""
+        return self._tool_discard_changes()
+
+    def undo_last_apply(self) -> str:
+        """直近の確定変更を元に戻す。"""
+        if not self.undo_stack:
+            return "戻せる変更はありません"
+        label, previous = self.undo_stack.pop()
+        current = self._clone_shift(self.shift)
+        self.redo_stack.append((label, current))
+        self.pending_changes.clear()
+        self._replace_shift_contents(previous)
+        self.last_status_message = f"↩ {label}を元に戻しました"
+        return self.last_status_message
+
+    def redo_last_apply(self) -> str:
+        """元に戻した変更をやり直す。"""
+        if not self.redo_stack:
+            return "進める変更はありません"
+        label, next_shift = self.redo_stack.pop()
+        current = self._clone_shift(self.shift)
+        self.undo_stack.append((label, current))
+        self.pending_changes.clear()
+        self._replace_shift_contents(next_shift)
+        self.last_status_message = f"↪ {label}をやり直しました"
+        return self.last_status_message
 
     # ========== ツールルーター ==========
 
