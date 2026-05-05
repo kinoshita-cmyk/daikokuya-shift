@@ -36,6 +36,20 @@ from prototype.paths import (
 from auth import require_auth, render_logout_button, is_manager, get_user_role
 
 
+def get_anthropic_api_key_source() -> str:
+    """Claude API キーの取得元を返す。"""
+    try:
+        if "ANTHROPIC_API_KEY" in st.secrets and str(st.secrets["ANTHROPIC_API_KEY"]).strip():
+            return "secrets"
+    except Exception:
+        pass
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return "environment"
+    if st.session_state.get("api_key"):
+        return "session"
+    return ""
+
+
 def get_anthropic_api_key() -> Optional[str]:
     """
     Anthropic API キーを以下の優先順位で取得：
@@ -43,18 +57,14 @@ def get_anthropic_api_key() -> Optional[str]:
     2. 環境変数 ANTHROPIC_API_KEY（ローカル実行時）
     3. セッションに登録された値（設定画面から入力）
     """
-    # 1. Streamlit Secrets（クラウド用）
-    try:
-        if "ANTHROPIC_API_KEY" in st.secrets:
-            return str(st.secrets["ANTHROPIC_API_KEY"])
-    except Exception:
-        pass
-    # 2. 環境変数（ローカル用）
-    env_key = os.environ.get("ANTHROPIC_API_KEY")
-    if env_key:
-        return env_key
-    # 3. セッション
-    return st.session_state.get("api_key")
+    source = get_anthropic_api_key_source()
+    if source == "secrets":
+        return str(st.secrets["ANTHROPIC_API_KEY"]).strip()
+    if source == "environment":
+        return os.environ.get("ANTHROPIC_API_KEY")
+    if source == "session":
+        return st.session_state.get("api_key")
+    return None
 from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
 from prototype.employees import ALL_EMPLOYEES, shift_active_employees
 from prototype.generator import generate_shift, determine_operation_modes
@@ -1576,11 +1586,12 @@ if mode == "📊 経営者ビュー":
             if not api_key:
                 st.warning(
                     "⚠ Claude API キーが設定されていません。"
-                    "「⚙️ 設定」画面で登録するか、環境変数 ANTHROPIC_API_KEY を設定してください。"
+                    "Streamlit Cloud の Settings → Secrets に "
+                    "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
                 st.caption(
-                    "💡 例: 「5/15 の大宮駅前店に田中さんを入れたい」"
+                    f"💡 例: 「{shift.month}/15 の大宮駅前店に田中さんを入れたい」"
                     "「鈴木さんと黒澤さんの 20 日のシフトを入れ替えるとどうなる？」"
                     "「板倉さんの月内出勤数を教えて」"
                 )
@@ -1601,12 +1612,44 @@ if mode == "📊 経営者ビュー":
                             st.write(msg["content"])
 
                 # 入力欄
-                if prompt := st.chat_input("AIに質問・指示を入力..."):
-                    st.session_state.chat_messages.append({"role": "user", "content": prompt})
-                    with st.spinner("AIが考え中..."):
-                        response = st.session_state.chat_engine.chat(prompt)
-                    st.session_state.chat_messages.append({"role": "assistant", "content": response})
-                    st.rerun()
+                # st.chat_input は画面最下部に固定され、タブ内では入力欄を見失いやすいため、
+                # AI対話タブの中で完結する通常フォームにする。
+                with st.form(
+                    f"chat_prompt_form_{shift.year}_{shift.month}",
+                    clear_on_submit=True,
+                ):
+                    prompt = st.text_area(
+                        "AIへの質問・指示",
+                        placeholder=(
+                            f"例: {shift.month}/15 の大宮駅前店に田中さんを入れたい\n"
+                            "例: 鈴木さんと黒澤さんの20日のシフトを入れ替えるとどうなる？"
+                        ),
+                        height=100,
+                        key=f"chat_prompt_text_{shift.year}_{shift.month}",
+                    )
+                    send_prompt = st.form_submit_button(
+                        "送信",
+                        type="primary",
+                        width="stretch",
+                    )
+
+                if send_prompt:
+                    prompt = prompt.strip()
+                    if not prompt:
+                        st.warning("AIに送る内容を入力してください。")
+                    else:
+                        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+                        with st.spinner("AIが考え中..."):
+                            try:
+                                response = st.session_state.chat_engine.chat(prompt)
+                            except Exception as chat_err:
+                                response = (
+                                    "AI対話中にエラーが発生しました。"
+                                    "APIキーの設定、利用上限、または通信状態を確認してください。\n\n"
+                                    f"詳細: {type(chat_err).__name__}: {chat_err}"
+                                )
+                        st.session_state.chat_messages.append({"role": "assistant", "content": response})
+                        st.rerun()
 
                 # 操作ボタン
                 col_x, col_y = st.columns([1, 3])
@@ -2028,6 +2071,7 @@ elif mode == "👤 従業員ビュー":
             "    16日と17日のどちらか1日は休めると助かります。"
         ),
         height=120,
+        key=f"free_text_{selected}_{target_year}_{target_month}",
     )
 
     if st.button(
@@ -3029,15 +3073,45 @@ elif mode == "⚙️ 設定":
             "自然言語の希望解析・AI対話に使用します。"
             "https://console.anthropic.com/ で取得してください。"
         )
+        api_key_source = get_anthropic_api_key_source()
+        if api_key_source == "secrets":
+            st.success(
+                "✅ Streamlit Secrets に `ANTHROPIC_API_KEY` が設定済みです。"
+                "ログインのたびに入力する必要はありません。"
+            )
+        elif api_key_source == "environment":
+            st.info(
+                "✅ 環境変数 `ANTHROPIC_API_KEY` から読み込んでいます。"
+                "ローカル実行中はこのまま利用できます。"
+            )
+        elif api_key_source == "session":
+            st.warning(
+                "⚠ APIキーはこの画面の一時入力として保存されています。"
+                "アプリを開き直すと再入力が必要になる場合があります。"
+            )
+        else:
+            st.warning(
+                "⚠ APIキーが未設定です。Streamlit Cloud で運用する場合は、"
+                "GitHubではなく Settings → Secrets に登録してください。"
+            )
+
+        st.markdown("**Streamlit Cloud に登録する内容**")
+        st.code('ANTHROPIC_API_KEY = "sk-ant-..."', language="toml")
+        st.caption(
+            "このキーはGitHubにアップロードしません。"
+            "Streamlit Cloud のアプリ設定にだけ保存してください。"
+        )
+
         api_key = st.text_input(
-            "ANTHROPIC_API_KEY",
+            "一時的にこの画面で試す場合だけ入力",
             type="password",
             placeholder="sk-ant-...",
+            help="本番運用では Streamlit Secrets への登録がおすすめです。",
         )
         if api_key:
             os.environ["ANTHROPIC_API_KEY"] = api_key
             st.session_state["api_key"] = api_key
-            st.success("✅ APIキーをセッションに登録しました")
+            st.success("✅ APIキーを一時的にセッションへ登録しました")
 
     # ============================================================
     # タブ5: バックアップ状況
