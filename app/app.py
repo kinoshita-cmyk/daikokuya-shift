@@ -496,6 +496,44 @@ if mode == "📊 経営者ビュー":
         unsafe_allow_html=True,
     )
 
+    # ============================================================
+    # 🔧 強制可視化デバッグバー（不一致を即座に検出）
+    # URL の ym / session_state の target_year-target_month /
+    # 表示中シフトの year-month が全て一致しているか確認する。
+    # ============================================================
+    try:
+        _dbg_url = st.query_params.get("ym") or "(なし)"
+    except Exception:
+        _dbg_url = "(取得失敗)"
+    _dbg_sess_y = st.session_state.get("target_year")
+    _dbg_sess_m = st.session_state.get("target_month")
+    _dbg_sess_ym = (
+        f"{int(_dbg_sess_y):04d}-{int(_dbg_sess_m):02d}"
+        if _dbg_sess_y and _dbg_sess_m else "(なし)"
+    )
+    _dbg_shift = st.session_state.get("current_shift")
+    _dbg_shift_ym = (
+        f"{int(_dbg_shift.year):04d}-{int(_dbg_shift.month):02d}"
+        if _dbg_shift else "(未生成)"
+    )
+    _dbg_all_ok = (
+        _dbg_url == _dbg_sess_ym
+        and (_dbg_shift is None or _dbg_shift_ym == _dbg_sess_ym)
+    )
+    _dbg_color = "#dcfce7" if _dbg_all_ok else "#fee2e2"
+    _dbg_border = "#16a34a" if _dbg_all_ok else "#dc2626"
+    _dbg_icon = "✅" if _dbg_all_ok else "⚠"
+    st.markdown(
+        f'<div style="background:{_dbg_color}; padding:6px 10px; border-radius:4px; '
+        f'margin:4px 0; border-left:3px solid {_dbg_border}; font-size:12px; '
+        f'font-family:monospace;">'
+        f'{_dbg_icon} URL ym=<strong>{_dbg_url}</strong> '
+        f'/ session=<strong>{_dbg_sess_ym}</strong> '
+        f'/ 表示中シフト=<strong>{_dbg_shift_ym}</strong>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
     # ロック状態を確認・表示
     lock_info = lock_mgr.get_lock_info(int(target_year), int(target_month))
     if lock_info:
@@ -1184,7 +1222,22 @@ if mode == "📊 経営者ビュー":
     shift = get_session_shift()
     if shift is None:
         st.info("👆 上のボタンを押してシフトを生成してください")
-    else:
+    elif int(shift.year) != int(target_year) or int(shift.month) != int(target_month):
+        # 表示中の月と保持しているシフトの月が違う場合は隠す（混乱防止）
+        st.warning(
+            f"⚠ **{target_year}年{target_month}月** を表示しようとしていますが、"
+            f"前回生成したシフトは **{shift.year}年{shift.month}月** のものです。"
+            f"\n\n下のボタンで新規生成するか、過去シフトから読み込んでください。"
+        )
+        if st.button(
+            f"🗑 前回生成した {shift.year}/{shift.month} のシフトを破棄",
+            key="discard_stale_shift",
+        ):
+            st.session_state.pop("current_shift", None)
+            st.session_state.pop("last_validation_inputs", None)
+            st.rerun()
+        shift = None
+    if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # タブで切り替え
         tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI対話"])
 
