@@ -178,30 +178,34 @@ st.sidebar.caption(f"今日: {date.today()}")
 # ヘルパー関数
 # ============================================================
 
-def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
+SHORT_STAFF_STORE_LABELS = {
+    Store.AKABANE: ("○", "赤羽", "#f59e0b", "#fffbeb"),
+    Store.HIGASHIGUCHI: ("□", "東口", "#2563eb", "#eff6ff"),
+    Store.OMIYA: ("△", "大宮", "#16a34a", "#f0fdf4"),
+    Store.NISHIGUCHI: ("☆", "西口", "#db2777", "#fdf2f8"),
+    Store.SUZURAN: ("◆", "すずらん", "#4f46e5", "#eef2ff"),
+}
+
+
+def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
     """
-    人員不足日を検出する（Validatorと同じ判定ロジックを使用）。
+    人員不足を日付・店舗別に検出する（Validatorと同じ判定ロジックを使用）。
     判定基準:
     - 大宮駅前店のエコが1名のみ（NORMAL モードで本来2名必要）
-    - 各日の総人員が必要数（モード別）を下回る
+    - 各店舗のエコ/チケット人数が必要数（モード別）を下回る
     """
-    from prototype.rules import NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY
+    from prototype.rules import get_capacity
     from prototype.employees import get_employee
     from prototype.models import Skill
 
-    short_days: set[int] = set()
+    short_by_store: dict[int, set[Store]] = {}
     days_in_month = monthrange(shift.year, shift.month)[1]
-    capacity_by_mode = {
-        OperationMode.NORMAL: NORMAL_CAPACITY,
-        OperationMode.REDUCED: REDUCED_CAPACITY,
-        OperationMode.MINIMUM: MINIMUM_CAPACITY,
-    }
 
     for d in range(1, days_in_month + 1):
         mode = shift.operation_modes.get(d, OperationMode.NORMAL)
         if mode == OperationMode.CLOSED:
             continue
-        cap = capacity_by_mode.get(mode, NORMAL_CAPACITY)
+        cap = get_capacity(mode)
 
         # 各店舗の実勤務者を集計
         day_assigns = shift.get_day_assignments(d)
@@ -225,8 +229,7 @@ def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
         if mode == OperationMode.NORMAL:
             omiya_eco = store_eco.get(Store.OMIYA, 0)
             if omiya_eco < 2:
-                short_days.add(d)
-                continue
+                short_by_store.setdefault(d, set()).add(Store.OMIYA)
 
         # 各店舗の最低人数チェック
         for store, store_cap in cap.items():
@@ -235,45 +238,145 @@ def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
                 continue
             eco_count = store_eco.get(store, 0)
             ticket_count = store_ticket.get(store, 0)
-            if eco_count < store_cap.eco_min or ticket_count < store_cap.ticket_min:
-                short_days.add(d)
-                break
 
-    return short_days
+            # すずらんは「エコ1+チケット2」または「エコ2+チケット1」を許容
+            if store == Store.SUZURAN and mode == OperationMode.NORMAL:
+                if eco_count >= 1 and ticket_count >= 1 and eco_count + ticket_count >= 3:
+                    continue
+
+            if eco_count < store_cap.eco_min or ticket_count < store_cap.ticket_min:
+                short_by_store.setdefault(d, set()).add(store)
+
+    return short_by_store
+
+
+def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
+    """人員不足がある日付だけを返す（既存処理との互換用）。"""
+    return set(detect_short_staff_by_store(shift).keys())
+
+
+def format_short_staff_summary(
+    shift: MonthlyShift,
+    short_staff_by_store: Optional[dict[int, set[Store]]] = None,
+) -> str:
+    """人員不足日を店舗マーク付きで短く表示する。"""
+    short_staff_by_store = short_staff_by_store or detect_short_staff_by_store(shift)
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    parts = []
+    for day in sorted(short_staff_by_store):
+        stores = sorted(
+            short_staff_by_store[day],
+            key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+        )
+        labels = []
+        for store in stores:
+            mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+                store, (store.value, store.display_name, "#64748b", "#f8fafc")
+            )
+            labels.append(f"{mark}{name}")
+        parts.append(f"{shift.month}/{day}（{'・'.join(labels)}）")
+    return ", ".join(parts)
+
+
+def render_short_staff_marks(stores: set[Store]) -> str:
+    """人員不足欄に表示する店舗別マークHTML。"""
+    if not stores:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    chips = []
+    for store in sorted(
+        stores,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, name, color, bg = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        chips.append(
+            f'<span style="display:inline-flex; align-items:center; gap:2px; '
+            f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
+            f'background:{bg}; color:{color}; border:1px solid {color}; '
+            f'font-size:12px; font-weight:700; white-space:nowrap;">{mark}{name}</span>'
+        )
+    return "".join(chips)
 
 
 def render_shift_table(
     shift: MonthlyShift,
     short_staff_days: Optional[set[int]] = None,
+    short_staff_by_store: Optional[dict[int, set[Store]]] = None,
+    sticky: bool = False,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
 
     # 人員不足日を自動検出（指定がなければ）
+    if short_staff_by_store is None:
+        short_staff_by_store = detect_short_staff_by_store(shift)
     if short_staff_days is None:
-        short_staff_days = detect_short_staff_days(shift)
+        short_staff_days = set(short_staff_by_store.keys())
+    else:
+        short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
 
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
+    wrapper_style = (
+        "max-height:400px; overflow:auto; border:1px solid #cbd5e1; "
+        "border-radius:6px; background:white;"
+        if sticky else
+        "overflow-x:auto;"
+    )
+    table_style = (
+        "border-collapse:separate; border-spacing:0; font-family:sans-serif; "
+        "font-size:14px; min-width:max-content;"
+    )
+    title_style = (
+        "position:sticky; top:0; z-index:8;"
+        if sticky else ""
+    )
+    header_style = (
+        "position:sticky; top:41px; z-index:7;"
+        if sticky else ""
+    )
+    left_date_style = (
+        "position:sticky; left:0; z-index:6; min-width:70px; width:70px;"
+        if sticky else "min-width:70px; width:70px;"
+    )
+    left_weekday_style = (
+        "position:sticky; left:70px; z-index:6; min-width:46px; width:46px;"
+        if sticky else "min-width:46px; width:46px;"
+    )
+    employee_header_style = "min-width:52px;"
+    short_header_style = "min-width:190px; width:190px;"
     html = (
-        '<div style="overflow-x:auto;">'
-        '<table style="border-collapse:collapse; font-family:sans-serif; '
-        'font-size:14px;">'
+        f'<div style="{wrapper_style}">'
+        f'<table style="{table_style}">'
     )
     html += '<thead>'
     html += (
         f'<tr style="background:#0f172a; color:white;">'
         f'<th colspan="{column_count}" style="padding:10px 12px; '
-        f'border:1px solid #999; text-align:left; font-size:16px;">'
+        f'border:1px solid #999; text-align:left; font-size:16px; {title_style}">'
         f'{int(shift.year)}年{int(shift.month)}月 シフト表</th></tr>'
     )
     html += '<tr style="background:#1e3a8a; color:white;">'
-    html += '<th style="padding:8px; border:1px solid #999;">月日</th>'
-    html += '<th style="padding:8px; border:1px solid #999;">曜</th>'
+    html += (
+        f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+        f'{header_style} {left_date_style}">月日</th>'
+    )
+    html += (
+        f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+        f'{header_style} {left_weekday_style}">曜</th>'
+    )
     for name in EXPORT_COLUMN_ORDER:
-        html += f'<th style="padding:8px; border:1px solid #999;">{name}</th>'
-    html += '<th style="padding:8px; border:1px solid #999;">人員少</th>'
+        html += (
+            f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+            f'{header_style} {employee_header_style}">{name}</th>'
+        )
+    html += (
+        f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+        f'{header_style} {short_header_style}">人員少</th>'
+    )
     html += '</tr></thead><tbody>'
 
     # 各日
@@ -298,9 +401,13 @@ def render_shift_table(
         html += f'<tr style="background:{bg};">'
         html += (
             f'<td style="padding:6px; border:1px solid #ccc; '
-            f'text-align:center; font-weight:bold;">{int(shift.month)}/{d}</td>'
+            f'text-align:center; font-weight:bold; background:{bg}; '
+            f'{left_date_style}">{int(shift.month)}/{d}</td>'
         )
-        html += f'<td style="padding:6px; border:1px solid #ccc; text-align:center;">{wd}</td>'
+        html += (
+            f'<td style="padding:6px; border:1px solid #ccc; text-align:center; '
+            f'background:{bg}; {left_weekday_style}">{wd}</td>'
+        )
 
         # 各従業員
         day_assignments = shift.get_day_assignments(d)
@@ -318,12 +425,12 @@ def render_shift_table(
             )
 
         # 人員少マーク
-        short_mark = "△" if is_short else ""
+        short_mark = render_short_staff_marks(short_staff_by_store.get(d, set()))
         short_bg = "#fff3cd" if is_short else "white"
         html += (
-            f'<td style="padding:6px; border:1px solid #ccc; '
+            f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:190px; '
             f'text-align:center; background:{short_bg}; '
-            f'font-weight:bold; font-size:18px; color:#92400e;">{short_mark}</td>'
+            f'font-weight:bold; color:#92400e;">{short_mark}</td>'
         )
         html += '</tr>'
 
@@ -1282,17 +1389,16 @@ if mode == "📊 経営者ビュー":
             )
 
             # 人員不足日を計算
-            short_days = detect_short_staff_days(shift)
+            short_staff_by_store = detect_short_staff_by_store(shift)
+            short_days = set(short_staff_by_store.keys())
             if short_days:
-                short_day_text = ", ".join(
-                    f"{shift.month}/{d}" for d in sorted(short_days)
-                )
+                short_day_text = format_short_staff_summary(shift, short_staff_by_store)
                 st.warning(
                     f"⚠ 人員不足の日: {short_day_text}"
-                    f"（黄色でハイライト・人員少欄に △ 表示）"
+                    f"（黄色でハイライト・人員少欄に店舗別マーク表示）"
                 )
 
-            render_shift_table(shift, short_staff_days=short_days)
+            render_shift_table(shift, short_staff_by_store=short_staff_by_store)
 
             st.markdown("---")
             st.markdown("##### 📝 下部注意書き（Excel/PDF出力に反映）")
@@ -1386,7 +1492,7 @@ if mode == "📊 経営者ビュー":
             ]
             footer_text = st.session_state.get("excel_footer", "")
             footer_notes = [line for line in footer_text.split("\n") if line.strip()]
-            short_days_for_export = sorted(detect_short_staff_days(shift))
+            short_staff_for_export = detect_short_staff_by_store(shift)
 
             st.info(
                 "📝 「📋 シフト表」タブで入力したコメントと注意書きが反映されます。"
@@ -1402,7 +1508,7 @@ if mode == "📊 経営者ビュー":
                         shift, file_path,
                         header_comments=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
-                        short_staff_days=short_days_for_export,
+                        short_staff_days=short_staff_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 xlsx_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
@@ -1423,6 +1529,7 @@ if mode == "📊 経営者ビュー":
                     export_shift_to_pdf(
                         shift, file_path,
                         header_notes=[c for c in header_comments if c.strip()] or ["AI 自動生成版"],
+                        short_staff_days=short_staff_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 pdf_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
@@ -1513,11 +1620,10 @@ if mode == "📊 経営者ビュー":
                         unsafe_allow_html=True,
                     )
             with summary_col3:
-                short_days_chat = detect_short_staff_days(shift)
+                short_staff_by_store_chat = detect_short_staff_by_store(shift)
+                short_days_chat = set(short_staff_by_store_chat.keys())
                 if short_days_chat:
-                    short_day_text_chat = ", ".join(
-                        f"{shift.month}/{d}" for d in sorted(short_days_chat)
-                    )
+                    short_day_text_chat = format_short_staff_summary(shift, short_staff_by_store_chat)
                     st.markdown(
                         f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
                         f'text-align:center; font-weight:bold; color:#92400e;">'
@@ -1573,9 +1679,11 @@ if mode == "📊 経営者ビュー":
                 "🟡 〇 = 赤羽駅前店　🔵 □ = 赤羽東口店　🟢 △ = 大宮駅前店　"
                 "🟣 ☆ = 大宮西口店　🔷 ◆ = 大宮すずらん通り店　⚪ × = 休み"
             )
-            # 高さ制限のあるコンテナにシフト表を入れる
-            with st.container(height=400, border=True):
-                render_shift_table(shift, short_staff_days=short_days_chat)
+            render_shift_table(
+                shift,
+                short_staff_by_store=short_staff_by_store_chat,
+                sticky=True,
+            )
 
             st.markdown("---")
 
