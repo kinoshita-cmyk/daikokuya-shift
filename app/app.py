@@ -519,6 +519,76 @@ if mode == "📊 経営者ビュー":
         )
 
     # ============================================================
+    # 直近のシフト生成結果（成功・失敗・例外を永続表示）
+    # session_state に保存されているので、画面遷移しても消えない。
+    # ============================================================
+    _last_gen = st.session_state.get("last_gen_result")
+    if _last_gen:
+        _gen_status = _last_gen.get("status", "")
+        _gen_ym = _last_gen.get("ym", "")
+        _gen_finished = _last_gen.get("finished_at", "")[:19]
+        with st.container():
+            cols = st.columns([5, 1])
+            with cols[0]:
+                if _gen_status == "success":
+                    st.success(
+                        f"🟢 **直近の生成結果（{_gen_ym} / {_gen_finished}）: 成功**\n\n"
+                        f"{_last_gen.get('message', '')}"
+                    )
+                elif _gen_status == "infeasible":
+                    st.error(
+                        f"🔴 **直近の生成結果（{_gen_ym} / {_gen_finished}）: 解なし**\n\n"
+                        f"{_last_gen.get('message', '')}"
+                    )
+                elif _gen_status == "exception":
+                    st.error(
+                        f"🔴 **直近の生成結果（{_gen_ym} / {_gen_finished}）: エラー**\n\n"
+                        f"`{_last_gen.get('error_type', '')}`: "
+                        f"{_last_gen.get('error_msg', '')}"
+                    )
+                elif _gen_status == "running":
+                    st.warning(
+                        f"⏳ **{_gen_ym} の生成を実行中だった可能性があります** "
+                        f"(開始 {_last_gen.get('started_at', '')[:19]}). "
+                        "完了まで時間がかかった場合、サーバーが処理を打ち切った可能性があります。"
+                    )
+            with cols[1]:
+                if st.button("結果を消す", key="clear_gen_result"):
+                    st.session_state.pop("last_gen_result", None)
+                    st.rerun()
+
+            # 入力データの詳細（成功・失敗どちらでも展開可能）
+            if "input_summary" in _last_gen:
+                _isum = _last_gen["input_summary"]
+                with st.expander("📋 生成時の入力データ（クリックで展開）", expanded=(_gen_status != "success")):
+                    st.write(
+                        f"- 対象月: **{_gen_ym}** ({_isum.get('days_in_month', '?')}日)"
+                    )
+                    st.write(f"- 提出: {_isum.get('submission_count', 0)}名 "
+                             f"／ 未提出: {_isum.get('pending_count', 0)}名")
+                    st.write(
+                        f"- 休み希望合計: **{_isum.get('total_off_days_requested', 0)}日**"
+                    )
+                    if _isum.get("off_requests_summary"):
+                        st.write("- 各人の休み希望日数:")
+                        for emp, cnt in _isum["off_requests_summary"].items():
+                            days = _isum.get("off_requests_detail", {}).get(emp, [])
+                            st.write(f"    - {emp}: {cnt}日 → {days}")
+                    if _isum.get("holiday_overrides"):
+                        st.write("- 月内目標休日数（有給込み）:")
+                        for emp, n in _isum["holiday_overrides"].items():
+                            req_off = _isum.get("off_requests_summary", {}).get(emp, 0)
+                            warn = " ⚠ 休み希望が目標を超過" if req_off > n else ""
+                            st.write(f"    - {emp}: {n}日{warn}")
+                    if _isum.get("paid_leave_days"):
+                        st.write(f"- 有給申請: {_isum['paid_leave_days']}")
+                    st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
+                    st.write(f"- 柔軟休み: {_isum.get('flexible_off_count', 0)}件")
+            if _last_gen.get("error_detail"):
+                with st.expander("🔧 技術者向け: 例外スタックトレース", expanded=False):
+                    st.code(_last_gen["error_detail"])
+
+    # ============================================================
     # 希望シフト提出状況（リアルタイム）
     # ============================================================
     expected_employees = [
@@ -714,6 +784,14 @@ if mode == "📊 経営者ビュー":
             except Exception:
                 pass
 
+            # 結果を session_state に永続化するためのキー
+            _gen_result_key = "last_gen_result"
+            st.session_state[_gen_result_key] = {
+                "status": "running",
+                "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
+                "started_at": datetime.now().isoformat(),
+            }
+
             # ステップ進捗の状態表示エリア
             progress_area = st.empty()
             try:
@@ -845,10 +923,38 @@ if mode == "📊 経営者ビュー":
                 st.session_state["target_year"] = _saved_target_year
                 st.session_state["target_month"] = _saved_target_month
 
+                # 入力データのサマリ（成功・失敗どちらでも残す）
+                _input_summary = {
+                    "submission_count": int(sub_data.submission_count),
+                    "pending_count": int(len(sub_data.pending_employees)),
+                    "submitted_employees": list(sub_data.submitted_employees),
+                    "off_requests_summary": {
+                        emp: len(days) for emp, days in use_off_requests.items()
+                    },
+                    "off_requests_detail": {
+                        emp: list(days) for emp, days in use_off_requests.items()
+                    },
+                    "work_requests_count": len(use_work_requests),
+                    "flexible_off_count": len(use_flexible_off),
+                    "holiday_overrides": dict(use_holiday_overrides),
+                    "paid_leave_days": dict(sub_data.paid_leave_days),
+                    "days_in_month": days_in_m,
+                    "total_off_days_requested": sum(
+                        len(v) for v in use_off_requests.values()
+                    ),
+                }
+
                 if shift is not None:
                     save_session_shift(shift)
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
+                    st.session_state[_gen_result_key] = {
+                        "status": "success",
+                        "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
+                        "message": data_source_msg,
+                        "input_summary": _input_summary,
+                        "finished_at": datetime.now().isoformat(),
+                    }
                 else:
                     # ソルバーが解を見つけられなかった場合
                     progress_area.empty()
@@ -866,6 +972,14 @@ if mode == "📊 経営者ビュー":
                                 diag_lines.append(
                                     f"- ⚠ **{emp_name}** の休み希望が {len(off_days)}日と多すぎる可能性"
                                 )
+                        # 有給日数による holiday_overrides の矛盾チェック
+                        for emp_name, req_holidays in use_holiday_overrides.items():
+                            req_off_count = len(use_off_requests.get(emp_name, []))
+                            if req_off_count > req_holidays:
+                                diag_lines.append(
+                                    f"- ⚠ **{emp_name}** は休み希望 {req_off_count}日に対し、"
+                                    f"有給込み目標休日 {req_holidays}日 → 矛盾の可能性"
+                                )
                         # 総休日数チェック
                         total_off = sum(len(v) for v in use_off_requests.values())
                         diag_lines.append(
@@ -876,7 +990,7 @@ if mode == "📊 経営者ビュー":
                     diag_lines.extend([
                         "",
                         "**対処方法:**",
-                        "1. 「⚙️ 設定 → 🏖 有給使用状況」で各従業員の希望休日を確認",
+                        "1. 下の「📋 生成時の入力データ」で実際に渡された希望を確認",
                         "2. 矛盾する希望があれば該当従業員に再提出を依頼",
                         "3. 「⚙️ 設定 → 🔧 ルール設定」で",
                         "   - 「最大連勤日数」を 5→6 や 7 に増やす",
@@ -884,6 +998,13 @@ if mode == "📊 経営者ビュー":
                         "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
                     ])
                     st.error("\n".join(diag_lines))
+                    st.session_state[_gen_result_key] = {
+                        "status": "infeasible",
+                        "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
+                        "message": "\n".join(diag_lines),
+                        "input_summary": _input_summary,
+                        "finished_at": datetime.now().isoformat(),
+                    }
             except Exception as _gen_err:
                 # 想定外の例外（KeyError など）も画面に表示
                 progress_area.empty()
@@ -901,6 +1022,14 @@ if mode == "📊 経営者ビュー":
                 )
                 with st.expander("🔧 技術者向け: 詳細エラーログ", expanded=False):
                     st.code(error_detail)
+                st.session_state[_gen_result_key] = {
+                    "status": "exception",
+                    "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
+                    "error_type": type(_gen_err).__name__,
+                    "error_msg": str(_gen_err),
+                    "error_detail": error_detail,
+                    "finished_at": datetime.now().isoformat(),
+                }
             finally:
                 # 例外が発生してもターゲット月をリセットしない
                 st.session_state["target_year"] = _saved_target_year
