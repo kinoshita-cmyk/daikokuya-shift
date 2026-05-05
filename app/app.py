@@ -1407,10 +1407,17 @@ if mode == "📊 経営者ビュー":
             st.rerun()
         shift = None
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
-        # タブで切り替え
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI対話"])
+        # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
+        shift_view_options = ["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI対話"]
+        selected_shift_view = st.radio(
+            "表示切替",
+            options=shift_view_options,
+            horizontal=True,
+            key="manager_shift_view",
+            label_visibility="collapsed",
+        )
 
-        with tab1:
+        if selected_shift_view == shift_view_options[0]:
             # コメント欄（表の上）— Excel出力時にも反映される
             st.markdown("##### 📝 上部コメント（Excel/PDF出力に反映）")
             col_cm1, col_cm2, col_cm3 = st.columns(3)
@@ -1470,7 +1477,7 @@ if mode == "📊 経営者ビュー":
             )
             st.session_state["excel_footer"] = footer_text
 
-        with tab2:
+        elif selected_shift_view == shift_view_options[1]:
             # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
             _vi = st.session_state.get("last_validation_inputs", {})
             _vi_match = (
@@ -1513,7 +1520,7 @@ if mode == "📊 経営者ビュー":
                     if issue.severity == "WARNING":
                         st.write(f"⚠ {issue}")
 
-        with tab3:
+        elif selected_shift_view == shift_view_options[2]:
             # 出勤日数統計
             from prototype.employees import ALL_EMPLOYEES
             data = []
@@ -1535,7 +1542,7 @@ if mode == "📊 経営者ビュー":
                 })
             st.dataframe(data, width="stretch", hide_index=True)
 
-        with tab4:
+        elif selected_shift_view == shift_view_options[3]:
             output_dir = OUTPUT_DIR
             output_dir.mkdir(exist_ok=True)
 
@@ -1607,7 +1614,7 @@ if mode == "📊 経営者ビュー":
                 path = backup.save_shift(shift, kind=kind, author="代表取締役", note=note)
                 st.success(f"✅ バックアップ保存: {path.name}")
 
-        with tab5:
+        elif selected_shift_view == shift_view_options[4]:
             st.markdown("##### 💬 シフトを見ながらAIと対話")
             st.caption(
                 "AIが作る変更はまず仮変更になります。反映・取り消し・戻る・進むは会話欄の下で操作できます。"
@@ -1628,11 +1635,6 @@ if mode == "📊 経営者ビュー":
 
                 chat_engine = st.session_state.chat_engine
 
-                # 先に表示場所を確保しておき、下の操作後に中身を描画する。
-                # これにより、送信や反映直後でも同じ画面内で状態が更新される。
-                ai_summary_area = st.container()
-                ai_table_area = st.container()
-                st.markdown("---")
                 st.markdown("##### 会話")
                 chat_history_area = st.container()
                 change_status_area = st.container()
@@ -1780,6 +1782,10 @@ if mode == "📊 経営者ビュー":
                         for msg in st.session_state.chat_messages:
                             with st.chat_message(msg["role"]):
                                 st.write(msg["content"])
+
+                st.markdown("---")
+                ai_summary_area = st.container()
+                ai_table_area = st.container()
 
                 display_shift = chat_engine.get_preview_shift() if pending_count else shift
                 changed_cells = chat_engine.get_pending_change_keys() if pending_count else set()
