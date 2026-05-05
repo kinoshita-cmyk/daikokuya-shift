@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "updated_at": "2026-05-03T09:47:20.500670",
+  "updated_by": "動作テスト",
+  "enabled_checks": {
+    "store_capacity": true,
+    "eco_required": true,
+    "consec_work": true,
+    "holiday_days": true,
+    "consec_off_3": true,
+    "two_off_per_month": true,
+    "off_request": true,
+    "work_request": true,
+    "omiya_anchor": true,
+    "higashi_monday": true,
+    "omiya_short_warning": true
+  },
+  "parameters": {
+    "max_consec_work": 5,
+    "soft_consec_threshold": 4,
+    "default_holiday_days": 8,
+    "min_2off_per_month": 1,
+    "max_2off_per_month": 2,
+    "higashi_eco2_max_per_month": 3,
+    "solver_seed": 42,
+    "solver_time_limit_seconds": 120
+  },
+  "custom_rules": []
+}
