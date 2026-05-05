@@ -520,6 +520,7 @@ if mode == "📊 経営者ビュー":
             f'</div>'
             f'<div style="font-size:13px; color:#991b1b; margin-top:4px;">'
             f'まだ誰も希望を提出していません。従業員にお声がけしてください。'
+            f'<br>💡 提出データがない状態で「シフトを自動生成」を押すと、サンプルデータで生成します（テスト用）。'
             f'</div></div>',
             unsafe_allow_html=True,
         )
@@ -535,7 +536,9 @@ if mode == "📊 経営者ビュー":
             f'<div style="background:#16a34a; height:100%; width:{completion_pct}%;"></div>'
             f'</div>'
             f'<div style="font-size:13px; color:#92400e;">'
-            f'⚠ 未提出 {summary["total_pending"]}名: <strong>{", ".join(submission_status["not_submitted"])}</strong>'
+            f'⏳ 未提出 {summary["total_pending"]}名: <strong>{", ".join(submission_status["not_submitted"])}</strong>'
+            f'<br>✨ 一部提出のままでもシフト生成できます。未提出者は希望未指定として自由配置されます。'
+            f'<br>📝 長期欠勤の場合は「⚙️ 設定 → 👥 従業員マスタ」で雇用形態を「休職中」に変更してください（シフト対象外になります）。'
             f'</div></div>',
             unsafe_allow_html=True,
         )
@@ -623,10 +626,10 @@ if mode == "📊 経営者ビュー":
         else:
             gen_help = "AIが希望データから新規シフトを作成します"
 
-        # 確認モード（未提出者がいる場合は2段階確認）
+        # 一部提出でも生成可能（未提出者は自由配置）
         gen_button_label = "🔄 シフトを自動生成"
         if summary["total_pending"] > 0 and not gen_disabled:
-            gen_button_label = f"⚠ シフトを自動生成（{summary['total_pending']}名未提出）"
+            gen_button_label = f"🔄 シフトを自動生成（提出 {summary['total_submitted']}/{summary['total_expected']}名）"
 
         if st.button(
             gen_button_label,
@@ -635,27 +638,65 @@ if mode == "📊 経営者ビュー":
             disabled=gen_disabled,
             help=gen_help,
         ):
-            # 未提出者がいる場合は確認ダイアログ
-            if summary["total_pending"] > 0 and not st.session_state.get("confirm_gen_with_pending"):
-                st.session_state["confirm_gen_with_pending"] = True
-                st.warning(
-                    f"⚠ {summary['total_pending']}名（{', '.join(submission_status['not_submitted'])}）が"
-                    "未提出です。もう一度ボタンを押すと未提出者を含まずに生成します。"
-                )
-                st.stop()
-            st.session_state["confirm_gen_with_pending"] = False
             with st.spinner("AIがシフト案を生成中... (1〜2分かかる場合があります)"):
+                # 実際の提出データを読み込む
+                from prototype.submission_loader import load_submissions_for_month
+                sub_data = load_submissions_for_month(
+                    int(target_year), int(target_month), expected_employees,
+                )
+
+                # 提出があればそれを使い、なければテストデータにフォールバック
+                if sub_data.submission_count > 0:
+                    # 実データで生成
+                    use_off_requests = sub_data.off_requests
+                    use_work_requests = sub_data.work_requests
+                    use_flexible_off = sub_data.flexible_off
+                    use_holiday_overrides = {}  # 提出データに有給情報があれば反映
+                    # 有給日数を holiday_overrides に反映（基準＋有給日数）
+                    for emp_name, paid_days in sub_data.paid_leave_days.items():
+                        try:
+                            from prototype.employees import get_employee
+                            emp = get_employee(emp_name)
+                            if emp.annual_target_days:
+                                from calendar import monthrange
+                                days_in_m = monthrange(int(target_year), int(target_month))[1]
+                                base_target = round(emp.annual_target_days / 12)
+                                base_holidays = days_in_m - base_target
+                                use_holiday_overrides[emp_name] = base_holidays + paid_days
+                        except Exception:
+                            pass
+                    data_source_msg = (
+                        f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
+                    )
+                    if sub_data.pending_employees:
+                        data_source_msg += (
+                            f"\n（未提出 {len(sub_data.pending_employees)}名: "
+                            f"{', '.join(sub_data.pending_employees[:5])}"
+                            f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
+                            "は希望未指定として自由配置）"
+                        )
+                else:
+                    # テストデータ使用
+                    use_off_requests = OFF_REQUESTS
+                    use_work_requests = WORK_REQUESTS
+                    use_flexible_off = FLEXIBLE_OFF_REQUESTS
+                    use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                    data_source_msg = (
+                        "💡 提出データがないため、サンプルテストデータで生成しました。"
+                        "本番では従業員から希望が届いた後に生成してください。"
+                    )
+
                 modes = determine_operation_modes(target_year, target_month)
                 shift = generate_shift(
                     year=target_year,
                     month=target_month,
-                    off_requests=OFF_REQUESTS,
-                    work_requests=WORK_REQUESTS,
+                    off_requests=use_off_requests,
+                    work_requests=use_work_requests,
                     prev_month=PREVIOUS_MONTH_CARRYOVER,
-                    flexible_off=FLEXIBLE_OFF_REQUESTS,
-                    holiday_overrides=MAY_2026_HOLIDAY_OVERRIDES,
+                    flexible_off=use_flexible_off,
+                    holiday_overrides=use_holiday_overrides,
                     operation_modes=modes,
-                    consec_exceptions=["野澤"],
+                    consec_exceptions=["野澤"] if not sub_data.submission_count else [],
                     max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
                     time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 120),
                     random_seed=rule_cfg.parameters.get("solver_seed", 42),
@@ -663,9 +704,13 @@ if mode == "📊 経営者ビュー":
                 )
                 if shift is not None:
                     save_session_shift(shift)
-                    st.success("✅ シフト生成完了！")
+                    st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                 else:
-                    st.error("❌ シフト生成失敗")
+                    st.error(
+                        "❌ シフト生成に失敗しました。"
+                        "提出データが矛盾している可能性があります。"
+                        "「✅ 検証結果」タブのエラーを確認するか、希望データを見直してください。"
+                    )
 
     with bcol2:
         # 確定版を読み込む
@@ -1239,19 +1284,9 @@ elif mode == "👤 従業員ビュー":
 
     st.markdown("##### 📅 提出する対象月を選んでください")
 
-    # クイック選択ボタン
+    # クイック選択ボタン（経営者ビューと同じ範囲：前月/今月/翌月/翌々月）
     qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
     with qb_col1:
-        if st.button(
-            f"前々月\n({pp_year}/{pp_month})",
-            key="emp_qb_pp",
-            use_container_width=True,
-            help="テスト用：過去月でも提出可能",
-        ):
-            st.session_state["emp_target_year"] = pp_year
-            st.session_state["emp_target_month"] = pp_month
-            st.rerun()
-    with qb_col2:
         if st.button(
             f"前月\n({prev_year}/{prev_month})",
             key="emp_qb_prev",
@@ -1261,7 +1296,7 @@ elif mode == "👤 従業員ビュー":
             st.session_state["emp_target_year"] = prev_year
             st.session_state["emp_target_month"] = prev_month
             st.rerun()
-    with qb_col3:
+    with qb_col2:
         if st.button(
             f"今月\n({today.year}/{today.month})",
             key="emp_qb_curr",
@@ -1270,7 +1305,7 @@ elif mode == "👤 従業員ビュー":
             st.session_state["emp_target_year"] = today.year
             st.session_state["emp_target_month"] = today.month
             st.rerun()
-    with qb_col4:
+    with qb_col3:
         # 翌月（デフォルト・本番運用想定）
         if st.button(
             f"📌 翌月\n({next_year}/{next_month})",
@@ -1281,6 +1316,16 @@ elif mode == "👤 従業員ビュー":
         ):
             st.session_state["emp_target_year"] = next_year
             st.session_state["emp_target_month"] = next_month
+            st.rerun()
+    with qb_col4:
+        if st.button(
+            f"翌々月\n({nn_year}/{nn_month})",
+            key="emp_qb_nn",
+            use_container_width=True,
+            help="早めに提出する場合",
+        ):
+            st.session_state["emp_target_year"] = nn_year
+            st.session_state["emp_target_month"] = nn_month
             st.rerun()
 
     target_year = st.session_state["emp_target_year"]
