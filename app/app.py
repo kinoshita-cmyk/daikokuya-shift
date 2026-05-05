@@ -1602,15 +1602,6 @@ if mode == "📊 経営者ビュー":
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_messages = []
 
-                # 会話履歴を高さ制限のコンテナで表示
-                chat_container = st.container(height=350, border=True)
-                with chat_container:
-                    if not st.session_state.chat_messages:
-                        st.caption("👇 下の入力欄から質問・指示してください")
-                    for msg in st.session_state.chat_messages:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
-
                 # 入力欄
                 # st.chat_input は画面最下部に固定され、タブ内では入力欄を見失いやすいため、
                 # AI対話タブの中で完結する通常フォームにする。
@@ -1650,6 +1641,15 @@ if mode == "📊 経営者ビュー":
                                 )
                         st.session_state.chat_messages.append({"role": "assistant", "content": response})
                         st.rerun()
+
+                st.markdown("##### 対話履歴")
+                chat_container = st.container(height=350, border=True)
+                with chat_container:
+                    if not st.session_state.chat_messages:
+                        st.caption("上の入力欄から質問・指示してください")
+                    for msg in st.session_state.chat_messages:
+                        with st.chat_message(msg["role"]):
+                            st.write(msg["content"])
 
                 # 操作ボタン
                 col_x, col_y = st.columns([1, 3])
@@ -2716,12 +2716,12 @@ elif mode == "⚙️ 設定":
             with filt_col1:
                 show_filter = st.selectbox(
                     "表示する雇用形態",
-                    options=["すべて", "在籍中のみ", "退職者のみ", "顧問・補助のみ"],
+                    options=["すべて", "正社員・パートのみ", "退職者のみ", "顧問・補助のみ"],
                     key="emp_filter",
                 )
 
             # 表示する従業員リスト
-            if show_filter == "在籍中のみ":
+            if show_filter == "正社員・パートのみ":
                 display_emps = [
                     e for e in all_emps
                     if e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
