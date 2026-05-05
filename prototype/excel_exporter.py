@@ -179,7 +179,7 @@ def export_shift_to_excel(
     # ============================================================
     # B6:Y6 凡例
     # ============================================================
-    legend = f"{shift.year}年{shift.month}月のシフト表　〇赤羽　□東口　△大宮　☆西口　◆すずらん"
+    legend = f"{shift.year}年{shift.month}月のシフト表　○赤羽　□東口　△大宮　☆西口　◆すずらん"
     ws.merge_cells(start_row=6, start_column=2, end_row=6, end_column=LAST_COL)
     c = ws.cell(row=6, column=2, value=legend)
     c.font = legend_font

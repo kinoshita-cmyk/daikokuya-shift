@@ -140,7 +140,7 @@ def export_shift_to_pdf(
         story.append(Paragraph(note, note_style))
 
     # 凡例
-    legend = "〇赤羽　□東口　△大宮　☆西口　◆すずらん　×休み"
+    legend = "○赤羽　□東口　△大宮　☆西口　◆すずらん　×休み"
     story.append(Paragraph(legend, legend_style))
 
     # シフトテーブル
