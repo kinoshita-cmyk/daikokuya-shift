@@ -27,7 +27,14 @@ cd /Users/kinoshitayoshihide/daikokuya-shift
 ./start_app.sh
 ```
 
-ブラウザで http://localhost:8501 を開くと操作画面が表示されます。
+起動時に表示される `http://localhost:8501` などのURLをブラウザで開くと、操作画面が表示されます。
+8501 が使用中の場合は、自動で 8502 以降の空きポートに切り替わります。
+
+認証設定がまだ無い状態でローカル確認だけしたい場合は、以下のように起動します：
+
+```bash
+BYPASS_AUTH=1 ./start_app.sh
+```
 
 ### 2. シフトを生成
 
