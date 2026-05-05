@@ -333,6 +333,7 @@ def render_shift_table(
     short_staff_days: Optional[set[int]] = None,
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
     sticky: bool = False,
+    changed_cells: Optional[set[tuple[str, int]]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -345,6 +346,7 @@ def render_shift_table(
         short_staff_days = set(short_staff_by_store.keys())
     else:
         short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
+    changed_cells = changed_cells or set()
 
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
@@ -449,9 +451,14 @@ def render_shift_table(
             else:
                 cell_text = a.store.value
                 cell_bg = color_map.get(cell_text, "white")
+            changed_style = (
+                "box-shadow:inset 0 0 0 3px #f97316; font-weight:bold;"
+                if (name, d) in changed_cells else ""
+            )
             html += (
                 f'<td style="padding:6px; border:1px solid #ccc; '
-                f'text-align:center; background:{cell_bg}; font-size:16px;">{cell_text}</td>'
+                f'text-align:center; background:{cell_bg}; font-size:16px; '
+                f'{changed_style}">{cell_text}</td>'
             )
 
         # 人員少マーク
@@ -1128,6 +1135,15 @@ if mode == "📊 経営者ビュー":
 
                 if shift is not None:
                     save_session_shift(shift)
+                    try:
+                        backup_mgr.save_shift(
+                            shift,
+                            kind="draft",
+                            author="自動保存",
+                            note="シフト生成直後の下書き",
+                        )
+                    except Exception:
+                        pass
                     # 検証で使うために、実際に使った制約も保存
                     st.session_state["last_validation_inputs"] = {
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
@@ -1361,6 +1377,20 @@ if mode == "📊 経営者ビュー":
     shift = get_session_shift()
     if shift is None:
         st.info("👆 上のボタンを押してシフトを生成してください")
+        try:
+            latest_draft = backup_mgr.get_latest_shift(
+                int(target_year), int(target_month), kind="draft",
+            )
+        except Exception:
+            latest_draft = None
+        if latest_draft is not None:
+            if st.button(
+                f"💾 自動保存の下書き（{int(target_year)}年{int(target_month)}月）を復元",
+                key="restore_latest_draft_shift",
+            ):
+                save_session_shift(latest_draft)
+                st.success("自動保存の下書きを復元しました")
+                st.rerun()
     elif int(shift.year) != int(target_year) or int(shift.month) != int(target_month):
         # 表示中の月と保持しているシフトの月が違う場合は隠す（混乱防止）
         st.warning(
@@ -1578,139 +1608,12 @@ if mode == "📊 経営者ビュー":
                 st.success(f"✅ バックアップ保存: {path.name}")
 
         with tab5:
-            st.write("### 💬 シフトを見ながら AI と対話")
+            st.markdown("##### 💬 シフトを見ながらAIと対話")
             st.caption(
-                "シフト表を上に、AIとの対話を下に表示します。"
-                "AIの提案に応じてシフトを変更したい場合は、対話画面で指示してください。"
+                "AIが作る変更はまず仮変更になります。反映・取り消し・戻る・進むは会話欄の下で操作できます。"
             )
 
             api_key = get_anthropic_api_key()
-
-            # ============================================================
-            # 上部: シフト表（コンパクト版）+ 検証結果サマリー
-            # ============================================================
-            # まず検証を実行してエラー・警告を取得（実際の生成時データを使用）
-            _cv_inputs = st.session_state.get("last_validation_inputs", {})
-            _cv_match = (
-                _cv_inputs.get("ym")
-                == f"{int(shift.year):04d}-{int(shift.month):02d}"
-            )
-            if _cv_match:
-                _cv_work = _cv_inputs.get("work_requests", [])
-                _cv_off = _cv_inputs.get("off_requests", {})
-                _cv_prev = _cv_inputs.get("prev_month", [])
-                _cv_holiday = _cv_inputs.get("holiday_overrides", {})
-            else:
-                _cv_work = []
-                _cv_off = {}
-                _cv_prev = []
-                _cv_holiday = {}
-            chat_result = validate(
-                shift=shift, work_requests=_cv_work,
-                off_requests=_cv_off, prev_month=_cv_prev,
-                holiday_overrides=_cv_holiday,
-                max_consec=rule_cfg.parameters.get("max_consec_work", 5),
-            )
-
-            # サマリー行（コンパクト表示）
-            summary_col1, summary_col2, summary_col3 = st.columns([1, 1, 2])
-            with summary_col1:
-                if chat_result.error_count == 0:
-                    st.markdown(
-                        '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                        'text-align:center; font-weight:bold; color:#166534;">'
-                        '✅ エラー 0件</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div style="background:#fee2e2; padding:8px; border-radius:6px; '
-                        f'text-align:center; font-weight:bold; color:#991b1b;">'
-                        f'❌ エラー {chat_result.error_count}件</div>',
-                        unsafe_allow_html=True,
-                    )
-            with summary_col2:
-                if chat_result.warning_count == 0:
-                    st.markdown(
-                        '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                        'text-align:center; font-weight:bold; color:#166534;">'
-                        '✓ 警告 0件</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
-                        f'text-align:center; font-weight:bold; color:#92400e;">'
-                        f'⚠ 警告 {chat_result.warning_count}件</div>',
-                        unsafe_allow_html=True,
-                    )
-            with summary_col3:
-                short_staff_by_store_chat = detect_short_staff_by_store(shift)
-                short_days_chat = set(short_staff_by_store_chat.keys())
-                if short_days_chat:
-                    short_day_text_chat = format_short_staff_summary(shift, short_staff_by_store_chat)
-                    st.markdown(
-                        f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
-                        f'text-align:center; font-weight:bold; color:#92400e;">'
-                        f'👥 人員不足: {short_day_text_chat}</div>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                        'text-align:center; font-weight:bold; color:#166534;">'
-                        '👥 人員充足</div>',
-                        unsafe_allow_html=True,
-                    )
-
-            # エラー・警告の詳細（折りたたみ式）
-            if chat_result.error_count > 0 or chat_result.warning_count > 0:
-                with st.expander(
-                    f"🔍 エラー・警告の詳細を見る（{chat_result.error_count + chat_result.warning_count}件）",
-                    expanded=False,
-                ):
-                    if chat_result.error_count > 0:
-                        st.markdown("**❌ エラー（要修正）**")
-                        for issue in chat_result.issues:
-                            if issue.severity == "ERROR":
-                                st.markdown(
-                                    f'<div style="background:#fef2f2; border-left:4px solid #ef4444; '
-                                    f'padding:6px 10px; margin:4px 0; font-size:13px;">'
-                                    f'<strong>{issue.category}</strong>'
-                                    f'{" · " + str(shift.month) + "/" + str(issue.day) if issue.day else ""}'
-                                    f'{" · " + issue.employee if issue.employee else ""}<br>'
-                                    f'<span style="color:#7f1d1d;">{issue.message}</span></div>',
-                                    unsafe_allow_html=True,
-                                )
-                    if chat_result.warning_count > 0:
-                        st.markdown("**⚠ 警告（確認推奨）**")
-                        for issue in chat_result.issues:
-                            if issue.severity == "WARNING":
-                                st.markdown(
-                                    f'<div style="background:#fefce8; border-left:4px solid #eab308; '
-                                    f'padding:6px 10px; margin:4px 0; font-size:13px;">'
-                                    f'<strong>{issue.category}</strong>'
-                                    f'{" · " + str(shift.month) + "/" + str(issue.day) if issue.day else ""}'
-                                    f'{" · " + issue.employee if issue.employee else ""}<br>'
-                                    f'<span style="color:#713f12;">{issue.message}</span></div>',
-                                    unsafe_allow_html=True,
-                                )
-
-            st.markdown("##### 📋 現在のシフト表")
-
-            render_shift_legend()
-            render_shift_table(
-                shift,
-                short_staff_by_store=short_staff_by_store_chat,
-                sticky=True,
-            )
-
-            st.markdown("---")
-
-            # ============================================================
-            # 下部: AI 対話
-            # ============================================================
-            st.markdown("##### 💬 AI 対話")
             if not api_key:
                 st.warning(
                     "⚠ Claude API キーが設定されていません。"
@@ -1718,38 +1621,22 @@ if mode == "📊 経営者ビュー":
                     "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
-                # チャットエンジン初期化（セッションに保持）
                 if "chat_engine" not in st.session_state or st.session_state.get("chat_shift_id") != id(shift):
                     st.session_state.chat_engine = ShiftChatEngine(shift, api_key=api_key)
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_messages = []
 
-                pending = len(st.session_state.chat_engine.pending_changes)
-                chat_toolbar_left, chat_toolbar_right = st.columns([3, 1])
-                with chat_toolbar_left:
-                    if pending:
-                        st.info(
-                            f"⏳ 仮変更が {pending} 件あります。"
-                            "「変更を確定して」と送ると本シフトに反映されます。"
-                        )
-                with chat_toolbar_right:
-                    if st.button("会話をクリア", key="chat_clear", width="stretch"):
-                        st.session_state.chat_messages = []
-                        st.rerun()
+                chat_engine = st.session_state.chat_engine
 
-                st.markdown("###### 会話")
-                chat_container = st.container(height=420, border=True)
-                with chat_container:
-                    if not st.session_state.chat_messages:
-                        with st.chat_message("assistant"):
-                            st.write(
-                                "シフト表を見ながら相談できます。"
-                                f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
-                                "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
-                            )
-                    for msg in st.session_state.chat_messages:
-                        with st.chat_message(msg["role"]):
-                            st.write(msg["content"])
+                # 先に表示場所を確保しておき、下の操作後に中身を描画する。
+                # これにより、送信や反映直後でも同じ画面内で状態が更新される。
+                ai_summary_area = st.container()
+                ai_table_area = st.container()
+                st.markdown("---")
+                st.markdown("##### 会話")
+                chat_history_area = st.container()
+                change_status_area = st.container()
+                change_buttons_area = st.container()
 
                 with st.form(
                     f"chat_prompt_form_{shift.year}_{shift.month}",
@@ -1761,7 +1648,7 @@ if mode == "📊 経営者ビュー":
                             f"{shift.month}/15 の大宮に田中さんを入れたい\n"
                             "鈴木さんと黒澤さんの20日を入れ替えるとどうなる？"
                         ),
-                        height=110,
+                        height=100,
                         key=f"chat_prompt_text_{shift.year}_{shift.month}",
                     )
                     send_prompt = st.form_submit_button(
@@ -1778,7 +1665,7 @@ if mode == "📊 経営者ビュー":
                         st.session_state.chat_messages.append({"role": "user", "content": prompt})
                         with st.spinner("AIが考え中..."):
                             try:
-                                response = st.session_state.chat_engine.chat(prompt)
+                                response = chat_engine.chat(prompt)
                             except Exception as chat_err:
                                 response = (
                                     "AI対話中にエラーが発生しました。"
@@ -1786,10 +1673,238 @@ if mode == "📊 経営者ビュー":
                                     f"詳細: {type(chat_err).__name__}: {chat_err}"
                                 )
                         st.session_state.chat_messages.append({"role": "assistant", "content": response})
-                        st.rerun()
-                # チャット中にシフトが書き換えられた場合、セッションのシフトも同期
-                if st.session_state.chat_engine.shift is not shift:
-                    save_session_shift(st.session_state.chat_engine.shift)
+
+                with change_buttons_area:
+                    pending_count = chat_engine.get_pending_change_count()
+                    btn_apply, btn_discard, _ = st.columns([1, 1, 3])
+                    with btn_apply:
+                        if st.button(
+                            "反映する",
+                            key="chat_apply_pending",
+                            type="primary",
+                            width="stretch",
+                            disabled=pending_count == 0,
+                            help="仮変更を本シフトに反映します",
+                        ):
+                            msg = chat_engine.apply_pending_changes()
+                            try:
+                                backup_mgr.save_shift(
+                                    chat_engine.shift,
+                                    kind="draft",
+                                    author="AI対話",
+                                    note=msg,
+                                )
+                            except Exception:
+                                pass
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                    with btn_discard:
+                        if st.button(
+                            "取り消す",
+                            key="chat_discard_pending",
+                            width="stretch",
+                            disabled=pending_count == 0,
+                            help="仮変更を捨てて元のシフト表示に戻します",
+                        ):
+                            msg = chat_engine.discard_pending_changes()
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+
+                    can_undo = bool(chat_engine.undo_stack)
+                    can_redo = bool(chat_engine.redo_stack)
+                    btn_undo, btn_redo, btn_clear = st.columns([1, 1, 3])
+                    with btn_undo:
+                        if st.button(
+                            "← 戻る",
+                            key="chat_undo",
+                            width="stretch",
+                            disabled=not can_undo,
+                            help="直前に反映した変更を元に戻します",
+                        ):
+                            msg = chat_engine.undo_last_apply()
+                            try:
+                                backup_mgr.save_shift(
+                                    chat_engine.shift,
+                                    kind="draft",
+                                    author="AI対話",
+                                    note=msg,
+                                )
+                            except Exception:
+                                pass
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                    with btn_redo:
+                        if st.button(
+                            "進む →",
+                            key="chat_redo",
+                            width="stretch",
+                            disabled=not can_redo,
+                            help="元に戻した変更をもう一度反映します",
+                        ):
+                            msg = chat_engine.redo_last_apply()
+                            try:
+                                backup_mgr.save_shift(
+                                    chat_engine.shift,
+                                    kind="draft",
+                                    author="AI対話",
+                                    note=msg,
+                                )
+                            except Exception:
+                                pass
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                    with btn_clear:
+                        if st.button("会話をクリア", key="chat_clear", width="stretch"):
+                            st.session_state.chat_messages = []
+
+                pending_count = chat_engine.get_pending_change_count()
+                with change_status_area:
+                    if pending_count:
+                        st.warning(
+                            f"未反映の仮変更が **{pending_count}件** あります。"
+                            "下の表では仮変更セルをオレンジ枠で表示しています。"
+                        )
+                        for line in chat_engine.get_pending_change_summary():
+                            st.caption(line)
+                    elif chat_engine.last_status_message:
+                        st.success(chat_engine.last_status_message)
+                    else:
+                        st.info("未反映の仮変更はありません。AIに依頼すると、まず仮変更として表示されます。")
+
+                with chat_history_area:
+                    chat_container = st.container(height=360, border=True)
+                    with chat_container:
+                        if not st.session_state.chat_messages:
+                            with st.chat_message("assistant"):
+                                st.write(
+                                    "シフト表を見ながら相談できます。"
+                                    f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
+                                    "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
+                                )
+                        for msg in st.session_state.chat_messages:
+                            with st.chat_message(msg["role"]):
+                                st.write(msg["content"])
+
+                display_shift = chat_engine.get_preview_shift() if pending_count else shift
+                changed_cells = chat_engine.get_pending_change_keys() if pending_count else set()
+
+                _cv_inputs = st.session_state.get("last_validation_inputs", {})
+                _cv_match = (
+                    _cv_inputs.get("ym")
+                    == f"{int(display_shift.year):04d}-{int(display_shift.month):02d}"
+                )
+                if _cv_match:
+                    _cv_work = _cv_inputs.get("work_requests", [])
+                    _cv_off = _cv_inputs.get("off_requests", {})
+                    _cv_prev = _cv_inputs.get("prev_month", [])
+                    _cv_holiday = _cv_inputs.get("holiday_overrides", {})
+                else:
+                    _cv_work = []
+                    _cv_off = {}
+                    _cv_prev = []
+                    _cv_holiday = {}
+                chat_result = validate(
+                    shift=display_shift, work_requests=_cv_work,
+                    off_requests=_cv_off, prev_month=_cv_prev,
+                    holiday_overrides=_cv_holiday,
+                    max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                )
+                short_staff_by_store_chat = detect_short_staff_by_store(display_shift)
+                short_days_chat = set(short_staff_by_store_chat.keys())
+
+                with ai_summary_area:
+                    summary_col1, summary_col2, summary_col3 = st.columns([1, 1, 2])
+                    with summary_col1:
+                        if chat_result.error_count == 0:
+                            st.markdown(
+                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                                'text-align:center; font-weight:bold; color:#166534;">'
+                                '✅ エラー 0件</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'<div style="background:#fee2e2; padding:8px; border-radius:6px; '
+                                f'text-align:center; font-weight:bold; color:#991b1b;">'
+                                f'❌ エラー {chat_result.error_count}件</div>',
+                                unsafe_allow_html=True,
+                            )
+                    with summary_col2:
+                        if chat_result.warning_count == 0:
+                            st.markdown(
+                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                                'text-align:center; font-weight:bold; color:#166534;">'
+                                '✓ 警告 0件</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
+                                f'text-align:center; font-weight:bold; color:#92400e;">'
+                                f'⚠ 警告 {chat_result.warning_count}件</div>',
+                                unsafe_allow_html=True,
+                            )
+                    with summary_col3:
+                        if short_days_chat:
+                            short_day_text_chat = format_short_staff_summary(
+                                display_shift, short_staff_by_store_chat,
+                            )
+                            st.markdown(
+                                f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
+                                f'text-align:center; font-weight:bold; color:#92400e;">'
+                                f'👥 人員不足: {short_day_text_chat}</div>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.markdown(
+                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                                'text-align:center; font-weight:bold; color:#166534;">'
+                                '👥 人員充足</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                    if chat_result.error_count > 0 or chat_result.warning_count > 0:
+                        with st.expander(
+                            f"🔍 エラー・警告の詳細を見る（{chat_result.error_count + chat_result.warning_count}件）",
+                            expanded=False,
+                        ):
+                            if chat_result.error_count > 0:
+                                st.markdown("**❌ エラー（要修正）**")
+                                for issue in chat_result.issues:
+                                    if issue.severity == "ERROR":
+                                        st.markdown(
+                                            f'<div style="background:#fef2f2; border-left:4px solid #ef4444; '
+                                            f'padding:6px 10px; margin:4px 0; font-size:13px;">'
+                                            f'<strong>{issue.category}</strong>'
+                                            f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
+                                            f'{" · " + issue.employee if issue.employee else ""}<br>'
+                                            f'<span style="color:#7f1d1d;">{issue.message}</span></div>',
+                                            unsafe_allow_html=True,
+                                        )
+                            if chat_result.warning_count > 0:
+                                st.markdown("**⚠ 警告（確認推奨）**")
+                                for issue in chat_result.issues:
+                                    if issue.severity == "WARNING":
+                                        st.markdown(
+                                            f'<div style="background:#fefce8; border-left:4px solid #eab308; '
+                                            f'padding:6px 10px; margin:4px 0; font-size:13px;">'
+                                            f'<strong>{issue.category}</strong>'
+                                            f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
+                                            f'{" · " + issue.employee if issue.employee else ""}<br>'
+                                            f'<span style="color:#713f12;">{issue.message}</span></div>',
+                                            unsafe_allow_html=True,
+                                        )
+
+                with ai_table_area:
+                    st.markdown("##### 📋 現在のシフト表")
+                    if pending_count:
+                        st.caption("オレンジ枠のセルは、まだ反映していない仮変更です。")
+                    render_shift_legend()
+                    render_shift_table(
+                        display_shift,
+                        short_staff_by_store=short_staff_by_store_chat,
+                        sticky=True,
+                        changed_cells=changed_cells,
+                    )
+
+                if chat_engine.shift is not shift:
+                    save_session_shift(chat_engine.shift)
 
 
 # ============================================================
