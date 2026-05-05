@@ -331,7 +331,8 @@ def render_shift_table(
         "font-size:14px; min-width:max-content;"
     )
     title_style = (
-        "position:sticky; top:0; z-index:8;"
+        "position:sticky; top:0; z-index:9; background:#0f172a; "
+        "color:#ffffff; box-shadow:0 1px 0 #334155;"
         if sticky else ""
     )
     header_style = (
@@ -356,7 +357,8 @@ def render_shift_table(
     html += (
         f'<tr style="background:#0f172a; color:white;">'
         f'<th colspan="{column_count}" style="padding:10px 12px; '
-        f'border:1px solid #999; text-align:left; font-size:16px; {title_style}">'
+        f'border:1px solid #999; text-align:left; font-size:16px; '
+        f'background:#0f172a; color:#ffffff; {title_style}">'
         f'{int(shift.year)}年{int(shift.month)}月 シフト表</th></tr>'
     )
     html += '<tr style="background:#1e3a8a; color:white;">'
