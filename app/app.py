@@ -14,6 +14,7 @@
 
 import sys
 import os
+import html
 from pathlib import Path
 from typing import Optional
 
@@ -348,76 +349,81 @@ if mode == "📊 経営者ビュー":
         prev_month_year, prev_month_month = today.year, today.month - 1
 
     # ============================================================
-    # URL パラメータ ?ym=YYYY-MM を最優先（セッションリセット対策）
-    # Streamlit Cloud で WebSocket がタイムアウトして session_state が
-    # 失われても、URL に月情報が残っていれば復元できる。
+    # 対象年月の同期
+    # 月切替は ?ym=YYYY-MM のリンクで行う。Streamlit Cloud で
+    # session_state が切れても、URL の月を正として復元できる。
     # ============================================================
-    def _set_target_ym(y: int, m: int) -> None:
-        """対象年月を session_state と URL に同時保存"""
-        st.session_state["target_year"] = int(y)
-        st.session_state["target_month"] = int(m)
+    def _parse_ym(value) -> Optional[tuple[int, int]]:
+        """YYYY-MM 形式を安全にパースする。"""
+        if not value:
+            return None
         try:
-            st.query_params["ym"] = f"{int(y):04d}-{int(m):02d}"
+            y_str, m_str = str(value).split("-", 1)
+            parsed = (int(y_str), int(m_str))
+            if 2024 <= parsed[0] <= 2030 and 1 <= parsed[1] <= 12:
+                return parsed
         except Exception:
             pass
+        return None
+
+    def _ym_url(y: int, m: int) -> str:
+        """同じページで対象年月だけを切り替えるURL。"""
+        return f"?ym={int(y):04d}-{int(m):02d}"
+
+    def _is_selected_ym(y: int, m: int) -> bool:
+        return (
+            int(st.session_state.get("target_year", 0)) == int(y)
+            and int(st.session_state.get("target_month", 0)) == int(m)
+        )
+
+    def _render_ym_link(label: str, y: int, m: int, help_text: str = "") -> None:
+        """同じタブで対象年月へ移動するボタン風リンク。"""
+        selected = _is_selected_ym(y, m)
+        bg = "#2563eb" if selected else "#ffffff"
+        fg = "#ffffff" if selected else "#1e293b"
+        border = "#2563eb" if selected else "#d0d7de"
+        title_attr = f' title="{html.escape(help_text)}"' if help_text else ""
+        text = html.escape(label).replace("\n", "<br>")
+        st.markdown(
+            f'<a href="{_ym_url(y, m)}" target="_self"{title_attr} '
+            f'style="display:block; width:100%; min-height:54px; padding:8px 10px; '
+            f'border:1px solid {border}; border-radius:6px; background:{bg}; '
+            f'color:{fg}; text-align:center; text-decoration:none; font-weight:700; '
+            f'line-height:1.45; box-sizing:border-box;">{text}</a>',
+            unsafe_allow_html=True,
+        )
 
     # URL から ym を読み取り、session_state を初期化
     _url_ym = None
     try:
-        _url_ym_raw = st.query_params.get("ym")
-        if _url_ym_raw:
-            _y_str, _m_str = str(_url_ym_raw).split("-", 1)
-            _url_ym = (int(_y_str), int(_m_str))
-            if not (2024 <= _url_ym[0] <= 2030 and 1 <= _url_ym[1] <= 12):
-                _url_ym = None
+        _url_ym = _parse_ym(st.query_params.get("ym"))
     except Exception:
         _url_ym = None
 
     if _url_ym is not None:
-        # URL の値を最優先（セッションリセットされていても復元）
-        if (st.session_state.get("target_year") != _url_ym[0]
-                or st.session_state.get("target_month") != _url_ym[1]):
-            st.session_state["target_year"] = _url_ym[0]
-            st.session_state["target_month"] = _url_ym[1]
-    else:
-        # URL に無ければ翌月を初期値とし、URL にも書き込む
-        if "target_year" not in st.session_state:
-            st.session_state["target_year"] = next_month_year
-        if "target_month" not in st.session_state:
-            st.session_state["target_month"] = next_month_month
-        try:
-            st.query_params["ym"] = (
-                f"{int(st.session_state['target_year']):04d}-"
-                f"{int(st.session_state['target_month']):02d}"
-            )
-        except Exception:
-            pass
+        st.session_state["target_year"] = _url_ym[0]
+        st.session_state["target_month"] = _url_ym[1]
+    elif "target_year" not in st.session_state or "target_month" not in st.session_state:
+        st.session_state["target_year"] = next_month_year
+        st.session_state["target_month"] = next_month_month
 
     # クイック切替ボタン
     st.markdown("##### 📅 表示する対象月")
     qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns([1, 1, 1, 1, 3])
     with qcol1:
-        if st.button(f"前月\n({prev_month_year}/{prev_month_month})",
-                     key="qb_prev", width="stretch"):
-            _set_target_ym(prev_month_year, prev_month_month)
-            st.rerun()
+        _render_ym_link(f"前月\n({prev_month_year}/{prev_month_month})", prev_month_year, prev_month_month)
     with qcol2:
-        if st.button(f"今月\n({today.year}/{today.month})",
-                     key="qb_curr", width="stretch"):
-            _set_target_ym(today.year, today.month)
-            st.rerun()
+        _render_ym_link(f"今月\n({today.year}/{today.month})", today.year, today.month)
     with qcol3:
         # 翌月ボタン（デフォルト＝強調表示）
-        if st.button(f"📌 翌月\n({next_month_year}/{next_month_month})",
-                     key="qb_next", type="primary", width="stretch",
-                     help="通常はこちらを選択（提出締切は今月25日）"):
-            _set_target_ym(next_month_year, next_month_month)
-            st.rerun()
+        _render_ym_link(
+            f"📌 翌月\n({next_month_year}/{next_month_month})",
+            next_month_year,
+            next_month_month,
+            help_text="通常はこちらを選択（提出締切は今月25日）",
+        )
     with qcol4:
-        if st.button(f"翌々月\n({nn_year}/{nn_month})",
-                     key="qb_nnext", width="stretch"):
-            _set_target_ym(nn_year, nn_month)
-            st.rerun()
+        _render_ym_link(f"翌々月\n({nn_year}/{nn_month})", nn_year, nn_month)
 
     # 任意の年月を選択するための数値入力（折りたたみ式）
     with qcol5:
@@ -435,10 +441,7 @@ if mode == "📊 経営者ビュー":
                     value=st.session_state["target_month"],
                     key="custom_month_input",
                 )
-            if (custom_year != st.session_state["target_year"]
-                    or custom_month != st.session_state["target_month"]):
-                _set_target_ym(int(custom_year), int(custom_month))
-                st.rerun()
+            _render_ym_link("この年月を表示", int(custom_year), int(custom_month))
 
     # 確定した対象年月
     target_year = st.session_state["target_year"]
@@ -498,8 +501,8 @@ if mode == "📊 経営者ビュー":
 
     # ============================================================
     # 🔧 強制可視化デバッグバー（不一致を即座に検出）
-    # URL の ym / session_state の target_year-target_month /
-    # 表示中シフトの year-month が全て一致しているか確認する。
+    # session_state の target_year-target_month と表示中シフトの
+    # year-month が一致しているか確認する。
     # ============================================================
     try:
         _dbg_url = st.query_params.get("ym") or "(なし)"
@@ -516,10 +519,7 @@ if mode == "📊 経営者ビュー":
         f"{int(_dbg_shift.year):04d}-{int(_dbg_shift.month):02d}"
         if _dbg_shift else "(未生成)"
     )
-    _dbg_all_ok = (
-        _dbg_url == _dbg_sess_ym
-        and (_dbg_shift is None or _dbg_shift_ym == _dbg_sess_ym)
-    )
+    _dbg_all_ok = (_dbg_shift is None or _dbg_shift_ym == _dbg_sess_ym)
     _dbg_color = "#dcfce7" if _dbg_all_ok else "#fee2e2"
     _dbg_border = "#16a34a" if _dbg_all_ok else "#dc2626"
     _dbg_icon = "✅" if _dbg_all_ok else "⚠"
@@ -815,12 +815,6 @@ if mode == "📊 経営者ビュー":
             _saved_target_month = int(target_month)
             st.session_state["target_year"] = _saved_target_year
             st.session_state["target_month"] = _saved_target_month
-            try:
-                st.query_params["ym"] = (
-                    f"{_saved_target_year:04d}-{_saved_target_month:02d}"
-                )
-            except Exception:
-                pass
 
             # 結果を session_state に永続化するためのキー
             _gen_result_key = "last_gen_result"
@@ -856,7 +850,7 @@ if mode == "📊 経営者ビュー":
 
                     # 5月2026年（テストデータ用）かどうかで分岐
                     is_test_may_2026 = (
-                        int(target_year) == 2026 and int(target_month) == 5
+                        _saved_target_year == 2026 and _saved_target_month == 5
                         and sub_data.submission_count == 0
                     )
 
@@ -928,7 +922,7 @@ if mode == "📊 経営者ビュー":
                         use_consec_exceptions = []
                         data_source_msg = (
                             f"💡 提出データがないため、希望なしで "
-                            f"{int(target_year)}年{int(target_month)}月のシフトを生成しました。"
+                            f"{_saved_target_year}年{_saved_target_month}月のシフトを生成しました。"
                             "本番では従業員から希望が届いた後に生成してください。"
                         )
 
@@ -1080,13 +1074,8 @@ if mode == "📊 経営者ビュー":
                 # 例外が発生してもターゲット月をリセットしない
                 st.session_state["target_year"] = _saved_target_year
                 st.session_state["target_month"] = _saved_target_month
-                # URL にも再度書き込み（セッションリセットに完全対応）
-                try:
-                    st.query_params["ym"] = (
-                        f"{_saved_target_year:04d}-{_saved_target_month:02d}"
-                    )
-                except Exception:
-                    pass
+                # ここで st.query_params を書き換えると、Streamlit Cloud で
+                # 追加の rerun が入り月が戻る場合があるため、session_state のみを更新する。
 
     with bcol2:
         # 確定版を読み込む
@@ -1282,8 +1271,11 @@ if mode == "📊 経営者ビュー":
             # 人員不足日を計算
             short_days = detect_short_staff_days(shift)
             if short_days:
+                short_day_text = ", ".join(
+                    f"{shift.month}/{d}" for d in sorted(short_days)
+                )
                 st.warning(
-                    f"⚠ 人員不足の日: 5/{', 5/'.join(map(str, sorted(short_days)))}"
+                    f"⚠ 人員不足の日: {short_day_text}"
                     f"（黄色でハイライト・人員少欄に △ 表示）"
                 )
 
@@ -1364,7 +1356,7 @@ if mode == "📊 経営者ビュー":
                     "氏名": e.name,
                     "出勤": work,
                     "休": off,
-                    "目標": target if target else "-",
+                    "目標": str(target) if target else "-",
                     "差分": f"{diff:+d}" if diff is not None else "-",
                 })
             st.dataframe(data, width="stretch", hide_index=True)
@@ -1510,10 +1502,13 @@ if mode == "📊 経営者ビュー":
             with summary_col3:
                 short_days_chat = detect_short_staff_days(shift)
                 if short_days_chat:
+                    short_day_text_chat = ", ".join(
+                        f"{shift.month}/{d}" for d in sorted(short_days_chat)
+                    )
                     st.markdown(
                         f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
                         f'text-align:center; font-weight:bold; color:#92400e;">'
-                        f'👥 人員不足: 5/{", 5/".join(map(str, sorted(short_days_chat)))}</div>',
+                        f'👥 人員不足: {short_day_text_chat}</div>',
                         unsafe_allow_html=True,
                     )
                 else:
@@ -1538,7 +1533,7 @@ if mode == "📊 経営者ビュー":
                                     f'<div style="background:#fef2f2; border-left:4px solid #ef4444; '
                                     f'padding:6px 10px; margin:4px 0; font-size:13px;">'
                                     f'<strong>{issue.category}</strong>'
-                                    f'{" · 5/" + str(issue.day) if issue.day else ""}'
+                                    f'{" · " + str(shift.month) + "/" + str(issue.day) if issue.day else ""}'
                                     f'{" · " + issue.employee if issue.employee else ""}<br>'
                                     f'<span style="color:#7f1d1d;">{issue.message}</span></div>',
                                     unsafe_allow_html=True,
@@ -1551,7 +1546,7 @@ if mode == "📊 経営者ビュー":
                                     f'<div style="background:#fefce8; border-left:4px solid #eab308; '
                                     f'padding:6px 10px; margin:4px 0; font-size:13px;">'
                                     f'<strong>{issue.category}</strong>'
-                                    f'{" · 5/" + str(issue.day) if issue.day else ""}'
+                                    f'{" · " + str(shift.month) + "/" + str(issue.day) if issue.day else ""}'
                                     f'{" · " + issue.employee if issue.employee else ""}<br>'
                                     f'<span style="color:#713f12;">{issue.message}</span></div>',
                                     unsafe_allow_html=True,
@@ -2104,7 +2099,8 @@ elif mode == "📁 過去シフト閲覧":
         try:
             shift, short_days = load_shift_from_excel(excel_path)
             st.markdown(f"### {shift.year}年{shift.month}月（手動作成版）")
-            st.write(f"人員少マーク日: 5/{', 5/'.join(map(str, short_days))}")
+            short_day_text = ", ".join(f"{shift.month}/{d}" for d in short_days)
+            st.write(f"人員少マーク日: {short_day_text}")
             render_shift_table(shift)
         except Exception as e:
             st.error(f"読み込みエラー: {e}")
