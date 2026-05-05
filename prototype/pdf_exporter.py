@@ -66,13 +66,21 @@ CELL_COLORS = {
     "": colors.white,
 }
 
+SHORT_STAFF_STORE_LABELS = {
+    Store.AKABANE: "○赤羽",
+    Store.HIGASHIGUCHI: "□東口",
+    Store.OMIYA: "△大宮",
+    Store.NISHIGUCHI: "☆西口",
+    Store.SUZURAN: "◆すずらん",
+}
+
 
 def export_shift_to_pdf(
     shift: MonthlyShift,
     output_path,  # str or Path
     title: Optional[str] = None,
     header_notes: Optional[list[str]] = None,
-    short_staff_days: Optional[list[int]] = None,
+    short_staff_days: Optional[object] = None,
 ) -> Path:
     """
     シフトを A4 横 1ページの PDF に出力する。
@@ -142,6 +150,20 @@ def export_shift_to_pdf(
 
     # 各日のデータ
     cell_styles = []  # (row, col, color) のリスト
+
+    def _short_staff_text(day: int) -> str:
+        if isinstance(short_staff_days, dict):
+            stores = short_staff_days.get(day, set())
+            order = list(SHORT_STAFF_STORE_LABELS)
+            labels = []
+            for store in sorted(
+                stores,
+                key=lambda s: order.index(s) if s in order else len(order),
+            ):
+                labels.append(SHORT_STAFF_STORE_LABELS.get(store, getattr(store, "value", str(store))))
+            return " ".join(labels)
+        return "△" if day in short_staff_days else ""
+
     for d in range(1, days_in_month + 1):
         weekday = date(shift.year, shift.month, d).weekday()
         wd = WEEKDAY_JP[weekday]
@@ -157,7 +179,7 @@ def export_shift_to_pdf(
                 cell_styles.append((d, col_idx, color))
 
         # 人員少マーク
-        short_mark = "△" if d in short_staff_days else ""
+        short_mark = _short_staff_text(d)
         row_data.append(short_mark)
         if short_mark:
             cell_styles.append((d, 2 + len(EXPORT_COLUMN_ORDER), colors.HexColor("#fff3cd")))
@@ -170,7 +192,7 @@ def export_shift_to_pdf(
     available_width = 270 * mm
     day_col_w = 8 * mm
     weekday_col_w = 8 * mm
-    short_col_w = 12 * mm
+    short_col_w = 28 * mm
     emp_col_w = (available_width - day_col_w - weekday_col_w - short_col_w) / len(EXPORT_COLUMN_ORDER)
     col_widths = [day_col_w, weekday_col_w] + [emp_col_w] * len(EXPORT_COLUMN_ORDER) + [short_col_w]
 

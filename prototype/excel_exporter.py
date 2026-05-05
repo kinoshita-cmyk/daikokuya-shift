@@ -67,7 +67,15 @@ COLUMN_WIDTHS = {
     "V": 13.0,        # 顧問
     "W": 8.5,         # 日付（右）
     "X": 7.0,         # 曜日（右）
-    "Y": 13.0,        # 人員少（"人員少"の3文字 + △ が収まる幅）
+    "Y": 24.0,        # 人員少（店舗別マークが収まる幅）
+}
+
+SHORT_STAFF_STORE_LABELS = {
+    Store.AKABANE: "○赤羽",
+    Store.HIGASHIGUCHI: "□東口",
+    Store.OMIYA: "△大宮",
+    Store.NISHIGUCHI: "☆西口",
+    Store.SUZURAN: "◆すずらん",
 }
 
 DEFAULT_FOOTER_NOTES = [
@@ -83,7 +91,7 @@ def export_shift_to_excel(
     title: Optional[str] = None,
     header_comments: Optional[list[str]] = None,
     footer_notes: Optional[list[str]] = None,
-    short_staff_days: Optional[list[int]] = None,
+    short_staff_days: Optional[object] = None,
 ) -> Path:
     """
     シフトを Excel に出力する（テンプレート完全互換・A4縦）。
@@ -94,7 +102,7 @@ def export_shift_to_excel(
         title: タイトル（デフォルト: "YYYY年M月の目標とシフト表  決定版"）
         header_comments: タイトル下の3行コメント（B3, B4, B5に対応）
         footer_notes: 表の下の注意書き（任意の行数）
-        short_staff_days: 「人員少」マークを付ける日のリスト
+        short_staff_days: 「人員少」マークを付ける日のリスト、または {日: {店舗}} の辞書
 
     Returns:
         実際に書き込んだファイルパス
@@ -112,6 +120,19 @@ def export_shift_to_excel(
     while len(header_comments) < 3:
         header_comments.append("")
     footer_notes = footer_notes or DEFAULT_FOOTER_NOTES
+
+    def _short_staff_text(day: int) -> str:
+        if isinstance(short_staff_days, dict):
+            stores = short_staff_days.get(day, set())
+            order = list(SHORT_STAFF_STORE_LABELS)
+            labels = []
+            for store in sorted(
+                stores,
+                key=lambda s: order.index(s) if s in order else len(order),
+            ):
+                labels.append(SHORT_STAFF_STORE_LABELS.get(store, getattr(store, "value", str(store))))
+            return " ".join(labels)
+        return "△" if day in short_staff_days else ""
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -243,8 +264,9 @@ def export_shift_to_excel(
         c.border = border
 
         # Y列: 人員少
-        if d in short_staff_days:
-            c = ws.cell(row=row, column=25, value="△")
+        short_text = _short_staff_text(d)
+        if short_text:
+            c = ws.cell(row=row, column=25, value=short_text)
             c.fill = short_fill
         else:
             c = ws.cell(row=row, column=25, value="")
