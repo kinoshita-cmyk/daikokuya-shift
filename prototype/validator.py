@@ -42,11 +42,15 @@ class Issue:
     day: Optional[int]   # 該当日（全体問題の場合None）
     employee: Optional[str]  # 該当従業員（全体問題の場合None）
     message: str
+    month: Optional[int] = None  # 何月のシフトか（validate() 内で shift.month から自動設定）
 
     def __str__(self) -> str:
         prefix = f"[{self.severity}] {self.category}"
         if self.day is not None:
-            prefix += f" / 5/{self.day}"
+            if self.month is not None:
+                prefix += f" / {self.month}/{self.day}"
+            else:
+                prefix += f" / {self.day}日"
         if self.employee:
             prefix += f" / {self.employee}"
         return f"{prefix}: {self.message}"
@@ -157,6 +161,11 @@ def validate(
 
     # 10. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
+
+    # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
+    for _issue in result.issues:
+        if _issue.month is None:
+            _issue.month = shift.month
 
     return result
 
