@@ -200,7 +200,8 @@ class ShiftChatEngine:
             if a is None:
                 continue
             result.append(f"  {emp.name}: {a.store.display_name}")
-        return f"5/{day}日の配属:\n" + "\n".join(result) if result else f"5/{day}日: 配属なし"
+        ym_day = f"{self.shift.month}/{day}"
+        return f"{ym_day}日の配属:\n" + "\n".join(result) if result else f"{ym_day}日: 配属なし"
 
     def _tool_get_employee_schedule(self, employee: str) -> str:
         from calendar import monthrange
@@ -209,7 +210,7 @@ class ShiftChatEngine:
         for d in range(1, days + 1):
             a = self._get_effective_assignment(employee, d)
             store_str = a.store.display_name if a else "未配置"
-            result.append(f"  5/{d}: {store_str}")
+            result.append(f"  {self.shift.month}/{d}: {store_str}")
         return f"{employee}の{self.shift.month}月スケジュール:\n" + "\n".join(result)
 
     def _tool_swap_assignments(self, emp1: str, day1: int, emp2: str, day2: int) -> str:
@@ -221,8 +222,8 @@ class ShiftChatEngine:
         self.pending_changes.append(ShiftAssignment(employee=emp1, day=day1, store=a2.store))
         self.pending_changes.append(ShiftAssignment(employee=emp2, day=day2, store=a1.store))
         return (
-            f"仮実行: {emp1} 5/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
-            f"{emp2} 5/{day2} ({a2.store.display_name} → {a1.store.display_name})"
+            f"仮実行: {emp1} {self.shift.month}/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
+            f"{emp2} {self.shift.month}/{day2} ({a2.store.display_name} → {a1.store.display_name})"
         )
 
     def _tool_change_single_assignment(self, employee: str, day: int, new_store: str) -> str:
@@ -233,7 +234,7 @@ class ShiftChatEngine:
         before = self._get_effective_assignment(employee, day)
         before_str = before.store.display_name if before else "未配置"
         self.pending_changes.append(ShiftAssignment(employee=employee, day=day, store=store))
-        return f"仮実行: {employee} 5/{day} ({before_str} → {store.display_name})"
+        return f"仮実行: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
 
     def _tool_validate_current(self) -> str:
         copy = self._apply_pending_to_shift()
