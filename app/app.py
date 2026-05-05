@@ -398,24 +398,24 @@ if mode == "📊 経営者ビュー":
     qcol1, qcol2, qcol3, qcol4, qcol5 = st.columns([1, 1, 1, 1, 3])
     with qcol1:
         if st.button(f"前月\n({prev_month_year}/{prev_month_month})",
-                     key="qb_prev", use_container_width=True):
+                     key="qb_prev", width="stretch"):
             _set_target_ym(prev_month_year, prev_month_month)
             st.rerun()
     with qcol2:
         if st.button(f"今月\n({today.year}/{today.month})",
-                     key="qb_curr", use_container_width=True):
+                     key="qb_curr", width="stretch"):
             _set_target_ym(today.year, today.month)
             st.rerun()
     with qcol3:
         # 翌月ボタン（デフォルト＝強調表示）
         if st.button(f"📌 翌月\n({next_month_year}/{next_month_month})",
-                     key="qb_next", type="primary", use_container_width=True,
+                     key="qb_next", type="primary", width="stretch",
                      help="通常はこちらを選択（提出締切は今月25日）"):
             _set_target_ym(next_month_year, next_month_month)
             st.rerun()
     with qcol4:
         if st.button(f"翌々月\n({nn_year}/{nn_month})",
-                     key="qb_nnext", use_container_width=True):
+                     key="qb_nnext", width="stretch"):
             _set_target_ym(nn_year, nn_month)
             st.rerun()
 
@@ -733,7 +733,7 @@ if mode == "📊 経営者ビュー":
                         "△希望": f"{s['flexible_off_count']}件",
                         "備考": "📝 あり" if s["has_note"] else "",
                     })
-                st.dataframe(submitted_data, use_container_width=True, hide_index=True)
+                st.dataframe(submitted_data, width="stretch", hide_index=True)
 
                 # 備考のあるものだけ展開表示
                 has_notes = [s for s in submission_status["submitted"] if s["has_note"]]
@@ -802,7 +802,7 @@ if mode == "📊 経営者ビュー":
         if st.button(
             gen_button_label,
             type="primary",
-            use_container_width=True,
+            width="stretch",
             disabled=gen_disabled,
             help=gen_help,
         ):
@@ -1093,7 +1093,7 @@ if mode == "📊 経営者ビュー":
         if lock_info is not None:
             if st.button(
                 "📥 確定版を読み込む",
-                use_container_width=True,
+                width="stretch",
                 help="ロック済みの確定版シフトをセッションに復元",
             ):
                 snapshot_path = (
@@ -1111,7 +1111,7 @@ if mode == "📊 経営者ビュー":
         else:
             st.button(
                 "📥 確定版を読み込む",
-                use_container_width=True,
+                width="stretch",
                 disabled=True,
                 help="このシフトはまだロックされていません",
             )
@@ -1123,7 +1123,7 @@ if mode == "📊 経営者ビュー":
             # 未ロック: ロックボタン表示
             if st.button(
                 "🔒 確定版としてロック",
-                use_container_width=True,
+                width="stretch",
                 disabled=current_shift is None,
                 type="secondary",
                 help="現在のシフトを確定版として保存し、編集をロックします",
@@ -1133,7 +1133,7 @@ if mode == "📊 経営者ビュー":
             # ロック済み: 解除ボタン表示
             if st.button(
                 "🔓 ロックを解除",
-                use_container_width=True,
+                width="stretch",
                 type="secondary",
                 help="編集できる状態に戻します（バックアップは残ります）",
             ):
@@ -1141,7 +1141,7 @@ if mode == "📊 経営者ビュー":
 
     with bcol4:
         # ロック一覧表示
-        with st.popover("📅 ロック済み一覧", use_container_width=True):
+        with st.popover("📅 ロック済み一覧", width="stretch"):
             all_locks = lock_mgr.list_locks()
             if not all_locks:
                 st.write("ロック済みシフトはありません")
@@ -1172,9 +1172,9 @@ if mode == "📊 経営者ビュー":
             lock_author = st.text_input("実行者名", value="代表取締役")
             col_a, col_b = st.columns(2)
             with col_a:
-                submit_lock = st.form_submit_button("✅ ロックする", type="primary", use_container_width=True)
+                submit_lock = st.form_submit_button("✅ ロックする", type="primary", width="stretch")
             with col_b:
-                cancel_lock = st.form_submit_button("キャンセル", use_container_width=True)
+                cancel_lock = st.form_submit_button("キャンセル", width="stretch")
             if submit_lock and current_shift is not None:
                 # バックアップ保存
                 snapshot_path = backup_mgr.save_shift(
@@ -1204,9 +1204,9 @@ if mode == "📊 経営者ビュー":
             )
             col_a, col_b = st.columns(2)
             with col_a:
-                submit_unlock = st.form_submit_button("✅ 解除する", type="primary", use_container_width=True)
+                submit_unlock = st.form_submit_button("✅ 解除する", type="primary", width="stretch")
             with col_b:
-                cancel_unlock = st.form_submit_button("キャンセル", use_container_width=True)
+                cancel_unlock = st.form_submit_button("キャンセル", width="stretch")
             if submit_unlock:
                 lock_mgr.unlock(int(target_year), int(target_month))
                 st.success(f"✅ ロックを解除しました")
@@ -1367,7 +1367,7 @@ if mode == "📊 経営者ビュー":
                     "目標": target if target else "-",
                     "差分": f"{diff:+d}" if diff is not None else "-",
                 })
-            st.dataframe(data, use_container_width=True, hide_index=True)
+            st.dataframe(data, width="stretch", hide_index=True)
 
         with tab4:
             output_dir = OUTPUT_DIR
@@ -1714,7 +1714,7 @@ elif mode == "👤 従業員ビュー":
         if st.button(
             f"前月\n({prev_year}/{prev_month})",
             key="emp_qb_prev",
-            use_container_width=True,
+            width="stretch",
             help="テスト用：過去月でも提出可能",
         ):
             st.session_state["emp_target_year"] = prev_year
@@ -1724,7 +1724,7 @@ elif mode == "👤 従業員ビュー":
         if st.button(
             f"今月\n({today.year}/{today.month})",
             key="emp_qb_curr",
-            use_container_width=True,
+            width="stretch",
         ):
             st.session_state["emp_target_year"] = today.year
             st.session_state["emp_target_month"] = today.month
@@ -1735,7 +1735,7 @@ elif mode == "👤 従業員ビュー":
             f"📌 翌月\n({next_year}/{next_month})",
             key="emp_qb_next",
             type="primary",
-            use_container_width=True,
+            width="stretch",
             help="通常はこちら（本番運用）",
         ):
             st.session_state["emp_target_year"] = next_year
@@ -1745,7 +1745,7 @@ elif mode == "👤 従業員ビュー":
         if st.button(
             f"翌々月\n({nn_year}/{nn_month})",
             key="emp_qb_nn",
-            use_container_width=True,
+            width="stretch",
             help="早めに提出する場合",
         ):
             st.session_state["emp_target_year"] = nn_year
@@ -1893,7 +1893,7 @@ elif mode == "👤 従業員ビュー":
                 if st.button(
                     "○",
                     key=f"pref_ok_{emp_idx}_{d}",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if current == "○" else "secondary",
                 ):
                     prefs[d] = "○"
@@ -1902,7 +1902,7 @@ elif mode == "👤 従業員ビュー":
                 if st.button(
                     "×",
                     key=f"pref_off_{emp_idx}_{d}",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if current == "×" else "secondary",
                 ):
                     prefs[d] = "×"
@@ -1911,7 +1911,7 @@ elif mode == "👤 従業員ビュー":
                 if st.button(
                     "△",
                     key=f"pref_maybe_{emp_idx}_{d}",
-                    use_container_width=True,
+                    width="stretch",
                     type="primary" if current == "△" else "secondary",
                 ):
                     prefs[d] = "△"
@@ -2035,7 +2035,7 @@ elif mode == "👤 従業員ビュー":
     if st.button(
         f"📤 {target_year}年{target_month}月分 を提出する",
         type="primary",
-        use_container_width=True,
+        width="stretch",
     ):
         # 入力内容を保存
         backup = ShiftBackup()
@@ -2218,7 +2218,7 @@ elif mode == "⚙️ 設定":
                         ),
                         "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
                     })
-                st.dataframe(table_data, use_container_width=True, hide_index=True)
+                st.dataframe(table_data, width="stretch", hide_index=True)
 
                 # 有給を申請している人だけ強調表示
                 applicants = [
@@ -2295,7 +2295,7 @@ elif mode == "⚙️ 設定":
                 })
             st.dataframe(
                 link_data,
-                use_container_width=True,
+                width="stretch",
                 hide_index=True,
                 column_config={
                     "マジックリンク": st.column_config.LinkColumn(
@@ -2588,7 +2588,7 @@ elif mode == "⚙️ 設定":
             save_actor = st.text_input("保存実行者名", value="代表取締役", key="cfg_actor")
             save_note = st.text_input("変更メモ（任意）", placeholder="例: 連勤上限を6に緩和")
         with save_col2:
-            if st.button("💾 設定を保存", type="primary", use_container_width=True):
+            if st.button("💾 設定を保存", type="primary", width="stretch"):
                 new_cfg = RuleConfig(
                     enabled_checks=new_enabled,
                     parameters=new_params,
@@ -2601,7 +2601,7 @@ elif mode == "⚙️ 設定":
                     st.info("変更点はありません")
                 st.rerun()
         with save_col3:
-            if st.button("⚠ デフォルトに戻す", use_container_width=True):
+            if st.button("⚠ デフォルトに戻す", width="stretch"):
                 if st.session_state.get("confirm_reset"):
                     rule_mgr.reset_to_default(actor=save_actor)
                     st.success("✅ デフォルトに戻しました")
@@ -2644,7 +2644,7 @@ elif mode == "⚙️ 設定":
                     "変更内容": desc,
                     "メモ": ch.note,
                 })
-            st.dataframe(history_data, use_container_width=True, hide_index=True)
+            st.dataframe(history_data, width="stretch", hide_index=True)
 
     # ============================================================
     # タブ3: 従業員マスタ（CRUD）
@@ -2730,7 +2730,7 @@ elif mode == "⚙️ 設定":
                     "退職日": e.retired_at or "-",
                 })
             if emp_data:
-                st.dataframe(emp_data, use_container_width=True, hide_index=True)
+                st.dataframe(emp_data, width="stretch", hide_index=True)
             else:
                 st.info("該当する従業員がいません")
 
@@ -3019,7 +3019,7 @@ elif mode == "⚙️ 設定":
                         "実行者": h["actor"],
                         "メモ": h["note"],
                     })
-                st.dataframe(hist_data, use_container_width=True, hide_index=True)
+                st.dataframe(hist_data, width="stretch", hide_index=True)
 
     # ============================================================
     # タブ4: APIキー
@@ -3156,7 +3156,7 @@ elif mode == "⚙️ 設定":
                     "年月": ym,
                     "提出ファイル数": data_summary["submissions_by_month"][ym],
                 })
-            st.dataframe(month_data, use_container_width=True, hide_index=True)
+            st.dataframe(month_data, width="stretch", hide_index=True)
 
         # ============================================================
         # ダウンロード（エクスポート）
@@ -3184,7 +3184,7 @@ elif mode == "⚙️ 設定":
             )
 
         # ZIP 生成（クリックで作成 → ダウンロードボタン表示）
-        if st.button("📦 バックアップZIPを作成", type="primary", use_container_width=True):
+        if st.button("📦 バックアップZIPを作成", type="primary", width="stretch"):
             with st.spinner("ZIPファイルを作成中..."):
                 zip_bytes, summary = create_backup_zip(include_output=include_output)
             st.session_state["backup_zip_bytes"] = zip_bytes
@@ -3205,7 +3205,7 @@ elif mode == "⚙️ 設定":
                 data=st.session_state["backup_zip_bytes"],
                 file_name=get_backup_filename(),
                 mime="application/zip",
-                use_container_width=True,
+                width="stretch",
                 key="dl_backup_zip",
             )
             st.caption(

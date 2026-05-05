@@ -179,7 +179,7 @@ def _render_manager_login_form() -> None:
                 label_visibility="collapsed",
             )
             submit = st.form_submit_button(
-                "ログイン", type="primary", use_container_width=True,
+                "ログイン", type="primary", width="stretch",
             )
 
             if submit:
@@ -221,6 +221,6 @@ def render_logout_button() -> None:
         elif is_employee():
             emp_name = get_logged_in_employee() or "従業員"
             st.sidebar.markdown(f"👤 ログイン中: **{emp_name}さん**")
-        if st.sidebar.button("🚪 ログアウト", use_container_width=True):
+        if st.sidebar.button("🚪 ログアウト", width="stretch"):
             logout()
             st.rerun()
