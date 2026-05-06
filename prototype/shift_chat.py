@@ -51,17 +51,17 @@ SYSTEM_PROMPT = """\
 # 振る舞いルール
 - 経営者の質問・指示に対し、まず現状を確認するためツールを呼び出す
 - 変更案を提案する際は、必ず影響を分析して伝える（連勤になる、希望に反する等）
-- 変更は必ず「仮変更」として作る。確定・取り消しは画面下のボタンで行う
-- 経営者が「実行して」「変更して」と書いても、確定操作は画面の「反映する」ボタンを案内する
+- 変更は必ず「プレビュー」として作る。確定・破棄は画面の操作ボタンで行う
+- 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
 - 制約違反のリスクがある場合は警告する
 - 簡潔で実用的な日本語で答える
 
 # 配属変更の流れ
 1. 経営者の希望を理解
 2. get_day_assignments / get_employee_schedule で現状確認
-3. swap_assignments を仮実行
-4. validate_change で違反チェック
-5. 結果を経営者に報告し、画面下の「反映する」または「取り消す」ボタンを案内する
+3. swap_assignments でプレビュー変更を作成
+4. validate_current で違反チェック
+5. 結果を経営者に報告し、画面の「本シフトに反映」または「プレビューを破棄」ボタンを案内する
 """
 
 
@@ -94,7 +94,7 @@ TOOLS = [
     },
     {
         "name": "swap_assignments",
-        "description": "2つの配属を入れ替えます（仮実行・反映前にユーザー承認が必要）。1人だけの店舗変更も可能（emp2/day2 を省略すると emp1 を target_store に配置）",
+        "description": "2つの配属を入れ替えます（プレビュー変更を作成し、反映前にユーザー承認が必要）。1人だけの店舗変更も可能（emp2/day2 を省略すると emp1 を target_store に配置）",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -108,7 +108,7 @@ TOOLS = [
     },
     {
         "name": "change_single_assignment",
-        "description": "1人の特定日の配属を変更します（仮実行）",
+        "description": "1人の特定日の配属を変更します（プレビュー変更を作成）",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -194,7 +194,7 @@ class ShiftChatEngine:
         self.shift.operation_modes = dict(source.operation_modes)
 
     def _dedup_pending_changes(self) -> list[ShiftAssignment]:
-        """同じ人・同じ日の仮変更は最後の内容だけを有効にする。"""
+        """同じ人・同じ日のプレビュー変更は最後の内容だけを有効にする。"""
         changes: dict[tuple[str, int], ShiftAssignment] = {}
         for p in self.pending_changes:
             changes[(p.employee, p.day)] = p
@@ -207,7 +207,7 @@ class ShiftChatEngine:
         return {(p.employee, p.day) for p in self._dedup_pending_changes()}
 
     def get_pending_change_summary(self, limit: int = 8) -> list[str]:
-        """画面表示用に仮変更を短く要約する。"""
+        """画面表示用にプレビュー変更を短く要約する。"""
         summary = []
         for p in sorted(self._dedup_pending_changes(), key=lambda x: (x.day, x.employee)):
             before = self.shift.get_assignment(p.employee, p.day)
@@ -221,21 +221,21 @@ class ShiftChatEngine:
         return summary
 
     def get_preview_shift(self) -> MonthlyShift:
-        """仮変更を反映したプレビュー用シフトを返す。"""
+        """プレビュー変更を反映した表示用シフトを返す。"""
         return self._apply_pending_to_shift()
 
     def _get_effective_assignment(self, employee: str, day: int) -> Optional[ShiftAssignment]:
-        """確定 + 仮変更を反映した配属を取得"""
-        # 仮変更があればそれを返す
+        """確定 + プレビュー変更を反映した配属を取得"""
+        # プレビュー変更があればそれを返す
         for p in reversed(self.pending_changes):
             if p.employee == employee and p.day == day:
                 return p
         return self.shift.get_assignment(employee, day)
 
     def _apply_pending_to_shift(self) -> MonthlyShift:
-        """仮変更を反映したシフトのコピーを返す（検証用）"""
+        """プレビュー変更を反映したシフトのコピーを返す（検証用）"""
         copy = self._clone_shift(self.shift)
-        # 仮変更を反映
+        # プレビュー変更を反映
         for p in self._dedup_pending_changes():
             # 同じ (employee, day) の既存を削除
             copy.assignments = [
@@ -276,7 +276,7 @@ class ShiftChatEngine:
         self.pending_changes.append(ShiftAssignment(employee=emp1, day=day1, store=a2.store))
         self.pending_changes.append(ShiftAssignment(employee=emp2, day=day2, store=a1.store))
         return (
-            f"仮実行: {emp1} {self.shift.month}/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
+            f"プレビュー: {emp1} {self.shift.month}/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
             f"{emp2} {self.shift.month}/{day2} ({a2.store.display_name} → {a1.store.display_name})"
         )
 
@@ -288,7 +288,7 @@ class ShiftChatEngine:
         before = self._get_effective_assignment(employee, day)
         before_str = before.store.display_name if before else "未配置"
         self.pending_changes.append(ShiftAssignment(employee=employee, day=day, store=store))
-        return f"仮実行: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
+        return f"プレビュー: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
 
     def _tool_validate_current(self) -> str:
         copy = self._apply_pending_to_shift()
@@ -319,21 +319,21 @@ class ShiftChatEngine:
         self.undo_stack.append((f"{n}件の変更", before))
         self.undo_stack = self.undo_stack[-20:]
         self.redo_stack.clear()
-        self.last_status_message = f"✅ {n}件の仮変更を本シフトに反映しました"
+        self.last_status_message = f"✅ {n}件のプレビュー変更を本シフトに反映しました"
         return self.last_status_message
 
     def _tool_discard_changes(self) -> str:
         n = self.get_pending_change_count()
         self.pending_changes.clear()
-        self.last_status_message = f"🗑 {n}件の仮変更を取り消しました"
+        self.last_status_message = f"🗑 {n}件のプレビュー変更を破棄しました"
         return self.last_status_message
 
     def apply_pending_changes(self) -> str:
-        """画面ボタンから仮変更を確定する。"""
+        """画面ボタンからプレビュー変更を確定する。"""
         return self._tool_apply_changes()
 
     def discard_pending_changes(self) -> str:
-        """画面ボタンから仮変更を取り消す。"""
+        """画面ボタンからプレビュー変更を破棄する。"""
         return self._tool_discard_changes()
 
     def undo_last_apply(self) -> str:
