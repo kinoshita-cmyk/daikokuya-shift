@@ -23,7 +23,7 @@ from .models import (
 from .employees import ALL_EMPLOYEES, get_employee
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
-    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ECO2_PAIRS,
+    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
     get_capacity,
@@ -214,6 +214,19 @@ def _check_store_capacity(
             # 配属者の名前リスト
             worker_names = [a.employee for a in store_workers]
             worker_str = ", ".join(worker_names) if worker_names else "(誰もいない)"
+
+            # 赤羽東口店は原則1名体制。土井さん不在時も代替エコ1名で運営する。
+            if store == Store.HIGASHIGUCHI and total > 1:
+                result.issues.append(Issue(
+                    severity="WARNING",
+                    category="1名体制（東口）",
+                    day=day, employee=None,
+                    message=(
+                        f"赤羽東口店は原則1名体制です"
+                        f"／配属: {worker_str}"
+                        f"／合計{total}名"
+                    ),
+                ))
 
             # 大宮の「人数少」例外: eco_count==1 + ticket_count>=1 でも許容（警告のみ）
             if (store == Store.OMIYA and mode == OperationMode.NORMAL

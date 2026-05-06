@@ -34,7 +34,7 @@ from .models import (
 from .employees import ALL_EMPLOYEES, ECO_STAFF, TICKET_STAFF, get_employee, shift_active_employees
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
-    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ECO2_PAIRS,
+    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
 )
 
@@ -264,8 +264,7 @@ def generate_shift(
 
             # 通常の制約
             model.Add(eco_at_store >= store_cap.eco_min)
-            if s != Store.HIGASHIGUCHI:
-                model.Add(eco_at_store <= store_cap.eco_max)
+            model.Add(eco_at_store <= store_cap.eco_max)
             model.Add(ticket_at_store >= store_cap.ticket_min)
 
     # ============================================================
@@ -283,73 +282,7 @@ def generate_shift(
         model.Add(anchor_present >= 1)
 
     # ============================================================
-    # 制約 8: 東口エコは原則1名。月3回までエコ2OK、ただし以下のペアのみ：
-    #   (楯, 牧野) (春山, 牧野) (長尾, 牧野)
-    # 各ペアは月1回ずつ可
-    # ============================================================
-    eco_name_to_emp = {e.name: e for e in eco_employees}
-    higashi_eco2_days = []
-
-    # 各ペアごとに「その日にこのペアで東口エコ2となるか」のフラグを月内で計算
-    # ペアごとに、月内で1日まで
-    pair_day_indicators: dict[tuple[str, str], list] = {p: [] for p in HIGASHIGUCHI_ECO2_PAIRS}
-
-    for d in days:
-        weekday = date(year, month, d).weekday()
-        if weekday == 0:  # 月曜は休店
-            continue
-        mode = operation_modes.get(d, OperationMode.NORMAL)
-        if mode in (OperationMode.CLOSED, OperationMode.MINIMUM):
-            continue
-
-        # その日に東口にいる各エコ要員の bool 変数
-        higashi_assignments = {
-            name: x[name][d][Store.HIGASHIGUCHI]
-            for name in eco_name_to_emp
-        }
-        eco_count = sum(higashi_assignments.values())
-        is_eco2 = model.NewBoolVar(f"higashi_eco2_{d}")
-        model.Add(eco_count == 2).OnlyEnforceIf(is_eco2)
-        model.Add(eco_count == 1).OnlyEnforceIf(is_eco2.Not())
-        higashi_eco2_days.append(is_eco2)
-
-        # eco2 となる場合、許可されたペアのいずれかであること
-        # 各ペアの「その日に成立」フラグを作る
-        pair_d_flags = []
-        for pair in HIGASHIGUCHI_ECO2_PAIRS:
-            a, b = pair
-            if a in higashi_assignments and b in higashi_assignments:
-                f = model.NewBoolVar(f"pair_{a}_{b}_{d}")
-                # f=1 ⇔ a=1 AND b=1 AND eco_count=2
-                # f が1なら a, b 両方が東口配置 (and他のエコは東口に居ない)
-                model.Add(higashi_assignments[a] == 1).OnlyEnforceIf(f)
-                model.Add(higashi_assignments[b] == 1).OnlyEnforceIf(f)
-                # 他のエコは東口にいない
-                others = [
-                    higashi_assignments[n] for n in higashi_assignments
-                    if n not in (a, b)
-                ]
-                if others:
-                    model.Add(sum(others) == 0).OnlyEnforceIf(f)
-                pair_d_flags.append(f)
-                pair_day_indicators[pair].append(f)
-            else:
-                pair_d_flags.append(None)
-        # is_eco2 が1のときは、何かしらのペアフラグが立っている
-        valid_flags = [f for f in pair_d_flags if f is not None]
-        if valid_flags:
-            model.Add(sum(valid_flags) >= 1).OnlyEnforceIf(is_eco2)
-
-    # 各ペアは月内1回まで
-    for pair, flags in pair_day_indicators.items():
-        if flags:
-            model.Add(sum(flags) <= 1)
-    # 東口エコ2の日は月内3回まで
-    if higashi_eco2_days:
-        model.Add(sum(higashi_eco2_days) <= 3)
-
-    # ============================================================
-    # 制約 9: 連勤上限
+    # 制約 8: 連勤上限
     # ============================================================
     # 設計方針:
     # - max_consec_override が指定された場合: 厳密に max_consec まで許容（ハード）

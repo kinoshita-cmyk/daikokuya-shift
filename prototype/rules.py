@@ -20,7 +20,7 @@ class StoreCapacity:
     """店舗の1日の必要人数（モードごとに変動）"""
     eco_min: int            # エコ要員の最小数
     ticket_min: int         # チケット要員の最小数
-    eco_max: int = 1        # エコ要員の最大数（通常1、東口の月3回エコ2など）
+    eco_max: int = 1        # エコ要員の最大数（通常1、一部大型店のみ2）
     closed_dow: tuple[int, ...] = ()  # 休店曜日（0=月）。tuple()=休店なし
 
 
@@ -35,7 +35,7 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
     Store.HIGASHIGUCHI: StoreCapacity(
         eco_min=1,
         ticket_min=0,
-        eco_max=2,           # 月3回だけエコ2の日あり（楯+牧野・春山+牧野・長尾+牧野）
+        eco_max=1,           # 原則1名体制（土井メイン、休みの日は他エコが代替）
         closed_dow=(0,),     # 月曜は休店
     ),
     Store.OMIYA: StoreCapacity(
@@ -48,8 +48,8 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
         eco_min=1,
         ticket_min=0,
         eco_max=1,
-        # 最終調整で人数余りの日に調整先として使う
-        # 下田が出勤可能な日なら下田を西口配置優先
+        # 原則1名体制（楯メイン）
+        # 人数が余る日・研修日・チケット補助が必要な日は追加配置の調整先にする
     ),
     Store.SUZURAN: StoreCapacity(
         eco_min=1,
@@ -106,13 +106,6 @@ HARD_CONSTRAINTS = {
 
 # 大宮店の追加制約：春山・下地どちらか1人は必ず在勤
 OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
-
-# 東口エコ2の組み合わせ（月3回までの特殊配置）
-HIGASHIGUCHI_ECO2_PAIRS: tuple[tuple[str, str], ...] = (
-    ("楯", "牧野"),
-    ("春山", "牧野"),
-    ("長尾", "牧野"),
-)
 
 # すずらん不在時の補填要員（野澤がいない日のチケット担当）
 SUZURAN_BACKUP_TICKET: tuple[str, ...] = ("岩野", "大類")
