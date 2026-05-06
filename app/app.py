@@ -1617,7 +1617,7 @@ if mode == "📊 経営者ビュー":
         elif selected_shift_view == shift_view_options[4]:
             st.markdown("##### 💬 シフトを見ながらAIと対話")
             st.caption(
-                "AIが作る変更はまず仮変更になります。反映・取り消し・戻る・進むは会話欄の下で操作できます。"
+                "AIが作る変更はまず仮変更になります。シフト表の上で確認してから反映できます。"
             )
 
             api_key = get_anthropic_api_key()
@@ -1635,49 +1635,80 @@ if mode == "📊 経営者ビュー":
 
                 chat_engine = st.session_state.chat_engine
 
-                st.markdown("##### 会話")
-                chat_history_area = st.container()
-                change_status_area = st.container()
-                change_buttons_area = st.container()
+                st.markdown("##### 📋 現在のシフト表")
+                st.caption("AIが作った仮変更は、表ではオレンジ枠で表示します。")
 
-                with st.form(
-                    f"chat_prompt_form_{shift.year}_{shift.month}",
-                    clear_on_submit=True,
-                ):
-                    prompt = st.text_area(
-                        "メッセージ",
-                        placeholder=(
-                            f"{shift.month}/15 の大宮に田中さんを入れたい\n"
-                            "鈴木さんと黒澤さんの20日を入れ替えるとどうなる？"
-                        ),
-                        height=100,
-                        key=f"chat_prompt_text_{shift.year}_{shift.month}",
+                def _save_chat_shift_snapshot(note: str) -> None:
+                    try:
+                        backup_mgr.save_shift(
+                            chat_engine.shift,
+                            kind="draft",
+                            author="AI対話",
+                            note=note,
+                        )
+                    except Exception:
+                        pass
+                    save_session_shift(chat_engine.shift)
+
+                pending_count = chat_engine.get_pending_change_count()
+                if pending_count:
+                    st.warning(
+                        f"未反映の仮変更が **{pending_count}件** あります。"
+                        "まだ本シフトには入っていません。"
                     )
-                    send_prompt = st.form_submit_button(
-                        "送信",
-                        type="primary",
-                        width="stretch",
+                    for line in chat_engine.get_pending_change_summary():
+                        st.caption(line)
+                elif chat_engine.last_status_message:
+                    st.success(chat_engine.last_status_message)
+                else:
+                    st.info("未反映の仮変更はありません。AIに依頼すると、まず仮変更として表示されます。")
+
+                if pending_count and st.session_state.get("chat_apply_confirm"):
+                    st.warning(
+                        f"仮変更 **{pending_count}件** を本シフトに反映します。"
+                        "反映後も「戻る」で直前の反映を取り消せます。"
                     )
-
-                if send_prompt:
-                    prompt = prompt.strip()
-                    if not prompt:
-                        st.warning("AIに送る内容を入力してください。")
-                    else:
-                        st.session_state.chat_messages.append({"role": "user", "content": prompt})
-                        with st.spinner("AIが考え中..."):
-                            try:
-                                response = chat_engine.chat(prompt)
-                            except Exception as chat_err:
-                                response = (
-                                    "AI対話中にエラーが発生しました。"
-                                    "APIキーの設定、利用上限、または通信状態を確認してください。\n\n"
-                                    f"詳細: {type(chat_err).__name__}: {chat_err}"
-                                )
-                        st.session_state.chat_messages.append({"role": "assistant", "content": response})
-
-                with change_buttons_area:
-                    pending_count = chat_engine.get_pending_change_count()
+                    confirm_apply_col, cancel_apply_col, _ = st.columns([1.3, 1, 2.7])
+                    with confirm_apply_col:
+                        if st.button(
+                            "本変更を適用",
+                            key="chat_apply_confirmed",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            msg = chat_engine.apply_pending_changes()
+                            _save_chat_shift_snapshot(msg)
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                            st.session_state["chat_apply_confirm"] = False
+                            st.session_state["chat_discard_confirm"] = False
+                            st.rerun()
+                    with cancel_apply_col:
+                        if st.button("やめる", key="chat_apply_cancel", width="stretch"):
+                            st.session_state["chat_apply_confirm"] = False
+                            st.rerun()
+                elif pending_count and st.session_state.get("chat_discard_confirm"):
+                    st.warning(
+                        f"仮変更 **{pending_count}件** を取り消します。"
+                        "本シフトには何も反映されません。"
+                    )
+                    confirm_discard_col, cancel_discard_col, _ = st.columns([1.3, 1, 2.7])
+                    with confirm_discard_col:
+                        if st.button(
+                            "仮変更を取り消す",
+                            key="chat_discard_confirmed",
+                            type="primary",
+                            width="stretch",
+                        ):
+                            msg = chat_engine.discard_pending_changes()
+                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                            st.session_state["chat_apply_confirm"] = False
+                            st.session_state["chat_discard_confirm"] = False
+                            st.rerun()
+                    with cancel_discard_col:
+                        if st.button("やめる", key="chat_discard_cancel", width="stretch"):
+                            st.session_state["chat_discard_confirm"] = False
+                            st.rerun()
+                else:
                     btn_apply, btn_discard, _ = st.columns([1, 1, 3])
                     with btn_apply:
                         if st.button(
@@ -1686,108 +1717,61 @@ if mode == "📊 経営者ビュー":
                             type="primary",
                             width="stretch",
                             disabled=pending_count == 0,
-                            help="仮変更を本シフトに反映します",
+                            help="仮変更を本シフトに反映する前に確認します",
                         ):
-                            msg = chat_engine.apply_pending_changes()
-                            try:
-                                backup_mgr.save_shift(
-                                    chat_engine.shift,
-                                    kind="draft",
-                                    author="AI対話",
-                                    note=msg,
-                                )
-                            except Exception:
-                                pass
-                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                            st.session_state["chat_apply_confirm"] = True
+                            st.session_state["chat_discard_confirm"] = False
+                            st.rerun()
                     with btn_discard:
                         if st.button(
                             "取り消す",
                             key="chat_discard_pending",
                             width="stretch",
                             disabled=pending_count == 0,
-                            help="仮変更を捨てて元のシフト表示に戻します",
+                            help="仮変更を捨てる前に確認します",
                         ):
-                            msg = chat_engine.discard_pending_changes()
-                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                            st.session_state["chat_discard_confirm"] = True
+                            st.session_state["chat_apply_confirm"] = False
+                            st.rerun()
 
-                    can_undo = bool(chat_engine.undo_stack)
-                    can_redo = bool(chat_engine.redo_stack)
-                    btn_undo, btn_redo, btn_clear = st.columns([1, 1, 3])
-                    with btn_undo:
-                        if st.button(
-                            "← 戻る",
-                            key="chat_undo",
-                            width="stretch",
-                            disabled=not can_undo,
-                            help="直前に反映した変更を元に戻します",
-                        ):
-                            msg = chat_engine.undo_last_apply()
-                            try:
-                                backup_mgr.save_shift(
-                                    chat_engine.shift,
-                                    kind="draft",
-                                    author="AI対話",
-                                    note=msg,
-                                )
-                            except Exception:
-                                pass
-                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
-                    with btn_redo:
-                        if st.button(
-                            "進む →",
-                            key="chat_redo",
-                            width="stretch",
-                            disabled=not can_redo,
-                            help="元に戻した変更をもう一度反映します",
-                        ):
-                            msg = chat_engine.redo_last_apply()
-                            try:
-                                backup_mgr.save_shift(
-                                    chat_engine.shift,
-                                    kind="draft",
-                                    author="AI対話",
-                                    note=msg,
-                                )
-                            except Exception:
-                                pass
-                            st.session_state.chat_messages.append({"role": "assistant", "content": msg})
-                    with btn_clear:
-                        if st.button("会話をクリア", key="chat_clear", width="stretch"):
-                            st.session_state.chat_messages = []
+                can_undo = bool(chat_engine.undo_stack)
+                can_redo = bool(chat_engine.redo_stack)
+                btn_undo, btn_redo, btn_clear = st.columns([1, 1, 3])
+                with btn_undo:
+                    if st.button(
+                        "← 戻る",
+                        key="chat_undo",
+                        width="stretch",
+                        disabled=not can_undo,
+                        help="直前に反映した変更を元に戻します",
+                    ):
+                        msg = chat_engine.undo_last_apply()
+                        _save_chat_shift_snapshot(msg)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                        st.session_state["chat_apply_confirm"] = False
+                        st.session_state["chat_discard_confirm"] = False
+                        st.rerun()
+                with btn_redo:
+                    if st.button(
+                        "進む →",
+                        key="chat_redo",
+                        width="stretch",
+                        disabled=not can_redo,
+                        help="元に戻した変更をもう一度反映します",
+                    ):
+                        msg = chat_engine.redo_last_apply()
+                        _save_chat_shift_snapshot(msg)
+                        st.session_state.chat_messages.append({"role": "assistant", "content": msg})
+                        st.session_state["chat_apply_confirm"] = False
+                        st.session_state["chat_discard_confirm"] = False
+                        st.rerun()
+                with btn_clear:
+                    if st.button("会話をクリア", key="chat_clear", width="stretch"):
+                        st.session_state.chat_messages = []
+                        st.rerun()
 
                 pending_count = chat_engine.get_pending_change_count()
-                with change_status_area:
-                    if pending_count:
-                        st.warning(
-                            f"未反映の仮変更が **{pending_count}件** あります。"
-                            "下の表では仮変更セルをオレンジ枠で表示しています。"
-                        )
-                        for line in chat_engine.get_pending_change_summary():
-                            st.caption(line)
-                    elif chat_engine.last_status_message:
-                        st.success(chat_engine.last_status_message)
-                    else:
-                        st.info("未反映の仮変更はありません。AIに依頼すると、まず仮変更として表示されます。")
-
-                with chat_history_area:
-                    chat_container = st.container(height=360, border=True)
-                    with chat_container:
-                        if not st.session_state.chat_messages:
-                            with st.chat_message("assistant"):
-                                st.write(
-                                    "シフト表を見ながら相談できます。"
-                                    f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
-                                    "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
-                                )
-                        for msg in st.session_state.chat_messages:
-                            with st.chat_message(msg["role"]):
-                                st.write(msg["content"])
-
-                st.markdown("---")
-                ai_summary_area = st.container()
-                ai_table_area = st.container()
-
-                display_shift = chat_engine.get_preview_shift() if pending_count else shift
+                display_shift = chat_engine.get_preview_shift() if pending_count else chat_engine.shift
                 changed_cells = chat_engine.get_pending_change_keys() if pending_count else set()
 
                 _cv_inputs = st.session_state.get("last_validation_inputs", {})
@@ -1813,6 +1797,9 @@ if mode == "📊 経営者ビュー":
                 )
                 short_staff_by_store_chat = detect_short_staff_by_store(display_shift)
                 short_days_chat = set(short_staff_by_store_chat.keys())
+
+                ai_summary_area = st.container()
+                ai_table_area = st.container()
 
                 with ai_summary_area:
                     summary_col1, summary_col2, summary_col3 = st.columns([1, 1, 2])
@@ -1898,9 +1885,6 @@ if mode == "📊 経営者ビュー":
                                         )
 
                 with ai_table_area:
-                    st.markdown("##### 📋 現在のシフト表")
-                    if pending_count:
-                        st.caption("オレンジ枠のセルは、まだ反映していない仮変更です。")
                     render_shift_legend()
                     render_shift_table(
                         display_shift,
@@ -1909,8 +1893,62 @@ if mode == "📊 経営者ビュー":
                         changed_cells=changed_cells,
                     )
 
-                if chat_engine.shift is not shift:
-                    save_session_shift(chat_engine.shift)
+                st.markdown("---")
+                st.markdown("##### 会話")
+                chat_container = st.container(height=360, border=True)
+                with chat_container:
+                    if not st.session_state.chat_messages:
+                        with st.chat_message("assistant"):
+                            st.write(
+                                "シフト表を見ながら相談できます。"
+                                f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
+                                "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
+                            )
+                    for msg in st.session_state.chat_messages:
+                        with st.chat_message(msg["role"]):
+                            st.write(msg["content"])
+
+                st.markdown("##### メッセージ入力")
+                with st.form(
+                    f"chat_prompt_form_{shift.year}_{shift.month}",
+                    clear_on_submit=True,
+                ):
+                    prompt = st.text_area(
+                        "メッセージ",
+                        placeholder=(
+                            f"{shift.month}/15 の大宮に田中さんを入れたい\n"
+                            "鈴木さんと黒澤さんの20日を入れ替えるとどうなる？"
+                        ),
+                        height=100,
+                        key=f"chat_prompt_text_{shift.year}_{shift.month}",
+                    )
+                    send_prompt = st.form_submit_button(
+                        "送信",
+                        type="primary",
+                        width="stretch",
+                    )
+
+                if send_prompt:
+                    prompt = prompt.strip()
+                    if not prompt:
+                        st.warning("AIに送る内容を入力してください。")
+                    else:
+                        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+                        st.session_state["chat_apply_confirm"] = False
+                        st.session_state["chat_discard_confirm"] = False
+                        with st.spinner("AIが考え中..."):
+                            try:
+                                response = chat_engine.chat(prompt)
+                            except Exception as chat_err:
+                                response = (
+                                    "AI対話中にエラーが発生しました。"
+                                    "APIキーの設定、利用上限、または通信状態を確認してください。\n\n"
+                                    f"詳細: {type(chat_err).__name__}: {chat_err}"
+                                )
+                        st.session_state.chat_messages.append({"role": "assistant", "content": response})
+                        st.rerun()
+
+                save_session_shift(chat_engine.shift)
 
 
 # ============================================================
@@ -2644,15 +2682,6 @@ elif mode == "⚙️ 設定":
     # ============================================================
     with setting_tab1:
         st.markdown("### ルール設定")
-        st.caption(
-            "ここで設定した値は、シフト生成・検証に即座に反映されます。"
-            "変更履歴は「📜 ルール変更履歴」タブで確認できます。"
-        )
-
-        # サブセクション: 検証チェックのON/OFF
-        st.markdown("#### ✅ 検証チェックの ON/OFF")
-        st.caption("「シフトとして問題視するルール」をチェック単位で有効化／無効化できます。")
-
         check_labels = {
             "store_capacity": "店舗別必要人数",
             "eco_required": "東口・西口の必須エコ要員",
@@ -2667,6 +2696,110 @@ elif mode == "⚙️ 設定":
             "omiya_short_warning": "大宮人数少（エコ1名運営）の警告表示",
         }
 
+        param_specs = {
+            "max_consec_work": {
+                "label": "最大連勤日数（ハード上限）",
+                "min": 1, "max": 10, "default": 5,
+                "help": "この日数を超える連勤はエラーになります。推奨: 4〜7日",
+                "safe": (4, 7),
+            },
+            "soft_consec_threshold": {
+                "label": "推奨連勤上限（ソフト・ペナルティ閾値）",
+                "min": 1, "max": 10, "default": 4,
+                "help": "この日数を超えるとシフト生成時にペナルティ加算（できる限り回避）。推奨: 3〜5日",
+                "safe": (3, 5),
+            },
+            "default_holiday_days": {
+                "label": "既定の月内最低休日数",
+                "min": 0, "max": 15, "default": 8,
+                "help": "個別オーバーライドがない従業員の月内必要休日数。推奨: 6〜10日",
+                "safe": (6, 10),
+            },
+            "min_2off_per_month": {
+                "label": "2連休 月内最低回数",
+                "min": 0, "max": 10, "default": 1,
+                "help": "推奨: 0〜2回",
+                "safe": (0, 2),
+            },
+            "max_2off_per_month": {
+                "label": "2連休 月内最大回数",
+                "min": 0, "max": 10, "default": 2,
+                "help": "推奨: 1〜4回",
+                "safe": (1, 4),
+            },
+            "higashi_eco2_max_per_month": {
+                "label": "東口エコ2配置 月内最大回数",
+                "min": 0, "max": 10, "default": 3,
+                "help": "推奨: 0〜5回",
+                "safe": (0, 5),
+            },
+            "solver_seed": {
+                "label": "ソルバーシード",
+                "min": 0, "max": 999999, "default": 42,
+                "help": "同じ入力に対して毎回同じシフトを生成するためのシード値。別のパターンを試したい時は数値を変えてください。",
+                "safe": None,
+            },
+            "solver_time_limit_seconds": {
+                "label": "ソルバー最大実行時間（秒）",
+                "min": 10, "max": 600, "default": 120,
+                "help": "シフト生成に使う最大秒数です。",
+                "safe": None,
+            },
+        }
+
+        def _clone_custom_rule(rule: CustomRule) -> CustomRule:
+            return CustomRule(
+                id=rule.id,
+                name=rule.name,
+                description=rule.description,
+                enabled=rule.enabled,
+                severity=rule.severity,
+                created_at=rule.created_at,
+                created_by=rule.created_by,
+            )
+
+        def _sync_rule_widgets(source_cfg: RuleConfig) -> None:
+            for key in check_labels:
+                st.session_state[f"chk_{key}"] = source_cfg.enabled_checks.get(key, True)
+            for key, spec in param_specs.items():
+                st.session_state[f"param_{key}"] = int(
+                    source_cfg.parameters.get(key, spec["default"])
+                )
+            for rule in cfg.custom_rules:
+                st.session_state[f"rule_en_{rule.id}"] = rule.enabled
+            st.session_state["rule_added_custom_rules"] = []
+            st.session_state["rule_deleted_ids"] = []
+            st.session_state["rule_apply_confirm"] = False
+
+        cfg_signature = repr(cfg.to_dict())
+        discard_requested = st.session_state.pop("rule_discard_requested", False)
+        default_draft_requested = st.session_state.pop("rule_default_draft_requested", False)
+        if default_draft_requested:
+            _sync_rule_widgets(RuleConfig())
+            st.session_state["rule_deleted_ids"] = [r.id for r in cfg.custom_rules]
+            st.session_state["rule_cfg_loaded_sig"] = cfg_signature
+        elif discard_requested or st.session_state.get("rule_cfg_loaded_sig") != cfg_signature:
+            _sync_rule_widgets(cfg)
+            st.session_state["rule_cfg_loaded_sig"] = cfg_signature
+
+        st.caption(
+            "この画面は2段階です。値を変えた段階では **仮設定**、"
+            "下の確認で本変更を適用するまで **本設定** には保存されません。"
+        )
+        if cfg.updated_at:
+            st.info(
+                f"現在の本設定: {cfg.updated_at[:16].replace('T', ' ')} 更新"
+                f" / 更新者: {cfg.updated_by or '不明'}"
+            )
+        else:
+            st.info("現在の本設定: デフォルト設定")
+
+        draft_status_area = st.container()
+
+        # サブセクション: 検証チェックのON/OFF
+        st.markdown("#### ✅ 検証チェックの ON/OFF")
+        st.caption("「シフトとして問題視するルール」をチェック単位で有効化／無効化できます。")
+
         new_enabled = {}
         ck_col1, ck_col2 = st.columns(2)
         keys = list(check_labels.keys())
@@ -2674,7 +2807,7 @@ elif mode == "⚙️ 設定":
             with (ck_col1 if i < len(keys) // 2 + 1 else ck_col2):
                 new_enabled[key] = st.toggle(
                     check_labels[key],
-                    value=cfg.enabled_checks.get(key, True),
+                    value=st.session_state.get(f"chk_{key}", cfg.enabled_checks.get(key, True)),
                     key=f"chk_{key}",
                 )
 
@@ -2683,26 +2816,18 @@ elif mode == "⚙️ 設定":
         st.markdown("#### 🔢 数値パラメータ")
         st.warning(
             "⚠ **注意**: ここの値を極端な値に変えると、**シフトを生成できなくなる**ことがあります。"
-            "推奨範囲外の入力には自動で警告が表示されます。困った時は「⚠ デフォルトに戻す」ボタンを使ってください。"
+            "推奨範囲外の入力には自動で警告が表示されます。"
+            "困った時は「デフォルトを仮設定にする」ボタンを使ってください。"
         )
 
         param_col1, param_col2 = st.columns(2)
         new_params = {}
 
-        # 各パラメータの推奨範囲
-        SAFE_RANGES = {
-            "max_consec_work": (4, 7),      # 4〜7が現実的
-            "soft_consec_threshold": (3, 5),
-            "default_holiday_days": (6, 10),
-            "min_2off_per_month": (0, 2),
-            "max_2off_per_month": (1, 4),
-            "higashi_eco2_max_per_month": (0, 5),
-        }
-
         def warn_if_unsafe(key: str, value: int) -> None:
             """値が推奨範囲外なら警告を表示"""
-            if key in SAFE_RANGES:
-                lo, hi = SAFE_RANGES[key]
+            safe_range = param_specs[key].get("safe")
+            if safe_range:
+                lo, hi = safe_range
                 if value < lo:
                     st.caption(
                         f"⚠ 推奨範囲（{lo}〜{hi}）より小さい値です。"
@@ -2715,53 +2840,27 @@ elif mode == "⚙️ 設定":
                     )
 
         with param_col1:
-            new_params["max_consec_work"] = st.number_input(
-                "最大連勤日数（ハード上限）",
-                min_value=1, max_value=10,
-                value=cfg.parameters.get("max_consec_work", 5),
-                help="この日数を超える連勤はエラーになります。推奨: 4〜7日",
-            )
-            warn_if_unsafe("max_consec_work", new_params["max_consec_work"])
-
-            new_params["soft_consec_threshold"] = st.number_input(
-                "推奨連勤上限（ソフト・ペナルティ閾値）",
-                min_value=1, max_value=10,
-                value=cfg.parameters.get("soft_consec_threshold", 4),
-                help="この日数を超えるとシフト生成時にペナルティ加算（できる限り回避）。推奨: 3〜5日",
-            )
-            warn_if_unsafe("soft_consec_threshold", new_params["soft_consec_threshold"])
-
-            new_params["default_holiday_days"] = st.number_input(
-                "既定の月内最低休日数",
-                min_value=0, max_value=15,
-                value=cfg.parameters.get("default_holiday_days", 8),
-                help="個別オーバーライドがない従業員の月内必要休日数。推奨: 6〜10日",
-            )
-            warn_if_unsafe("default_holiday_days", new_params["default_holiday_days"])
+            for key in ("max_consec_work", "soft_consec_threshold", "default_holiday_days"):
+                spec = param_specs[key]
+                new_params[key] = int(st.number_input(
+                    spec["label"],
+                    min_value=spec["min"], max_value=spec["max"],
+                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
+                    help=spec["help"],
+                    key=f"param_{key}",
+                ))
+                warn_if_unsafe(key, new_params[key])
         with param_col2:
-            new_params["min_2off_per_month"] = st.number_input(
-                "2連休 月内最低回数",
-                min_value=0, max_value=10,
-                value=cfg.parameters.get("min_2off_per_month", 1),
-                help="推奨: 0〜2回",
-            )
-            warn_if_unsafe("min_2off_per_month", new_params["min_2off_per_month"])
-
-            new_params["max_2off_per_month"] = st.number_input(
-                "2連休 月内最大回数",
-                min_value=0, max_value=10,
-                value=cfg.parameters.get("max_2off_per_month", 2),
-                help="推奨: 1〜4回",
-            )
-            warn_if_unsafe("max_2off_per_month", new_params["max_2off_per_month"])
-
-            new_params["higashi_eco2_max_per_month"] = st.number_input(
-                "東口エコ2配置 月内最大回数",
-                min_value=0, max_value=10,
-                value=cfg.parameters.get("higashi_eco2_max_per_month", 3),
-                help="推奨: 0〜5回",
-            )
-            warn_if_unsafe("higashi_eco2_max_per_month", new_params["higashi_eco2_max_per_month"])
+            for key in ("min_2off_per_month", "max_2off_per_month", "higashi_eco2_max_per_month"):
+                spec = param_specs[key]
+                new_params[key] = int(st.number_input(
+                    spec["label"],
+                    min_value=spec["min"], max_value=spec["max"],
+                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
+                    help=spec["help"],
+                    key=f"param_{key}",
+                ))
+                warn_if_unsafe(key, new_params[key])
 
         # 矛盾チェック: 2連休 最低 > 最大 はおかしい
         if new_params["min_2off_per_month"] > new_params["max_2off_per_month"]:
@@ -2781,19 +2880,26 @@ elif mode == "⚙️ 設定":
         st.markdown("##### ソルバー設定")
         param_col3, param_col4 = st.columns(2)
         with param_col3:
-            new_params["solver_seed"] = st.number_input(
-                "ソルバーシード",
-                min_value=0, max_value=999999,
-                value=cfg.parameters.get("solver_seed", 42),
-                help="同じ入力に対して毎回同じシフトを生成するためのシード値。"
-                     "別のパターンを試したい時は数値を変えてください。",
-            )
+            spec = param_specs["solver_seed"]
+            new_params["solver_seed"] = int(st.number_input(
+                spec["label"],
+                min_value=spec["min"], max_value=spec["max"],
+                value=int(st.session_state.get("param_solver_seed", cfg.parameters.get("solver_seed", spec["default"]))),
+                help=spec["help"],
+                key="param_solver_seed",
+            ))
         with param_col4:
-            new_params["solver_time_limit_seconds"] = st.number_input(
-                "ソルバー最大実行時間（秒）",
-                min_value=10, max_value=600,
-                value=cfg.parameters.get("solver_time_limit_seconds", 120),
-            )
+            spec = param_specs["solver_time_limit_seconds"]
+            new_params["solver_time_limit_seconds"] = int(st.number_input(
+                spec["label"],
+                min_value=spec["min"], max_value=spec["max"],
+                value=int(st.session_state.get(
+                    "param_solver_time_limit_seconds",
+                    cfg.parameters.get("solver_time_limit_seconds", spec["default"]),
+                )),
+                help=spec["help"],
+                key="param_solver_time_limit_seconds",
+            ))
 
         # サブセクション: カスタムルール
         st.markdown("---")
@@ -2804,20 +2910,28 @@ elif mode == "⚙️ 設定":
             "将来的に検証ロジックに連動させたい場合は、技術者にご相談ください。"
         )
 
-        new_custom_rules = list(cfg.custom_rules)
+        added_rule_objs = [
+            CustomRule(**r) for r in st.session_state.get("rule_added_custom_rules", [])
+        ]
+        deleted_ids = set(st.session_state.get("rule_deleted_ids", []))
+        added_ids = {r.id for r in added_rule_objs}
+        new_custom_rules = [
+            _clone_custom_rule(r) for r in cfg.custom_rules if r.id not in deleted_ids
+        ] + added_rule_objs
 
         # 既存ルールの一覧と削除
         if new_custom_rules:
-            st.markdown("**既存のカスタムルール:**")
+            st.markdown("**カスタムルール:**")
             for idx, rule in enumerate(new_custom_rules):
                 rule_col1, rule_col2, rule_col3 = st.columns([5, 1, 1])
                 with rule_col1:
+                    badge = "仮追加" if rule.id in added_ids else "本設定"
                     st.markdown(
                         f'<div style="padding:8px; border-left:3px solid #6366f1; '
                         f'background:#f5f3ff; border-radius:4px;">'
                         f'<strong>{rule.name}</strong> '
                         f'<span style="font-size:11px; color:#6b7280;">'
-                        f'({rule.severity})</span><br>'
+                        f'({rule.severity} / {badge})</span><br>'
                         f'<span style="font-size:13px;">{rule.description}</span><br>'
                         f'<span style="font-size:11px; color:#9ca3af;">'
                         f'追加: {rule.created_at[:10]} by {rule.created_by}</span>'
@@ -2826,11 +2940,22 @@ elif mode == "⚙️ 設定":
                     )
                 with rule_col2:
                     new_custom_rules[idx].enabled = st.toggle(
-                        "有効", value=rule.enabled, key=f"rule_en_{rule.id}",
+                        "有効",
+                        value=st.session_state.get(f"rule_en_{rule.id}", rule.enabled),
+                        key=f"rule_en_{rule.id}",
                     )
                 with rule_col3:
                     if st.button("🗑", key=f"del_{rule.id}"):
-                        new_custom_rules = [r for r in new_custom_rules if r.id != rule.id]
+                        if rule.id in added_ids:
+                            st.session_state["rule_added_custom_rules"] = [
+                                r for r in st.session_state.get("rule_added_custom_rules", [])
+                                if r.get("id") != rule.id
+                            ]
+                        else:
+                            next_deleted = set(st.session_state.get("rule_deleted_ids", []))
+                            next_deleted.add(rule.id)
+                            st.session_state["rule_deleted_ids"] = list(next_deleted)
+                        st.session_state["rule_apply_confirm"] = False
                         st.rerun()
 
         # 新規ルールの追加フォーム
@@ -2857,46 +2982,119 @@ elif mode == "⚙️ 設定":
                             created_at=datetime.now().isoformat(),
                             created_by=rule_actor,
                         )
-                        new_custom_rules.append(new_rule)
-                        # 即時保存
-                        new_cfg = RuleConfig(
-                            enabled_checks=new_enabled,
-                            parameters=new_params,
-                            custom_rules=new_custom_rules,
+                        st.session_state["rule_added_custom_rules"] = (
+                            st.session_state.get("rule_added_custom_rules", [])
+                            + [{
+                                "id": new_rule.id,
+                                "name": new_rule.name,
+                                "description": new_rule.description,
+                                "enabled": new_rule.enabled,
+                                "severity": new_rule.severity,
+                                "created_at": new_rule.created_at,
+                                "created_by": new_rule.created_by,
+                            }]
                         )
-                        rule_mgr.save(new_cfg, actor=rule_actor, note=f"カスタムルール追加: {rule_name}")
-                        st.success(f"✅ ルール「{rule_name}」を追加しました")
+                        st.session_state["rule_apply_confirm"] = False
+                        st.success(f"ルール「{rule_name}」を仮追加しました。本設定にするには下の反映操作が必要です。")
                         st.rerun()
 
         # 保存・リセットボタン
         st.markdown("---")
-        save_col1, save_col2, save_col3 = st.columns([2, 1, 1])
+        save_col1, save_col2 = st.columns([2, 3])
         with save_col1:
             save_actor = st.text_input("保存実行者名", value="代表取締役", key="cfg_actor")
-            save_note = st.text_input("変更メモ（任意）", placeholder="例: 連勤上限を6に緩和")
-        with save_col2:
-            if st.button("💾 設定を保存", type="primary", width="stretch"):
-                new_cfg = RuleConfig(
-                    enabled_checks=new_enabled,
-                    parameters=new_params,
-                    custom_rules=new_custom_rules,
+            save_note = st.text_input("変更メモ（任意）", placeholder="例: 連勤上限を4に戻す")
+
+        draft_cfg = RuleConfig(
+            enabled_checks=new_enabled,
+            parameters=new_params,
+            custom_rules=new_custom_rules,
+        )
+        draft_changes = rule_mgr._compute_diff(
+            cfg, draft_cfg, actor=save_actor, note=save_note,
+        )
+        has_setting_error = (
+            new_params["min_2off_per_month"] > new_params["max_2off_per_month"]
+            or new_params["soft_consec_threshold"] > new_params["max_consec_work"]
+        )
+
+        def _change_text(change) -> str:
+            labels = {**check_labels, **{k: v["label"] for k, v in param_specs.items()}}
+            if change.category == "custom_rule_add":
+                return f"カスタムルール追加: {change.after.get('name', change.target)}"
+            if change.category == "custom_rule_remove":
+                return f"カスタムルール削除: {change.before.get('name', change.target)}"
+            if change.category == "custom_rule_toggle":
+                return f"カスタムルール切替: {change.target} {change.before} → {change.after}"
+            return f"{labels.get(change.target, change.target)}: {change.before} → {change.after}"
+
+        with draft_status_area:
+            if draft_changes:
+                st.warning(
+                    f"仮変更が **{len(draft_changes)}件** あります。"
+                    "まだ本設定には保存されていません。"
                 )
-                changes = rule_mgr.save(new_cfg, actor=save_actor, note=save_note)
-                if changes:
-                    st.success(f"✅ {len(changes)}件の変更を保存しました")
-                else:
-                    st.info("変更点はありません")
-                st.rerun()
-        with save_col3:
-            if st.button("⚠ デフォルトに戻す", width="stretch"):
-                if st.session_state.get("confirm_reset"):
-                    rule_mgr.reset_to_default(actor=save_actor)
-                    st.success("✅ デフォルトに戻しました")
-                    st.session_state["confirm_reset"] = False
-                    st.rerun()
-                else:
-                    st.session_state["confirm_reset"] = True
-                    st.warning("⚠ もう一度押すとリセットされます")
+                with st.expander("仮変更の内容を見る", expanded=False):
+                    for change in draft_changes:
+                        st.write(f"- {_change_text(change)}")
+            else:
+                st.success("本設定と画面上の値は一致しています。仮変更はありません。")
+
+        with save_col2:
+            if st.session_state.get("rule_apply_confirm") and draft_changes:
+                st.warning(
+                    "本変更を適用します。保存後はシフト生成・検証にこの設定が使われます。"
+                )
+                apply_col, cancel_col, reset_col = st.columns([1.2, 1, 1.4])
+                with apply_col:
+                    if st.button(
+                        "本変更を適用",
+                        type="primary",
+                        width="stretch",
+                        disabled=has_setting_error,
+                    ):
+                        changes = rule_mgr.save(draft_cfg, actor=save_actor, note=save_note)
+                        st.session_state["rule_apply_confirm"] = False
+                        st.session_state["rule_added_custom_rules"] = []
+                        st.session_state["rule_deleted_ids"] = []
+                        if changes:
+                            st.success(f"{len(changes)}件の変更を本設定に保存しました")
+                        else:
+                            st.info("変更点はありません")
+                        st.rerun()
+                with cancel_col:
+                    if st.button("やめる", width="stretch"):
+                        st.session_state["rule_apply_confirm"] = False
+                        st.rerun()
+                with reset_col:
+                    if st.button("取り消す", width="stretch"):
+                        st.session_state["rule_discard_requested"] = True
+                        st.rerun()
+            else:
+                apply_col, discard_col, default_col = st.columns([1, 1, 1.4])
+                with apply_col:
+                    if st.button(
+                        "反映する",
+                        type="primary",
+                        width="stretch",
+                        disabled=(not draft_changes or has_setting_error),
+                        help="仮設定を本設定として保存する前に確認します",
+                    ):
+                        st.session_state["rule_apply_confirm"] = True
+                        st.rerun()
+                with discard_col:
+                    if st.button(
+                        "取り消す",
+                        width="stretch",
+                        disabled=not draft_changes,
+                        help="画面上の仮設定を捨てて、現在の本設定に戻します",
+                    ):
+                        st.session_state["rule_discard_requested"] = True
+                        st.rerun()
+                with default_col:
+                    if st.button("デフォルトを仮設定にする", width="stretch"):
+                        st.session_state["rule_default_draft_requested"] = True
+                        st.rerun()
 
     # ============================================================
     # タブ2: ルール変更履歴
