@@ -1,0 +1,33 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-12T10:45:14.454390",
+  "author": "山本",
+  "off_requests": {
+    "山本": [
+      1,
+      4,
+      7,
+      8,
+      10,
+      12,
+      14,
+      15,
+      17,
+      19,
+      21,
+      22,
+      25,
+      26,
+      28
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "山本": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": null,
+  "base_holidays": null
+}
