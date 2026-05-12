@@ -1053,6 +1053,16 @@ if mode == "📊 経営者ビュー":
         int(target_year), int(target_month), expected_employees,
     )
     summary = submission_status["summary"]
+    current_ym_label = f"{int(target_year):04d}-{int(target_month):02d}"
+    available_preference_months: list[str] = []
+    try:
+        available_preference_months = [
+            p.name
+            for p in sorted(backup_mgr.backup_dir.iterdir())
+            if p.is_dir() and any(p.glob("preferences_*.json"))
+        ]
+    except Exception:
+        available_preference_months = []
 
     # 診断: 各月に保存されている提出ファイル数（デバッグ表示）
     with st.expander("🔧 診断: 各月の保存データ件数（クリックで展開）", expanded=False):
@@ -1109,6 +1119,17 @@ if mode == "📊 経営者ビュー":
             f'</div></div>',
             unsafe_allow_html=True,
         )
+        other_months = [
+            ym for ym in available_preference_months if ym != current_ym_label
+        ]
+        if other_months:
+            st.info(
+                "保存済みの希望提出データは "
+                + "、".join(other_months)
+                + " にあります。現在の表示対象は "
+                + current_ym_label
+                + " です。過去月を確認する場合は、上部の対象年月を切り替えてください。"
+            )
     else:
         # 一部提出済み
         st.markdown(
@@ -1787,6 +1808,7 @@ if mode == "📊 経営者ビュー":
                 f"inline_edit_employee_{edit_ym}",
                 EXPORT_COLUMN_ORDER[0],
             )
+            cell_selected_from_table = False
             try:
                 query_edit_ym = st.query_params.get("edit_ym", "")
                 query_edit_day = int(st.query_params.get("edit_day", selected_edit_day))
@@ -1802,6 +1824,7 @@ if mode == "📊 経営者ビュー":
                     selected_edit_employee = query_edit_employee
                     st.session_state[f"inline_edit_day_{edit_ym}"] = selected_edit_day
                     st.session_state[f"inline_edit_employee_{edit_ym}"] = selected_edit_employee
+                    cell_selected_from_table = True
                     for _param in ("edit_ym", "edit_day", "edit_employee"):
                         if _param in st.query_params:
                             del st.query_params[_param]
@@ -1830,7 +1853,7 @@ if mode == "📊 経営者ビュー":
 
             with st.expander(
                 "✏️ 選択したセルを修正する",
-                expanded=bool(inline_changed_cells) or "edit_day" in st.query_params,
+                expanded=bool(inline_changed_cells) or cell_selected_from_table,
             ):
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
