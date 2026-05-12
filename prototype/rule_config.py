@@ -56,7 +56,7 @@ DEFAULT_PARAMETERS = {
     "max_2off_per_month": 2,             # 2連休 月内最大回数
     "higashi_eco2_max_per_month": 3,     # 東口エコ2配置の月内最大回数
     "solver_seed": 42,                   # ソルバーシード（再現性用）
-    "solver_time_limit_seconds": 120,    # ソルバーの最大実行時間
+    "solver_time_limit_seconds": 180,    # ソルバーの最大実行時間
 }
 
 
