@@ -153,13 +153,12 @@ class YamamotoLogic:
             return False
         # 赤羽は「エコ1名 + チケット2名」が基本。
         # エコが2名いる日は、エコ1名分をチケット対応として扱える。
+        # ただしチケット対応が2名分に満たない場合は、山本さんを補助投入する。
         effective_ticket_coverage = (
             akabane_ticket_count + max(0, akabane_eco_count - 1)
         )
-        assigned_people = akabane_eco_count + akabane_ticket_count
         return (
             akabane_eco_count >= 1
-            and assigned_people >= 2
             and effective_ticket_coverage < 2
         )
 
