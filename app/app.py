@@ -1881,8 +1881,8 @@ if mode == "📊 経営者ビュー":
                 from calendar import monthrange as _mr
                 days_in_m = _mr(_saved_target_year, _saved_target_month)[1]
                 solver_limit_seconds = max(
-                    120,
-                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 120)),
+                    180,
+                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 180)),
                 )
 
                 progress_area.info(
@@ -2168,7 +2168,7 @@ if mode == "📊 経営者ビュー":
                         "2. 矛盾する希望があれば該当従業員に再提出を依頼",
                         "3. 「⚙️ 設定 → 🔧 ルール設定」で",
                         "   - 「最大連勤日数」を 5→6 や 7 に増やす",
-                        "   - 「ソルバー最大実行時間」を 30→60 秒に増やす",
+                        "   - 「ソルバー最大実行時間」を 120→180 秒に増やす",
                         "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
                     ])
                     st.error("\n".join(diag_lines))
@@ -2396,7 +2396,7 @@ if mode == "📊 経営者ビュー":
         shift = None
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
-        shift_view_options = ["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力"]
+        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力"]
         if st.session_state.get("manager_shift_view") not in shift_view_options:
             st.session_state["manager_shift_view"] = shift_view_options[0]
         selected_shift_view = st.radio(
@@ -4308,7 +4308,7 @@ elif mode == "⚙️ 設定":
             },
             "solver_time_limit_seconds": {
                 "label": "ソルバー最大実行時間（秒）",
-                "min": 10, "max": 600, "default": 120,
+                "min": 10, "max": 600, "default": 180,
                 "help": "シフト生成に使う最大秒数です。",
                 "safe": None,
             },
