@@ -26,7 +26,7 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
-    get_capacity,
+    get_capacity, OFF_MAIN_STORE_MINIMUMS,
 )
 
 
@@ -112,6 +112,7 @@ def validate(
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     max_consec: Optional[int] = None,
     allow_omiya_short: bool = True,
+    monthly_store_count_rules: Optional[list[dict]] = None,
 ) -> ValidationResult:
     """
     シフトを検証して問題リストを返す。
@@ -129,6 +130,7 @@ def validate(
     off_requests = off_requests or {}
     prev_month = prev_month or []
     holiday_overrides = holiday_overrides or {}
+    monthly_store_count_rules = monthly_store_count_rules or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
 
@@ -159,7 +161,13 @@ def validate(
     # 9. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 10. 統計情報の集計
+    # 10. 楯・春山・長尾のメイン店舗外勤務チェック
+    _check_required_off_main_store_days(shift, result)
+
+    # 11. 月別の追加配置ルールチェック
+    _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
+
+    # 12. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -610,6 +618,85 @@ def _check_higashiguchi_monday_closed(
                 day=day, employee=None,
                 message=f"東口に{higashi_workers}が配置（月曜休店）",
             ))
+
+
+def _check_required_off_main_store_days(
+    shift: MonthlyShift, result: ValidationResult,
+) -> None:
+    """楯・春山・長尾が月3日以上メイン店舗以外で勤務しているか。"""
+    for emp_name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
+        outside_days = [
+            a.day for a in shift.assignments
+            if a.employee == emp_name
+            and a.store not in (Store.OFF, main_store)
+        ]
+        if len(outside_days) < min_count:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="メイン店舗外勤務",
+                day=None,
+                employee=emp_name,
+                message=(
+                    f"メイン店舗（{main_store.display_name}）以外の勤務が"
+                    f"{len(outside_days)}日です。最低{min_count}日必要です。"
+                ),
+            ))
+
+
+def _store_from_rule_value(value) -> Optional[Store]:
+    """月別ルールの店舗表記を Store に変換する。"""
+    if isinstance(value, Store):
+        return value
+    value_str = str(value)
+    try:
+        return Store[value_str]
+    except KeyError:
+        pass
+    for store in Store:
+        if store.display_name == value_str or store.value == value_str:
+            return store
+    return None
+
+
+def _check_monthly_store_count_rules(
+    shift: MonthlyShift, result: ValidationResult, rules: list[dict],
+) -> None:
+    """月別追加ルール（特定スタッフを指定店舗へN回）を検証する。"""
+    for rule in rules:
+        if not rule or not rule.get("employee"):
+            continue
+        emp_name = str(rule.get("employee"))
+        stores = [
+            s for s in (_store_from_rule_value(v) for v in (rule.get("stores") or []))
+            if s is not None and s != Store.OFF
+        ]
+        if not stores:
+            continue
+        try:
+            required_count = int(rule.get("count") or 0)
+        except (TypeError, ValueError):
+            required_count = 0
+        if required_count <= 0:
+            continue
+        actual_count = sum(
+            1 for a in shift.assignments
+            if a.employee == emp_name and a.store in stores
+        )
+        if actual_count >= required_count:
+            continue
+        severity = str(rule.get("severity") or "WARNING").upper()
+        store_names = "・".join(s.display_name for s in stores)
+        result.issues.append(Issue(
+            severity="ERROR" if severity == "ERROR" else "WARNING",
+            category="月別ルール",
+            day=None,
+            employee=emp_name,
+            message=(
+                f"{rule.get('name') or '月別追加ルール'}: "
+                f"{store_names}への勤務が{actual_count}日です。"
+                f"{required_count}日以上必要です。"
+            ),
+        ))
 
 
 def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> None:

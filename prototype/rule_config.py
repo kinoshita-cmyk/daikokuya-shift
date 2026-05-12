@@ -74,6 +74,12 @@ class CustomRule:
     severity: str = "WARNING"  # "ERROR" or "WARNING"
     created_at: str = ""
     created_by: str = ""
+    target_year: Optional[int] = None
+    target_month: Optional[int] = None
+    rule_type: str = "note"  # note / employee_store_count
+    employee: str = ""
+    stores: list[str] = field(default_factory=list)
+    count: int = 0
 
 
 @dataclass

@@ -188,6 +188,54 @@ def push_shift_to_github(
         return False, f"{type(e).__name__}: {e}"
 
 
+def push_local_file_to_github(
+    local_file_path: Path,
+    repo_path: str,
+    commit_message: str,
+) -> tuple[bool, str]:
+    """任意のローカルファイルを指定パスで GitHub に保存する。"""
+    if not is_github_backup_enabled():
+        return False, "未設定"
+    try:
+        local_file_path = Path(local_file_path)
+        if not local_file_path.exists():
+            return False, "ローカルファイルが見つからない"
+        return _push_file(repo_path, local_file_path.read_bytes(), commit_message)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def push_lock_to_github(
+    local_file_path: Path,
+    year: int,
+    month: int,
+    action: str = "lock",
+) -> tuple[bool, str]:
+    """ロック/解除履歴ファイルを GitHub に保存する。"""
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    repo_path = f"locks/{year:04d}-{month:02d}/{action}_{ts}.json"
+    return push_local_file_to_github(
+        local_file_path,
+        repo_path,
+        f"Lock {action}: {year}-{month:02d}",
+    )
+
+
+def push_edit_log_to_github(
+    local_file_path: Path,
+    year: int,
+    month: int,
+) -> tuple[bool, str]:
+    """編集履歴ファイルを GitHub に保存する。"""
+    local_file_path = Path(local_file_path)
+    repo_path = f"edits/{year:04d}-{month:02d}/{local_file_path.name}"
+    return push_local_file_to_github(
+        local_file_path,
+        repo_path,
+        f"Edit log: {year}-{month:02d}",
+    )
+
+
 def push_config_to_github(
     config_name: str,
     config_data: dict,

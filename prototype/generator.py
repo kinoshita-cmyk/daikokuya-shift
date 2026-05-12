@@ -36,6 +36,7 @@ from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
+    OFF_MAIN_STORE_MINIMUMS,
 )
 
 
@@ -97,6 +98,7 @@ def generate_shift(
     holiday_overrides: Optional[dict[str, int]] = None,
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
+    monthly_store_count_rules: Optional[list[dict]] = None,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -120,6 +122,7 @@ def generate_shift(
     holiday_overrides = holiday_overrides or {}
     preferred_work_requests = preferred_work_requests or []
     preferred_consecutive_off = preferred_consecutive_off or []
+    monthly_store_count_rules = monthly_store_count_rules or []
     operation_modes = operation_modes or determine_operation_modes(year, month)
     consec_exceptions = consec_exceptions or []
 
@@ -496,11 +499,27 @@ def generate_shift(
                 model.Add(off["南"][d] == 1)
 
     # ============================================================
+    # 制約 14: 楯・春山・長尾は月3日以上、メイン店舗以外で勤務
+    # ============================================================
+    for name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
+        if name not in main_employee_names:
+            continue
+        outside_main = [
+            x[name][d][s]
+            for d in days
+            for s in main_stores
+            if s != main_store
+        ]
+        if outside_main:
+            model.Add(sum(outside_main) >= int(min_count))
+
+    # ============================================================
     # 目的関数（ソフト制約）: 在勤要望の達成度を最大化
     # ============================================================
     objective_terms = []
     preferred_consecutive_off_indicators = []
     preferred_work_terms = []
+    monthly_rule_terms = []
 
     # 自由記載の「出勤希望」「○日は赤羽希望」などは、解なしを避けるためソフト制約で強く優先。
     for name, d, store in preferred_work_requests:
@@ -524,6 +543,47 @@ def generate_shift(
             model.Add(off_sum == block_len).OnlyEnforceIf(block)
             model.Add(off_sum <= block_len - 1).OnlyEnforceIf(block.Not())
             preferred_consecutive_off_indicators.append(block)
+
+    # 月別ルール: 特定スタッフを、その月だけ指定店舗へ一定回数入れる。
+    # 例: 6月は牧野さんを研修のため西口または東口に3回。
+    for rule in monthly_store_count_rules:
+        if not rule or not rule.get("employee"):
+            continue
+        name = str(rule.get("employee"))
+        if name not in main_employee_names:
+            continue
+        store_values = rule.get("stores") or []
+        stores = []
+        for raw_store in store_values:
+            try:
+                store = raw_store if isinstance(raw_store, Store) else Store[str(raw_store)]
+            except Exception:
+                store = next(
+                    (
+                        s for s in main_stores
+                        if s.display_name == str(raw_store) or s.value == str(raw_store)
+                    ),
+                    None,
+                )
+            if store in main_stores:
+                stores.append(store)
+        stores = sorted(set(stores), key=lambda s: s.name)
+        if not stores:
+            continue
+        try:
+            required_count = int(rule.get("count") or 0)
+        except (TypeError, ValueError):
+            required_count = 0
+        if required_count <= 0:
+            continue
+        actual_count = sum(x[name][d][s] for d in days for s in stores)
+        severity = str(rule.get("severity", "WARNING")).upper()
+        if severity == "ERROR":
+            model.Add(actual_count >= required_count)
+        else:
+            capped = model.NewIntVar(0, required_count, f"monthly_rule_{name}_{len(monthly_rule_terms)}")
+            model.AddMinEquality(capped, [actual_count, model.NewConstant(required_count)])
+            monthly_rule_terms.append(capped)
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
@@ -569,6 +629,8 @@ def generate_shift(
         obj = obj + 180 * sum(preferred_consecutive_off_indicators)
     if preferred_work_terms:
         obj = obj + sum(preferred_work_terms)
+    if monthly_rule_terms:
+        obj = obj + 160 * sum(monthly_rule_terms)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
     obj = obj - 100 * sum(omiya_short.values())
     if higashi_unexpected_assignments:

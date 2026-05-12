@@ -116,6 +116,14 @@ HIGASHIGUCHI_ALLOWED_STAFF: tuple[str, ...] = (
     *HIGASHIGUCHI_SUBSTITUTE_STAFF,
 )
 
+# メイン店舗以外への月内勤務必須回数。
+# 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
+OFF_MAIN_STORE_MINIMUMS: dict[str, tuple[Store, int]] = {
+    "楯": (Store.NISHIGUCHI, 3),
+    "春山": (Store.OMIYA, 3),
+    "長尾": (Store.SUZURAN, 3),
+}
+
 # すずらん不在時の補填要員（野澤がいない日のチケット担当）
 SUZURAN_BACKUP_TICKET: tuple[str, ...] = ("岩野", "大類")
 
