@@ -15,6 +15,7 @@
 import sys
 import os
 import json
+import inspect
 from pathlib import Path
 from typing import Optional
 from html import escape
@@ -775,6 +776,39 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         for col in columns:
             value = escape(str(row.get(col, ""))).replace("\n", "<br>")
             white_space = "pre-wrap" if col == "備考" else "nowrap"
+            html_parts.append(
+                f'<td style="border:1px solid #e5e7eb; padding:8px; '
+                f'vertical-align:top; min-width:{widths[col]}px; '
+                f'white-space:{white_space};">{value}</td>'
+            )
+        html_parts.append('</tr>')
+    html_parts.append('</tbody></table></div>')
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def render_scrollable_review_table(rows: list[dict]) -> None:
+    """提出前確認の内容を横スクロール可能な表で表示する。"""
+    columns = ["項目", "内容", "日数"]
+    widths = {"項目": 220, "内容": 720, "日数": 90}
+    html_parts = [
+        '<div style="overflow:auto; max-height:360px; border:1px solid #e5e7eb; '
+        'border-radius:6px; background:white;">',
+        '<table style="border-collapse:collapse; min-width:1030px; width:max-content; '
+        'font-size:14px;">',
+        '<thead><tr>',
+    ]
+    for col in columns:
+        html_parts.append(
+            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
+            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
+            f'min-width:{widths[col]}px;">{escape(col)}</th>'
+        )
+    html_parts.append('</tr></thead><tbody>')
+    for row in rows:
+        html_parts.append('<tr>')
+        for col in columns:
+            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
+            white_space = "pre-wrap" if col == "内容" else "nowrap"
             html_parts.append(
                 f'<td style="border:1px solid #e5e7eb; padding:8px; '
                 f'vertical-align:top; min-width:{widths[col]}px; '
@@ -1599,7 +1633,7 @@ if mode == "📊 経営者ビュー":
                         ]
                         use_preferred_work_requests = [
                             (emp, d, store)
-                            for (emp, d, store) in sub_data.preferred_work_requests
+                            for (emp, d, store) in getattr(sub_data, "preferred_work_requests", [])
                             if 1 <= d <= days_in_m
                             and d not in set(use_off_requests.get(emp, []))
                         ]
@@ -1611,7 +1645,9 @@ if mode == "📊 経営者ビュー":
                                 if cands:
                                     use_flexible_off.append((emp, cands, n))
                         use_holiday_overrides = {}
-                        use_preferred_consecutive_off = list(sub_data.preferred_consecutive_off)
+                        use_preferred_consecutive_off = list(
+                            getattr(sub_data, "preferred_consecutive_off", [])
+                        )
                         # 有給日数を holiday_overrides に反映（基準＋有給日数）
                         for emp_name, paid_days in sub_data.paid_leave_days.items():
                             try:
@@ -1623,7 +1659,9 @@ if mode == "📊 経営者ビュー":
                                     use_holiday_overrides[emp_name] = base_holidays + paid_days
                             except Exception:
                                 pass
-                        for emp_name, requested_days in sub_data.requested_holiday_days.items():
+                        for emp_name, requested_days in getattr(
+                            sub_data, "requested_holiday_days", {}
+                        ).items():
                             if 0 <= int(requested_days) <= days_in_m:
                                 use_holiday_overrides[emp_name] = max(
                                     int(use_holiday_overrides.get(emp_name, 0) or 0),
@@ -1635,10 +1673,11 @@ if mode == "📊 経営者ビュー":
                         data_source_msg = (
                             f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                         )
-                        if sub_data.parsed_note_summaries:
+                        parsed_note_summaries = getattr(sub_data, "parsed_note_summaries", {})
+                        if parsed_note_summaries:
                             data_source_msg += (
                                 f"\n自由記載から "
-                                f"{len(sub_data.parsed_note_summaries)}名分の希望も反映しました。"
+                                f"{len(parsed_note_summaries)}名分の希望も反映しました。"
                             )
                         if sub_data.pending_employees:
                             data_source_msg += (
@@ -1685,23 +1724,27 @@ if mode == "📊 経営者ビュー":
                         f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
                         f"(最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"
                     )
-                    shift = generate_shift(
-                        year=_saved_target_year,
-                        month=_saved_target_month,
-                        off_requests=use_off_requests,
-                        work_requests=use_work_requests,
-                        prev_month=use_prev_month,
-                        flexible_off=use_flexible_off,
-                        holiday_overrides=use_holiday_overrides,
-                        preferred_work_requests=use_preferred_work_requests,
-                        preferred_consecutive_off=use_preferred_consecutive_off,
-                        operation_modes=modes,
-                        consec_exceptions=use_consec_exceptions,
-                        max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
-                        time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 30),
-                        random_seed=rule_cfg.parameters.get("solver_seed", 42),
-                        verbose=False,
-                    )
+                    generation_kwargs = {
+                        "year": _saved_target_year,
+                        "month": _saved_target_month,
+                        "off_requests": use_off_requests,
+                        "work_requests": use_work_requests,
+                        "prev_month": use_prev_month,
+                        "flexible_off": use_flexible_off,
+                        "holiday_overrides": use_holiday_overrides,
+                        "operation_modes": modes,
+                        "consec_exceptions": use_consec_exceptions,
+                        "max_consec_override": rule_cfg.parameters.get("max_consec_work", 5),
+                        "time_limit_seconds": rule_cfg.parameters.get("solver_time_limit_seconds", 30),
+                        "random_seed": rule_cfg.parameters.get("solver_seed", 42),
+                        "verbose": False,
+                    }
+                    generator_params = inspect.signature(generate_shift).parameters
+                    if "preferred_work_requests" in generator_params:
+                        generation_kwargs["preferred_work_requests"] = use_preferred_work_requests
+                    if "preferred_consecutive_off" in generator_params:
+                        generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
+                    shift = generate_shift(**generation_kwargs)
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
@@ -3323,7 +3366,7 @@ elif mode == "👤 従業員ビュー":
             {"項目": "希望有給日数", "内容": f"{paid_leave_days_review}日", "日数": paid_leave_days_review},
             {"項目": "自由記述", "内容": free_text_review.strip() or "なし", "日数": ""},
         ]
-        st.dataframe(review_rows, width="stretch", hide_index=True)
+        render_scrollable_review_table(review_rows)
 
         confirm_col1, confirm_col2 = st.columns([1, 1])
         with confirm_col1:
