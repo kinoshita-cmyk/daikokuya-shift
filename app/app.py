@@ -262,14 +262,14 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
                 effective_ticket = ticket_count + max(0, eco_count - 1)
                 if yamamoto_present:
                     effective_ticket += 1
-                if eco_count < 1 or eco_count > 2 or effective_ticket < 2:
+                if eco_count < 1 or effective_ticket < 2:
                     short_by_store.setdefault(d, set()).add(store)
                 continue
 
             if store == Store.OMIYA and mode == OperationMode.NORMAL:
-                if total_count >= 3:
+                if eco_count >= 1 and total_count >= 3:
                     continue
-                if total_count == 2 and eco_count >= 1 and ticket_count >= 1:
+                if total_count == 2 and eco_count >= 1:
                     short_by_store.setdefault(d, set()).add(store)
                     continue
                 short_by_store.setdefault(d, set()).add(store)
@@ -284,8 +284,7 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
 
             if (
                 eco_count < store_cap.eco_min
-                or eco_count > store_cap.eco_max
-                or ticket_count < store_cap.ticket_min
+                or total_count < store_cap.eco_min + store_cap.ticket_min
             ):
                 short_by_store.setdefault(d, set()).add(store)
 
@@ -1908,7 +1907,7 @@ if mode == "📊 経営者ビュー":
                 f"2連休は最低 `{rule_cfg.parameters.get('min_2off_per_month', 1)}回` を目標にします。",
                 f"- 自動生成の探索時間は最大 `{max(180, int(rule_cfg.parameters.get('solver_time_limit_seconds', 180)))}秒` です。",
                 "- 顧問は自動生成では原則使いません。必要な場合は月別ルールや手動調整で扱います。",
-                "- 南さんは、`×` が付いていない日は出勤候補として扱います。",
+                "- 南さんは出勤希望日のみ稼働します。`○` の提出日だけを候補にし、無闇には配置しません。",
                 "- 大宮西口店は楯さんメインですが、楯さん不在時・研修時は春山さんなどの代替を許容します。",
                 "- 赤羽東口店は休店日以外は開店前提です。省人員日でも閉店扱いにはしません。",
             ])
@@ -2014,6 +2013,7 @@ if mode == "📊 経営者ビュー":
                         _saved_target_year == 2026 and _saved_target_month == 5
                         and sub_data.submission_count == 0
                     )
+                    use_historical_actual_preferences = []
 
                     # 提出があればそれを使い、なければテストデータにフォールバック
                     if sub_data.submission_count > 0:
@@ -2086,6 +2086,35 @@ if mode == "📊 経営者ビュー":
                                 f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
                                 "は希望未指定として自由配置）"
                             )
+                        try:
+                            from prototype.reconciliation import (
+                                build_actual_shift_preferences,
+                                reconcile_generation_inputs_with_actual,
+                            )
+                            reconciled_inputs = reconcile_generation_inputs_with_actual(
+                                _saved_target_year, _saved_target_month,
+                                use_off_requests, use_work_requests,
+                                use_preferred_work_requests,
+                            )
+                            use_off_requests = reconciled_inputs.off_requests
+                            use_work_requests = reconciled_inputs.work_requests
+                            use_preferred_work_requests = reconciled_inputs.preferred_work_requests
+                            use_historical_actual_preferences = build_actual_shift_preferences(
+                                _saved_target_year, _saved_target_month,
+                            )
+                            if reconciled_inputs.applied_count:
+                                data_source_msg += (
+                                    f"\n過去実績との食い違い "
+                                    f"{reconciled_inputs.applied_count}件は、"
+                                    "口頭調整済みとして実績側に補正しました。"
+                                )
+                            if use_historical_actual_preferences:
+                                data_source_msg += (
+                                    "\n過去月のすり合わせとして、確定実績シフトに"
+                                    "できるだけ近づくよう優先度を付けています。"
+                                )
+                        except Exception:
+                            use_historical_actual_preferences = []
                     elif is_test_may_2026:
                         # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                         use_off_requests = OFF_REQUESTS
@@ -2094,6 +2123,7 @@ if mode == "📊 経営者ビュー":
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
                         use_preferred_consecutive_off = []
+                        use_historical_actual_preferences = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
                         data_source_msg = (
@@ -2107,6 +2137,7 @@ if mode == "📊 経営者ビュー":
                         use_flexible_off = []
                         use_holiday_overrides = {}
                         use_preferred_consecutive_off = []
+                        use_historical_actual_preferences = []
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -2150,10 +2181,17 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
                     if "monthly_store_count_rules" in generator_params:
                         generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
+                    if "historical_actual_preferences" in generator_params:
+                        generation_kwargs["historical_actual_preferences"] = use_historical_actual_preferences
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
                     if "advisor_max_days" in generator_params:
-                        generation_kwargs["advisor_max_days"] = 0
+                        advisor_limit = sum(
+                            1
+                            for emp, _day, store in use_historical_actual_preferences
+                            if emp == "顧問" and store is not None and store != Store.OFF
+                        )
+                        generation_kwargs["advisor_max_days"] = advisor_limit
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
@@ -2197,6 +2235,7 @@ if mode == "📊 経営者ビュー":
                     ),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                    "historical_actual_preferences_count": len(use_historical_actual_preferences),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
                     "relaxed_advisor_limit": bool(relaxed_advisor_limit),
                     "solver_limit_seconds": int(solver_limit_seconds),
@@ -2229,6 +2268,7 @@ if mode == "📊 経営者ビュー":
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                        "historical_actual_preferences": list(use_historical_actual_preferences),
                     }
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
@@ -3803,6 +3843,7 @@ elif mode == "👤 従業員ビュー":
     prefs = st.session_state.user_prefs[user_key]
 
     # 当該従業員の月間基準日数を取得
+    _emp_obj = None
     try:
         from prototype.employees import get_employee as _get_emp
         _emp_obj = _get_emp(selected)
@@ -3820,12 +3861,19 @@ elif mode == "👤 従業員ビュー":
     def _save_employee_preferences(paid_leave_days_value: int, free_text_value: str) -> Path:
         backup = ShiftBackup()
         off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
+        work_requests = []
+        if _emp_obj and getattr(_emp_obj, "only_on_request_days", False):
+            work_requests = [
+                (selected, d, None)
+                for d, m in prefs.items()
+                if m == "○"
+            ]
         flexible_days = [d for d, m in prefs.items() if m == "△"]
         natural_language_notes = {selected: free_text_value}
         save_path = backup.save_preferences(
             year=target_year, month=target_month,
             off_requests=off_requests,
-            work_requests=[],
+            work_requests=work_requests,
             flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
             natural_language_notes=natural_language_notes,
             author=selected,
@@ -4510,7 +4558,7 @@ elif mode == "⚙️ 設定":
         rule_inventory = [
             _rule_row(
                 "店舗・人数", "赤羽駅前店の基本体制",
-                "基本はエコ1名+チケット2名。例外でエコ2名+チケット1名、チケット対応不足時は山本さん補助。",
+                "基本はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。チケット対応不足時は山本さん補助。",
                 "反映中", "反映中", "人員少表示・Excel/PDFに反映",
                 "コード固定", "反映中",
             ),
@@ -4522,7 +4570,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "店舗・人数", "大宮駅前店の基本体制",
-                "通常は最低3名（エコ1〜2名 + チケット1名以上）。不足時だけ2名体制を警告扱い。",
+                "通常はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。不足時だけ2名体制を警告扱い。",
                 "反映中", "反映中", "人員少表示・Excel/PDFに反映",
                 "コード固定", "反映中",
                 "春山さん・下地さんのどちらか必須。",
@@ -4535,7 +4583,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "店舗・人数", "大宮すずらん通り店の基本体制",
-                "エコ1〜2名 + チケット2名。",
+                "エコ対応1名以上+合計3名。エコ担当はチケット対応も可。チケット専任は多すぎないよう調整。",
                 "反映中", "反映中", "人数不足表示に反映",
                 "コード固定", "反映中",
             ),
@@ -4639,7 +4687,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "南さんの出勤希望日のみ稼働",
-                "×休み希望以外の日は、通常の出勤候補として扱う。",
+                "提出画面で `○` にした日だけを出勤候補として扱う。`×` と `△` の日は配置しない。",
                 "対象外", "一部反映", "従業員マスタで管理",
                 "従業員マスタ", "反映中",
             ),
@@ -4660,7 +4708,7 @@ elif mode == "⚙️ 設定":
                 "研修・一時的な店舗移動・例外スタッフなど、その月だけの条件を追加する考え方。",
                 "反映中", "反映中", "カスタムルールに保存",
                 "この画面で変更可", "反映中",
-                "例: 6月は牧野さんを研修のため大宮西口または赤羽東口に3回。",
+                "例: 6月は牧野さんを研修のため大宮西口に3回。東口1名体制は当面対象外。",
             ),
             _rule_row(
                 "スタッフ別", "すずらん不在時の補填",
@@ -4949,7 +4997,7 @@ elif mode == "⚙️ 設定":
                 rule_stores = []
                 rule_count = 0
                 if rule_kind == "月別: スタッフを指定店舗へ回数配置":
-                    st.caption("例: 2026年6月、牧野さんを赤羽東口店または大宮西口店へ3回以上配置。")
+                    st.caption("例: 2026年6月、牧野さんを大宮西口店へ3回以上配置。東口1名体制は当面対象外。")
                     ym_col1, ym_col2 = st.columns(2)
                     with ym_col1:
                         rule_target_year = int(st.number_input(
