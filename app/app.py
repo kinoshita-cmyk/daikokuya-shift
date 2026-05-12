@@ -14,6 +14,7 @@
 
 import sys
 import os
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -735,6 +736,137 @@ def format_day_list(days) -> str:
     return "、".join(f"{d}日" for d in safe_days)
 
 
+def _safe_preference_days(values) -> list[int]:
+    """希望提出JSONの表記ゆれから日付だけを取り出す。"""
+    days: list[int] = []
+    if values is None:
+        return days
+    if isinstance(values, (str, int)):
+        values = [values]
+    if isinstance(values, dict):
+        values = values.values()
+    for value in values:
+        if isinstance(value, dict):
+            for key in ("day", "日", "date"):
+                if str(value.get(key, "")).isdigit():
+                    days.append(int(value[key]))
+                    break
+            continue
+        if str(value).isdigit():
+            days.append(int(value))
+    return sorted(set(days))
+
+
+def _extract_preference_days(raw, author: str) -> list[int]:
+    """希望提出JSONの name/value/list/dict 形式を吸収して日付を返す。"""
+    if isinstance(raw, dict):
+        if author in raw:
+            return _safe_preference_days(raw.get(author))
+        if "employee" in raw and raw.get("employee") != author:
+            return []
+        for key in ("days", "candidate_days", "off_requests", "work_requests"):
+            if key in raw:
+                return _safe_preference_days(raw.get(key))
+        combined: list[int] = []
+        for value in raw.values():
+            combined.extend(_safe_preference_days(value))
+        return sorted(set(combined))
+    if isinstance(raw, list):
+        days: list[int] = []
+        for item in raw:
+            if isinstance(item, dict):
+                if item.get("employee") and item.get("employee") != author:
+                    continue
+                days.extend(_extract_preference_days(item, author))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                if item[0] == author:
+                    days.extend(_safe_preference_days(item[1:]))
+            else:
+                days.extend(_safe_preference_days([item]))
+        return sorted(set(days))
+    return _safe_preference_days(raw)
+
+
+def _extract_marked_day_preferences(data: dict, author: str) -> tuple[list[int], list[int], list[int]]:
+    """day_preferences 形式の古い/別形式データから ×・△・出勤希望を拾う。"""
+    off_days: list[int] = []
+    flexible_days: list[int] = []
+    work_days: list[int] = []
+    raw_items = (
+        data.get("day_preferences")
+        or data.get("preferences")
+        or data.get("requests")
+        or data.get("entries")
+        or []
+    )
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.values()
+    if not isinstance(raw_items, list):
+        return off_days, flexible_days, work_days
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("employee") and item.get("employee") != author:
+            continue
+        day = item.get("day") or item.get("日") or item.get("date")
+        if not str(day).isdigit():
+            continue
+        mark = str(item.get("mark") or item.get("希望") or item.get("value") or "")
+        if mark in ("×", "OFF_REQUEST", "休み", "休み希望"):
+            off_days.append(int(day))
+        elif mark in ("△", "PREFER_OFF", "できれば休み"):
+            flexible_days.append(int(day))
+        elif mark.startswith("○") or mark in ("AVAILABLE", "出勤", "出勤希望"):
+            work_days.append(int(day))
+    return sorted(set(off_days)), sorted(set(flexible_days)), sorted(set(work_days))
+
+
+def enrich_submission_days_from_files(
+    backup_mgr: ShiftBackup,
+    year: int,
+    month: int,
+    submission_status: dict,
+) -> dict:
+    """提出済み一覧に日付が入っていない場合、元JSONから補完する。"""
+    month_dir = backup_mgr.backup_dir / f"{year}-{month:02d}"
+    for submitted in submission_status.get("submitted", []):
+        file_name = submitted.get("file")
+        author = submitted.get("employee") or ""
+        if not file_name or not author:
+            continue
+        file_path = month_dir / file_name
+        if not file_path.exists():
+            continue
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        off_days = _extract_preference_days(data.get("off_requests", {}), author)
+        flexible_days = _extract_preference_days(data.get("flexible_off", []), author)
+        work_days = _extract_preference_days(data.get("work_requests", []), author)
+        marked_off, marked_flexible, marked_work = _extract_marked_day_preferences(data, author)
+        off_days = sorted(set(off_days) | set(marked_off))
+        flexible_days = sorted(set(flexible_days) | set(marked_flexible))
+        work_days = sorted(set(work_days) | set(marked_work))
+
+        submitted["off_request_days"] = off_days
+        submitted["off_request_count"] = len(off_days)
+        submitted["flexible_off_days"] = flexible_days
+        submitted["flexible_off_count"] = len(flexible_days)
+        submitted["work_request_days"] = work_days
+        submitted["paid_leave_days"] = int(data.get("paid_leave_days", submitted.get("paid_leave_days", 0)) or 0)
+
+        notes = data.get("natural_language_notes", {})
+        if isinstance(notes, dict) and notes.get(author):
+            note_text = notes[author]
+            submitted["note"] = note_text
+            submitted["note_excerpt"] = note_text[:50] + ("..." if len(note_text) > 50 else "")
+            submitted["has_note"] = True
+    return submission_status
+
+
 def build_off_request_cells(off_requests: dict[str, list[int]]) -> set[tuple[str, int]]:
     """本人が提出した絶対休み（×）のセル集合を作る。"""
     cells: set[tuple[str, int]] = set()
@@ -1051,6 +1183,9 @@ if mode == "📊 経営者ビュー":
     ]
     submission_status = backup_mgr.get_submission_status(
         int(target_year), int(target_month), expected_employees,
+    )
+    submission_status = enrich_submission_days_from_files(
+        backup_mgr, int(target_year), int(target_month), submission_status,
     )
     summary = submission_status["summary"]
     current_ym_label = f"{int(target_year):04d}-{int(target_month):02d}"
