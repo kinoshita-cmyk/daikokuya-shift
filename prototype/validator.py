@@ -233,7 +233,7 @@ def _check_store_capacity(
             if store == Store.HIGASHIGUCHI:
                 unexpected_workers = [
                     name for name in all_store_workers
-                    if name not in HIGASHIGUCHI_ALLOWED_STAFF
+                    if name != "顧問" and name not in HIGASHIGUCHI_ALLOWED_STAFF
                 ]
                 if eco_count != 1 or ticket_count != 0 or total != 1:
                     result.issues.append(Issue(

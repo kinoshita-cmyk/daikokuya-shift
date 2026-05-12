@@ -100,6 +100,7 @@ def generate_shift(
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
     strict_warning_constraints: bool = True,
+    advisor_max_days: Optional[int] = 3,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -127,10 +128,15 @@ def generate_shift(
     operation_modes = operation_modes or determine_operation_modes(year, month)
     consec_exceptions = consec_exceptions or []
 
-    # 主要なメイン稼働メンバーリスト（顧問・山本を除く）
+    # 主要なメイン稼働メンバーリスト（山本を除く）。
+    # 顧問は通常は使わないが、どうしても足りない時の最終手段として
+    # 大きなペナルティ付きで候補に含める。
     main_employees = [
         e for e in shift_active_employees() if not e.is_auxiliary
     ]
+    advisor = next((e for e in ALL_EMPLOYEES if e.name == "顧問"), None)
+    if advisor is not None and all(e.name != "顧問" for e in main_employees):
+        main_employees.append(advisor)
     main_employee_names = {e.name for e in main_employees}
     yamamoto = next((e for e in ALL_EMPLOYEES if e.name == "山本"), None)
 
@@ -312,10 +318,9 @@ def generate_shift(
             # 赤羽東口店: エコ1名のみ。例外なし。
             if s == Store.HIGASHIGUCHI:
                 for e in main_employees:
-                    if e.name not in HIGASHIGUCHI_ALLOWED_STAFF:
+                    if e.name != "顧問" and e.name not in HIGASHIGUCHI_ALLOWED_STAFF:
                         higashi_unexpected_assignments.append(x[e.name][d][s])
-                        if strict_warning_constraints:
-                            model.Add(x[e.name][d][s] == 0)
+                        model.Add(x[e.name][d][s] == 0)
                 model.Add(eco_at_store == 1)
                 model.Add(ticket_at_store == 0)
                 continue
@@ -408,6 +413,8 @@ def generate_shift(
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
+        if e.role == Role.ADVISOR:
+            continue
         if e.constraint_check_excluded and e.name != "大塚":
             continue
 
@@ -453,7 +460,7 @@ def generate_shift(
     # 制約 10: 休日日数の最低ライン
     # ============================================================
     for e in main_employees:
-        if e.constraint_check_excluded:
+        if e.constraint_check_excluded or e.role == Role.ADVISOR:
             continue
         required_off = holiday_overrides.get(e.name, default_holidays)
         model.Add(sum(off[e.name][d] for d in days) >= required_off)
@@ -462,7 +469,7 @@ def generate_shift(
     # 制約 10.5: 2連休を月1回以上
     # ============================================================
     for e in main_employees:
-        if e.constraint_check_excluded or e.name in CONSTRAINT_EXCLUDED:
+        if e.constraint_check_excluded or e.name in CONSTRAINT_EXCLUDED or e.role == Role.ADVISOR:
             continue
         two_day_blocks = []
         for start in range(1, days_in_month):
@@ -483,7 +490,7 @@ def generate_shift(
     # 休み希望日が含まれる3連休は本人希望の反映としてペナルティ対象外にする。
     # ============================================================
     for e in main_employees:
-        if e.constraint_check_excluded:
+        if e.constraint_check_excluded or e.role == Role.ADVISOR:
             continue
         emp_off_days = set(off_requests.get(e.name, []))
         # 柔軟休み候補日も除外対象に追加
@@ -657,6 +664,17 @@ def generate_shift(
         obj = obj + sum(preferred_work_terms)
     if monthly_rule_terms:
         obj = obj + 160 * sum(monthly_rule_terms)
+    if "顧問" in main_employee_names:
+        # 顧問は本当に足りない時だけの最終手段。通常スタッフで解がある限り使わない。
+        advisor_assignments = [x["顧問"][d][s] for d in days for s in main_stores]
+        if advisor_max_days is not None:
+            model.Add(sum(advisor_assignments) <= int(advisor_max_days))
+        model.AddDecisionStrategy(
+            advisor_assignments,
+            cp_model.CHOOSE_FIRST,
+            cp_model.SELECT_MIN_VALUE,
+        )
+        obj = obj - 50000 * sum(advisor_assignments)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
     obj = obj - 100 * sum(omiya_short.values())
     if higashi_unexpected_assignments:
