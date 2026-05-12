@@ -23,7 +23,7 @@
     "max_2off_per_month": 2,
     "higashi_eco2_max_per_month": 3,
     "solver_seed": 42,
-    "solver_time_limit_seconds": 120
+    "solver_time_limit_seconds": 180
   },
   "custom_rules": []
 }
