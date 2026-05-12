@@ -260,7 +260,8 @@ def _check_store_capacity(
                 continue
 
             # 赤羽駅前店: エコ1+チケット2が基本。
-            # エコ2+チケット1も可。山本さんはチケット対応不足時のみ補助扱い。
+            # エコ担当はチケット対応も可能なため、エコ必須分を超えた人数は
+            # チケット対応分として数える。山本さんは不足時のみ補助扱い。
             if store == Store.AKABANE and mode == OperationMode.NORMAL:
                 effective_ticket = ticket_count + max(0, eco_count - 1)
                 if yamamoto_present:
@@ -271,13 +272,6 @@ def _check_store_capacity(
                         category="店舗人数",
                         day=day, employee=None,
                         message=f"赤羽駅前店 エコ要員不足／配属: {all_worker_str}",
-                    ))
-                if eco_count > 2:
-                    result.issues.append(Issue(
-                        severity="ERROR",
-                        category="店舗人数",
-                        day=day, employee=None,
-                        message=f"赤羽駅前店 エコ要員が多すぎます（上限2名）／配属: {all_worker_str}",
                     ))
                 if effective_ticket < 2:
                     result.issues.append(Issue(
@@ -292,11 +286,11 @@ def _check_store_capacity(
                     ))
                 continue
 
-            # 大宮の「人数少」例外: eco_count==1 + ticket_count>=1 でも許容（警告のみ）
+            # 大宮の「人数少」例外: エコ対応者1名以上 + 2名体制なら許容（警告のみ）
             if store == Store.OMIYA and mode == OperationMode.NORMAL:
-                if eco_count >= 1 and ticket_count >= 1 and total >= 3:
+                if eco_count >= 1 and total >= 3:
                     continue
-                if allow_omiya_short and eco_count == 1 and ticket_count == 1 and total == 2:
+                if allow_omiya_short and eco_count >= 1 and total == 2:
                     result.issues.append(Issue(
                         severity="WARNING",
                         category="人数少（大宮）",
@@ -309,9 +303,10 @@ def _check_store_capacity(
                     ))
                     continue
 
-            # すずらん: エコ1〜2名 + チケット2名
+            # すずらん: エコ対応者1名以上 + 合計3名以上。
+            # エコ担当はチケット対応もできるため、チケット専任2名に固定しない。
             if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if 1 <= eco_count <= 2 and ticket_count == 2:
+                if eco_count >= 1 and total >= 3 and ticket_count <= 2:
                     continue  # OK
                 if ticket_count > 2:
                     result.issues.append(Issue(
@@ -337,26 +332,16 @@ def _check_store_capacity(
                         f"／配属: {worker_str}"
                     ),
                 ))
-            if eco_count > cap.eco_max:
+            required_total = cap.eco_min + cap.ticket_min
+            if total < required_total:
+                shortage = required_total - total
                 result.issues.append(Issue(
                     severity="ERROR",
                     category="店舗人数",
                     day=day, employee=None,
                     message=(
-                        f"{store.display_name} エコ要員が多すぎます"
-                        f"（上限{cap.eco_max}名、実績{eco_count}名）"
-                        f"／配属: {worker_str}"
-                    ),
-                ))
-            if ticket_count < cap.ticket_min:
-                shortage = cap.ticket_min - ticket_count
-                result.issues.append(Issue(
-                    severity="ERROR",
-                    category="店舗人数",
-                    day=day, employee=None,
-                    message=(
-                        f"{store.display_name} チケット要員 {shortage}名不足"
-                        f"（必要{cap.ticket_min}名、実績{ticket_count}名）"
+                        f"{store.display_name} 人員 {shortage}名不足"
+                        f"（必要{required_total}名、実績{total}名）"
                         f"／配属: {worker_str}"
                     ),
                 ))

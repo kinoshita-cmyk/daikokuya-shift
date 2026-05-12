@@ -45,6 +45,11 @@ STORE_TO_SYMBOL = {
 }
 
 
+IGNORED_HISTORICAL_ASSIGNMENTS = {
+    ("牧野", Store.HIGASHIGUCHI),
+}
+
+
 @dataclass
 class ReconciliationIssue:
     """提出希望と実績シフトの食い違い1件。"""
@@ -67,6 +72,20 @@ class ReconciliationIssue:
         }
 
 
+@dataclass
+class ReconciledGenerationInputs:
+    """過去実績に合わせて補正した生成入力。"""
+
+    off_requests: dict[str, list[int]]
+    work_requests: list[tuple[str, int, Optional[Store]]]
+    preferred_work_requests: list[tuple[str, int, Optional[Store]]]
+    applied_notes: list[str] = None
+
+    @property
+    def applied_count(self) -> int:
+        return len(self.applied_notes or [])
+
+
 def normalize_shift_symbol(value) -> str:
     """Excelセル値からシフト記号だけを取り出す。"""
     if value is None:
@@ -78,6 +97,14 @@ def normalize_shift_symbol(value) -> str:
         if ch in SYMBOL_TO_STORE:
             return "○" if ch == "〇" else ch
     return ""
+
+
+def _store_from_symbol(symbol: str) -> Optional[Store]:
+    return SYMBOL_TO_STORE.get(normalize_shift_symbol(symbol))
+
+
+def _ignore_historical_assignment(employee: str, store: Optional[Store]) -> bool:
+    return store is not None and (employee, store) in IGNORED_HISTORICAL_ASSIGNMENTS
 
 
 def find_historical_sheet_name(workbook, year: int, month: int) -> Optional[str]:
@@ -226,3 +253,135 @@ def compare_submissions_to_actual_rows(
             year, month, expected_employees, workbook_path,
         )
     ]
+
+
+def build_actual_shift_preferences(
+    year: int,
+    month: int,
+    workbook_path: Path = DEFAULT_HISTORICAL_WORKBOOK,
+) -> list[tuple[str, int, Store]]:
+    """
+    実績シフトをソフト優先条件として返す。
+
+    過去月のすり合わせ用途。ハード固定ではなく、既存の休み希望・人数条件を
+    壊さない範囲で実績シフトに寄せるために使う。
+    """
+    actual = load_actual_symbols(year, month, workbook_path)
+    preferences: list[tuple[str, int, Store]] = []
+    for employee, day_map in actual.items():
+        for day, symbol in day_map.items():
+            store = _store_from_symbol(symbol)
+            if store is not None:
+                if _ignore_historical_assignment(employee, store):
+                    continue
+                preferences.append((employee, int(day), store))
+    return preferences
+
+
+def reconcile_generation_inputs_with_actual(
+    year: int,
+    month: int,
+    off_requests: dict[str, list[int]],
+    work_requests: list[tuple[str, int, Optional[Store]]],
+    preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
+    workbook_path: Path = DEFAULT_HISTORICAL_WORKBOOK,
+) -> ReconciledGenerationInputs:
+    """
+    提出希望と実績シフトの差異を、過去月用の口頭調整済みデータとして補正する。
+
+    例:
+    - ×休み希望だったが実績で勤務している日は、×を外して実績店舗の出勤希望にする。
+    - 出勤希望だったが実績で×休みなら、出勤希望を外して×休みとして扱う。
+    - 希望店舗と実績店舗が違う場合は、実績店舗の出勤希望として扱う。
+
+    将来月では使わず、4月・5月など確定実績とのすり合わせに限定する想定。
+    """
+    actual = load_actual_symbols(year, month, workbook_path)
+    if not actual:
+        return ReconciledGenerationInputs(
+            off_requests={emp: sorted(set(days)) for emp, days in off_requests.items()},
+            work_requests=list(work_requests or []),
+            preferred_work_requests=list(preferred_work_requests or []),
+            applied_notes=[],
+        )
+
+    adjusted_off = {
+        emp: set(int(day) for day in days)
+        for emp, days in (off_requests or {}).items()
+    }
+    adjusted_work = list(work_requests or [])
+    adjusted_preferred = list(preferred_work_requests or [])
+    notes: list[str] = []
+
+    def remove_work_for(employee: str, day: int) -> None:
+        nonlocal adjusted_work, adjusted_preferred
+        adjusted_work = [
+            item for item in adjusted_work
+            if not (item[0] == employee and int(item[1]) == int(day))
+        ]
+        adjusted_preferred = [
+            item for item in adjusted_preferred
+            if not (item[0] == employee and int(item[1]) == int(day))
+        ]
+
+    def add_work(employee: str, day: int, store: Store) -> None:
+        remove_work_for(employee, day)
+        adjusted_work.append((employee, int(day), store))
+
+    # ×休み希望と実績勤務の差異を、口頭変更済みとして実績勤務へ補正する。
+    for employee, days in list(adjusted_off.items()):
+        for day in sorted(set(days)):
+            actual_store = _store_from_symbol(actual.get(employee, {}).get(day, ""))
+            if _ignore_historical_assignment(employee, actual_store):
+                continue
+            if actual_store is None or actual_store == Store.OFF:
+                continue
+            adjusted_off[employee].discard(day)
+            add_work(employee, day, actual_store)
+            notes.append(
+                f"{employee} {month}/{day}: ×休み希望を実績 {STORE_TO_SYMBOL[actual_store]} に補正"
+            )
+
+    # 出勤希望と実績休み/店舗違いの差異を、実績側に寄せる。
+    for employee, day, requested_store in list(adjusted_work) + list(adjusted_preferred):
+        day = int(day)
+        if employee not in actual or day not in actual[employee]:
+            continue
+        actual_symbol = actual.get(employee, {}).get(day, "")
+        actual_store = _store_from_symbol(actual_symbol)
+        if _ignore_historical_assignment(employee, actual_store):
+            continue
+        if not actual_symbol:
+            remove_work_for(employee, day)
+            adjusted_off.setdefault(employee, set()).add(day)
+            notes.append(f"{employee} {month}/{day}: 出勤希望を実績 空白 に補正")
+            continue
+        if actual_store is None:
+            continue
+        if actual_store == Store.OFF:
+            remove_work_for(employee, day)
+            adjusted_off.setdefault(employee, set()).add(day)
+            notes.append(f"{employee} {month}/{day}: 出勤希望を実績 × に補正")
+            continue
+        if requested_store != actual_store:
+            add_work(employee, day, actual_store)
+            notes.append(
+                f"{employee} {month}/{day}: 出勤希望を実績 {STORE_TO_SYMBOL[actual_store]} に補正"
+            )
+
+    return ReconciledGenerationInputs(
+        off_requests={
+            emp: sorted(day for day in days if day)
+            for emp, days in adjusted_off.items()
+            if days
+        },
+        work_requests=sorted(
+            set(adjusted_work),
+            key=lambda item: (item[0], int(item[1]), item[2].name if item[2] else ""),
+        ),
+        preferred_work_requests=sorted(
+            set(adjusted_preferred),
+            key=lambda item: (item[0], int(item[1]), item[2].name if item[2] else ""),
+        ),
+        applied_notes=list(dict.fromkeys(notes)),
+    )

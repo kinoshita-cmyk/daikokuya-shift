@@ -56,6 +56,16 @@ def _store_from_name(name: Optional[str]) -> Optional[Store]:
     return None
 
 
+def _is_only_on_request_employee(name: str) -> bool:
+    """出勤希望日のみ稼働する従業員かどうかを従業員マスタから判定する。"""
+    try:
+        from .employees import get_employee
+
+        return bool(getattr(get_employee(name), "only_on_request_days", False))
+    except Exception:
+        return False
+
+
 @dataclass
 class ParsedNaturalLanguageNote:
     """自由記載から拾った、生成エンジンへ渡せる希望。"""
@@ -276,6 +286,20 @@ def parse_natural_language_note(
     if consecutive_off is not None and consecutive_off >= 2:
         result.preferred_consecutive_off_days = consecutive_off
 
+    whole_note_work_request = any(
+        word in normalized
+        for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "出勤確定")
+    )
+    if whole_note_work_request:
+        optional = any(word in normalized for word in ("不要であれば", "必要であれば", "可能なら", "できれば"))
+        work_days = _extract_work_days_from_sentence(normalized, target_month, days_in_month)
+        store = _extract_store_from_text(normalized)
+        if optional:
+            result.ignored_optional_work_days.extend(work_days)
+        else:
+            for day in work_days:
+                result.work_requests.append((day, store))
+
     for sentence in sentences:
         for flex in _extract_flexible_off_from_sentence(sentence, days_in_month):
             result.flexible_off.append(flex)
@@ -438,11 +462,19 @@ def load_submissions_for_month(
             existing_off.update(parsed_note.off_requests)
             data.off_requests[author] = sorted(existing_off)
 
+        only_on_request = _is_only_on_request_employee(author)
         existing_preferred_work_days = {
             (emp, day, store) for emp, day, store in data.preferred_work_requests
         }
         for day, store in parsed_note.work_requests:
             item = (author, day, store)
+            if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
+                data.preferred_work_requests.append(item)
+                existing_preferred_work_days.add(item)
+        for day in parsed_note.ignored_optional_work_days:
+            if not only_on_request:
+                continue
+            item = (author, day, None)
             if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
                 data.preferred_work_requests.append(item)
                 existing_preferred_work_days.add(item)
@@ -463,6 +495,24 @@ def load_submissions_for_month(
             data.preferred_consecutive_off.append(
                 (author, int(parsed_note.preferred_consecutive_off_days))
             )
+
+        if only_on_request:
+            # 旧データでは「○」の日を work_requests に保存していなかった。
+            # 出勤希望日のみ稼働する人は、×/△以外の日を明示的な出勤希望として復元する。
+            existing_work_days = {
+                int(day) for emp, day, _store in data.work_requests if emp == author
+            }
+            if not existing_work_days and data.off_requests.get(author):
+                days_in_month = monthrange(year, month)[1]
+                off_days = set(data.off_requests.get(author, []))
+                flexible_days: set[int] = set()
+                for emp, candidate_days, _n in data.flexible_off:
+                    if emp == author:
+                        flexible_days.update(int(d) for d in candidate_days)
+                for day in range(1, days_in_month + 1):
+                    if day in off_days or day in flexible_days:
+                        continue
+                    data.work_requests.append((author, day, None))
 
         data.submitted_employees.append(author)
 

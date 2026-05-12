@@ -81,13 +81,13 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.OMIYA: Affinity.STRONG,
-            Store.HIGASHIGUCHI: Affinity.WEAK,    # 月3回（楯/春山/長尾と各1日ずつ）
-            Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
+            Store.HIGASHIGUCHI: Affinity.NONE,    # 当面、東口1名体制は不可
+            Store.NISHIGUCHI: Affinity.WEAK,      # 月次ルールで研修配置する候補
             Store.AKABANE: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
         annual_target_days=268,
-        notes="大宮強、月3回東口（楯+牧野・春山+牧野・長尾+牧野の組み合わせ）、西口不可",
+        notes="大宮強。東口1名体制は当面不可。月次ルールで西口研修配置の候補",
     ),
     Employee(
         name="春山",

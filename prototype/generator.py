@@ -99,6 +99,7 @@ def generate_shift(
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
+    historical_actual_preferences: Optional[list[tuple[str, int, Store]]] = None,
     strict_warning_constraints: bool = True,
     advisor_max_days: Optional[int] = 0,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
@@ -125,6 +126,7 @@ def generate_shift(
     preferred_work_requests = preferred_work_requests or []
     preferred_consecutive_off = preferred_consecutive_off or []
     monthly_store_count_rules = monthly_store_count_rules or []
+    historical_actual_preferences = historical_actual_preferences or []
     operation_modes = operation_modes or determine_operation_modes(year, month)
     consec_exceptions = consec_exceptions or []
 
@@ -180,6 +182,20 @@ def generate_shift(
             continue
         normalized_preferred_work_requests.append((name, day, store))
     preferred_work_requests = normalized_preferred_work_requests
+
+    normalized_historical_actual_preferences = []
+    for name, d, store in (historical_actual_preferences or []):
+        try:
+            day = int(d)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= day <= days_in_month):
+            continue
+        if not isinstance(store, Store):
+            continue
+        normalized_historical_actual_preferences.append((name, day, store))
+    historical_actual_preferences = normalized_historical_actual_preferences
+    historical_reconciliation_mode = bool(historical_actual_preferences)
 
     normalized_flexible_off = []
     for name, candidate_days, n_required in (flexible_off or []):
@@ -245,6 +261,21 @@ def generate_shift(
         if store is not None:
             model.Add(x[name][d][store] == 1)
 
+    # 出勤希望日のみ稼働する人（例: 南さん）は、希望日以外には配置しない。
+    # preferred_work_requests は「必要なら可」の日として、配置候補には含める。
+    request_allowed_days_by_employee: dict[str, set[int]] = {}
+    for name, d, _store in work_requests:
+        request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
+    for name, d, _store in preferred_work_requests:
+        request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
+    for e in main_employees:
+        if not getattr(e, "only_on_request_days", False):
+            continue
+        allowed_days = request_allowed_days_by_employee.get(e.name, set())
+        for d in days:
+            if d not in allowed_days:
+                model.Add(off[e.name][d] == 1)
+
     # ============================================================
     # 制約 4: 柔軟休み希望（候補日のうち N 日を休みに）
     # ============================================================
@@ -256,11 +287,28 @@ def generate_shift(
     # ============================================================
     # 制約 5: 配置不可な店舗には配置しない（Affinity.NONE）
     # ============================================================
+    affinity_none_assignments = []
+    absolute_allowed_stores = {
+        "土井": {Store.HIGASHIGUCHI},
+        "下地": {Store.OMIYA},
+        "南": {Store.AKABANE, Store.OMIYA, Store.SUZURAN},
+    }
     for e in main_employees:
         for s in main_stores:
-            if e.affinities.get(s) == Affinity.NONE:
+            affinity_none = e.affinities.get(s) == Affinity.NONE
+            fixed_allowed = absolute_allowed_stores.get(e.name)
+            hard_forbidden = (
+                fixed_allowed is not None and s not in fixed_allowed
+            ) or (
+                getattr(e, "only_on_request_days", False) and affinity_none
+            ) or (
+                affinity_none and not historical_reconciliation_mode
+            )
+            if hard_forbidden:
                 for d in days:
                     model.Add(x[e.name][d][s] == 0)
+            elif affinity_none:
+                affinity_none_assignments.extend(x[e.name][d][s] for d in days)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -329,7 +377,6 @@ def generate_shift(
             # チケット対応が1名分だけの日は、後処理で山本さんを補助投入する。
             if s == Store.AKABANE and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)
-                model.Add(eco_at_store <= 2)
                 if d in yamamoto_off_days:
                     model.Add(total_at_store >= 3)
                 else:
@@ -337,27 +384,24 @@ def generate_shift(
                 continue
 
             # 大宮の特殊ルール:
-            # 通常: 最低3名（エコ1〜2 + チケット1以上）
-            # 人数少時: エコ1 + チケット1 の2名体制も許容（omiya_short=1 でフラグ）
+            # 通常: エコ対応者1名以上 + 合計3名以上
+            # 人数少時: エコ対応者1名以上 + 2名体制も許容（omiya_short=1 でフラグ）
             if s == Store.OMIYA and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)  # 最低1名は必須
-                model.Add(eco_at_store <= 2)
-                model.Add(ticket_at_store >= 1)
                 model.Add(total_at_store + omiya_short[d] >= 3)
                 continue
 
-            # すずらんの特殊ルール: エコ1〜2 + チケット2名
+            # すずらんの特殊ルール: エコ対応者1名以上 + 合計3名以上
+            # エコ担当はチケット対応も可能なため、チケット専任2名には固定しない。
             if s == Store.SUZURAN and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)
-                model.Add(eco_at_store <= 2)
                 model.Add(ticket_at_store <= 2)
-                model.Add(ticket_at_store >= 2)
+                model.Add(total_at_store >= 3)
                 continue
 
             # 通常の制約
             model.Add(eco_at_store >= store_cap.eco_min)
-            model.Add(eco_at_store <= store_cap.eco_max)
-            model.Add(ticket_at_store >= store_cap.ticket_min)
+            model.Add(total_at_store >= store_cap.eco_min + store_cap.ticket_min)
 
     # ============================================================
     # 制約 7: 大宮駅前店アンカー（春山 or 下地が必ずいる）
@@ -538,6 +582,7 @@ def generate_shift(
     preferred_consecutive_off_indicators = []
     preferred_work_terms = []
     monthly_rule_terms = []
+    historical_actual_terms = []
 
     # 自由記載の「出勤希望」「○日は赤羽希望」などは、解なしを避けるためソフト制約で強く優先。
     for name, d, store in preferred_work_requests:
@@ -549,6 +594,16 @@ def generate_shift(
             preferred_work_terms.append(
                 80 * sum(x[name][d][s] for s in main_stores)
             )
+
+    # 過去月のすり合わせでは、実績シフトにできるだけ近い解を優先する。
+    for name, d, store in historical_actual_preferences:
+        if name not in main_employee_names:
+            continue
+        weight = 70000 if name == "顧問" else 900
+        if store == Store.OFF:
+            historical_actual_terms.append(120 * off[name][d])
+        elif store in main_stores:
+            historical_actual_terms.append(weight * x[name][d][store])
 
     # 自由記載の「4連休がほしい」などは、解なしを避けるためソフト制約として強く優先する。
     for name, block_len in preferred_consecutive_off:
@@ -652,6 +707,12 @@ def generate_shift(
         obj = obj + sum(preferred_work_terms)
     if monthly_rule_terms:
         obj = obj + 160 * sum(monthly_rule_terms)
+    if historical_actual_terms:
+        obj = obj + sum(historical_actual_terms)
+    if affinity_none_assignments:
+        # 過去実績では「不可」扱いの店舗にも例外配置があるため、
+        # すり合わせ時だけ禁止ではなく強い回避ペナルティにする。
+        obj = obj - 260 * sum(affinity_none_assignments)
     if "顧問" in main_employee_names:
         # 顧問は本当に足りない時だけの最終手段。通常スタッフで解がある限り使わない。
         advisor_assignments = [x["顧問"][d][s] for d in days for s in main_stores]

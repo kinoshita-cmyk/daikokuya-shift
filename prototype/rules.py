@@ -43,7 +43,8 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
         eco_min=2,
         ticket_min=1,
         eco_max=2,
-        # 例外：全店舗エコ要員不足時はエコ1+チケット1可（→人数少△）
+        # エコ担当はチケット対応も可。生成ではエコ対応1名以上+合計3名を基本にする。
+        # 例外：人員不足時は2名体制可（→人数少△）
     ),
     Store.NISHIGUCHI: StoreCapacity(
         eco_min=1,
@@ -56,7 +57,7 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
         eco_min=1,
         ticket_min=2,
         eco_max=2,           # エコ2名体制も可。チケットは原則2名。
-        # エコ1+チケット2 または エコ2+チケット2
+        # エコ担当はチケット対応も可。合計3名以上を基本にする。
     ),
 }
 
