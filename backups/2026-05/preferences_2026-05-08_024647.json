@@ -1,0 +1,26 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:46:47.262637",
+  "author": "土井",
+  "off_requests": {
+    "土井": [
+      3,
+      4,
+      5,
+      6,
+      11,
+      18,
+      19,
+      25
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "土井": ""
+  },
+  "paid_leave_days": 1,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

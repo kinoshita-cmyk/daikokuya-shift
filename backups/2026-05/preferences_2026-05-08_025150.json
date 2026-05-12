@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:51:50.168319",
+  "author": "板倉",
+  "off_requests": {
+    "板倉": [
+      10,
+      16,
+      20,
+      24
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "板倉": "出勤目安は24日の7日休暇ですが有休1日入れていただきたいです。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 23,
+  "base_holidays": 8
+}

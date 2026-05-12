@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:35:31.724307",
+  "author": "楯",
+  "off_requests": {
+    "楯": [
+      5,
+      6,
+      9,
+      11
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "楯": "16.17日のいずれか1日休み希望。\n23.24日のいずれか1日休み希望。\n30.31日のいずれか1日休み希望。\n\n有給2日利用で9日間お休みをお願い致します。"
+  },
+  "paid_leave_days": 2,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

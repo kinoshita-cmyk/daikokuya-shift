@@ -1,0 +1,23 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:42:49.661110",
+  "author": "下地",
+  "off_requests": {
+    "下地": [
+      1,
+      7,
+      10,
+      15,
+      19
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "下地": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

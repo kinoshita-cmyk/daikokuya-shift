@@ -1,0 +1,21 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:54:54.803002",
+  "author": "大類",
+  "off_requests": {
+    "大類": [
+      13,
+      20,
+      27
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "大類": "月の休みは8回です。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

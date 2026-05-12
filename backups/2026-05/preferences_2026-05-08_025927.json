@@ -1,0 +1,17 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:59:27.561025",
+  "author": "下田",
+  "off_requests": {
+    "下田": []
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "下田": "5月の休み希望はなしです。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

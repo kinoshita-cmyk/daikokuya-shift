@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:52:36.624563",
+  "author": "田中",
+  "off_requests": {
+    "田中": [
+      1,
+      7,
+      11,
+      12
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "田中": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

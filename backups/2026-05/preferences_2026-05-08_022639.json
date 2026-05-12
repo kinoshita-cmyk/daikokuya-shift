@@ -1,0 +1,21 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:26:39.597373",
+  "author": "今津",
+  "off_requests": {
+    "今津": [
+      12,
+      20,
+      26
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "今津": "有給1日使ってもらって\n平均8+1で計9日\nお休みいただけたら幸いです。"
+  },
+  "paid_leave_days": 1,
+  "monthly_target_workdays": 23,
+  "base_holidays": 8
+}

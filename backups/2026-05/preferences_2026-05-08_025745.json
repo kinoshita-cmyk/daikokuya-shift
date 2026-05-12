@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:57:45.487868",
+  "author": "黒澤",
+  "off_requests": {
+    "黒澤": [
+      23,
+      30
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "黒澤": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

@@ -1,0 +1,23 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:29:00.402097",
+  "author": "鈴木",
+  "off_requests": {
+    "鈴木": [
+      3,
+      4,
+      16,
+      23,
+      28
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "鈴木": "有給2日消化して、22日出勤希望です。"
+  },
+  "paid_leave_days": 2,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}

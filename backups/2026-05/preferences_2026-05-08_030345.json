@@ -1,0 +1,33 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T03:03:45.421580",
+  "author": "大塚",
+  "off_requests": {
+    "大塚": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      10,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      31
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "大塚": "５月は旅行に行ったりするので\n出勤１０日間ぐらいでお願いしたいです。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": null,
+  "base_holidays": null
+}

@@ -1,0 +1,40 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T03:01:45.070633",
+  "author": "南",
+  "off_requests": {
+    "南": [
+      1,
+      2,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      16,
+      17,
+      19,
+      21,
+      22,
+      23,
+      24,
+      27,
+      28,
+      30,
+      31
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "南": "5月 4日（月）\n出勤希望で出れますが\nシフト上、人員不要であれば\nそのままお休み頂きます。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": null,
+  "base_holidays": null
+}

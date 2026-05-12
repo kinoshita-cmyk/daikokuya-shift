@@ -1,0 +1,21 @@
+{
+  "year": 2026,
+  "month": 5,
+  "saved_at": "2026-05-08T02:58:50.466460",
+  "author": "野澤",
+  "off_requests": {
+    "野澤": [
+      2,
+      5,
+      13
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "野澤": "1日は月末資料などまとめたいので出勤で。\nそれから他日のどこでもいいので、2連休ください。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 9
+}
