@@ -70,7 +70,7 @@ def get_anthropic_api_key() -> Optional[str]:
         return st.session_state.get("api_key")
     return None
 from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
-from prototype.employees import ALL_EMPLOYEES, shift_active_employees
+from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
 from prototype.generator import generate_shift, determine_operation_modes
 from prototype.validator import validate
 from prototype.backup import ShiftBackup
@@ -954,6 +954,19 @@ def build_off_request_cells(off_requests: dict[str, list[int]]) -> set[tuple[str
     return cells
 
 
+def shift_submission_employee_names() -> list[str]:
+    """希望提出の対象者リスト。山本さんは補助・特別枠として含める。"""
+    names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+    try:
+        yamamoto = get_employee("山本")
+        if yamamoto.name not in names:
+            names.append(yamamoto.name)
+    except Exception:
+        if "山本" not in names:
+            names.append("山本")
+    return names
+
+
 # ============================================================
 # 経営者ビュー
 # ============================================================
@@ -1268,9 +1281,7 @@ if mode == "📊 経営者ビュー":
     # ============================================================
     # 希望シフト提出状況（リアルタイム）
     # ============================================================
-    expected_employees = [
-        e.name for e in shift_active_employees() if not e.is_auxiliary
-    ]
+    expected_employees = shift_submission_employee_names()
     submission_status = backup_mgr.get_submission_status(
         int(target_year), int(target_month), expected_employees,
     )
@@ -2105,20 +2116,8 @@ if mode == "📊 経営者ビュー":
                     f"（黄色でハイライト・人員少欄に店舗別マーク表示）"
                 )
 
-            render_shift_table(
-                inline_display_shift,
-                short_staff_by_store=short_staff_by_store,
-                off_request_cells=_table_off_cells,
-                changed_cells=inline_changed_cells,
-                changed_cell_color="#16a34a",
-                selectable_cells=True,
-                selected_cell=(selected_edit_employee, selected_edit_day),
-            )
-
-            with st.expander(
-                "✏️ 選択したセルを修正する",
-                expanded=bool(inline_changed_cells) or cell_selected_from_table,
-            ):
+            st.markdown("##### ✏️ シフト表の上で修正")
+            with st.container(border=True):
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
@@ -2185,7 +2184,7 @@ if mode == "📊 経営者ビュー":
                                     pending_symbol_changes[key] = normalize_store_symbol(symbol)
                                 st.session_state[inline_pending_key] = pending_symbol_changes
                                 st.rerun()
-                st.caption("シフト表のセルをクリックして選択し、上の記号ボタンで変更できます。")
+                st.caption("日付とスタッフを選び、記号ボタンで変更します。下のシフト表とエラー表示は変更のたびに更新されます。")
                 with btn_col1:
                     if st.button(
                         "このセルを変更",
@@ -2320,6 +2319,15 @@ if mode == "📊 経営者ビュー":
                         for issue in inline_result.issues:
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
+
+            render_shift_table(
+                inline_display_shift,
+                short_staff_by_store=short_staff_by_store,
+                off_request_cells=_table_off_cells,
+                changed_cells=inline_changed_cells,
+                changed_cell_color="#16a34a",
+                selectable_cells=False,
+            )
 
             st.markdown("---")
             st.markdown("##### 📝 下部注意書き（Excel/PDF出力に反映）")
@@ -3012,7 +3020,7 @@ elif mode == "👤 従業員ビュー":
     logged_in_emp = get_logged_in_employee()
 
     # employee_names は後でボタンキー生成に使うので、ここで必ず定義しておく
-    employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+    employee_names = shift_submission_employee_names()
 
     if is_employee() and logged_in_emp:
         # 従業員モード（マジックリンク経由）: 自分に固定
@@ -3726,9 +3734,15 @@ elif mode == "⚙️ 設定":
             st.markdown("---")
             st.markdown("#### 📋 全従業員のマジックリンク一覧")
 
-            # 在籍中の従業員のみ
+            # 在籍中の従業員 + 山本さん（補助・特別枠）
             active_emps = _link_active_emps()
             display_emps = [e for e in active_emps if not e.is_auxiliary]
+            try:
+                yamamoto_emp = get_employee("山本")
+                if yamamoto_emp.name not in {e.name for e in display_emps}:
+                    display_emps.append(yamamoto_emp)
+            except Exception:
+                pass
 
             # 一覧テーブル
             link_data = []

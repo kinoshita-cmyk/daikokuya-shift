@@ -24,7 +24,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prototype.employee_tokens import validate_token, is_salt_configured
-from prototype.employees import shift_active_employees
+from prototype.employees import get_employee, shift_active_employees
 
 
 # Streamlit Secrets のキー名
@@ -189,9 +189,15 @@ def _try_magic_link_login() -> bool:
         return False
     if not is_salt_configured():
         return False
-    # 全従業員（顧問・補助も含めて検証対象に）
+    # 通常の提出対象 + 山本さん（補助・特別枠）を検証対象にする
     all_emps = shift_active_employees()
     employee_names = [e.name for e in all_emps]
+    try:
+        if "山本" not in employee_names:
+            employee_names.append(get_employee("山本").name)
+    except Exception:
+        if "山本" not in employee_names:
+            employee_names.append("山本")
     matched = validate_token(token, employee_names)
     if matched:
         st.session_state[SESSION_AUTHENTICATED] = True
