@@ -238,13 +238,46 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
                 continue
             eco_count = store_eco.get(store, 0)
             ticket_count = store_ticket.get(store, 0)
+            total_count = eco_count + ticket_count
 
-            # すずらんは「エコ1+チケット2」または「エコ2+チケット1」を許容
-            if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if eco_count >= 1 and ticket_count >= 1 and eco_count + ticket_count >= 3:
+            if store == Store.HIGASHIGUCHI:
+                if not (eco_count == 1 and ticket_count == 0 and total_count == 1):
+                    short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if store == Store.AKABANE and mode == OperationMode.NORMAL:
+                yamamoto_present = any(
+                    a.employee == "山本" and a.store == Store.AKABANE
+                    for a in day_assigns
+                )
+                effective_ticket = ticket_count + max(0, eco_count - 1)
+                if yamamoto_present:
+                    effective_ticket += 1
+                if eco_count < 1 or eco_count > 2 or effective_ticket < 2:
+                    short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if store == Store.OMIYA and mode == OperationMode.NORMAL:
+                if eco_count >= 1 and ticket_count >= 1 and total_count >= 3:
                     continue
+                if eco_count == 1 and ticket_count == 1 and total_count == 2:
+                    short_by_store.setdefault(d, set()).add(store)
+                    continue
+                short_by_store.setdefault(d, set()).add(store)
+                continue
 
-            if eco_count < store_cap.eco_min or ticket_count < store_cap.ticket_min:
+            # すずらんは「エコ1〜2 + チケット2」を許容
+            if store == Store.SUZURAN and mode == OperationMode.NORMAL:
+                if 1 <= eco_count <= 2 and ticket_count == 2:
+                    continue
+                short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if (
+                eco_count < store_cap.eco_min
+                or eco_count > store_cap.eco_max
+                or ticket_count < store_cap.ticket_min
+            ):
                 short_by_store.setdefault(d, set()).add(store)
 
     return short_by_store
@@ -334,6 +367,7 @@ def render_shift_table(
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
     sticky: bool = False,
     changed_cells: Optional[set[tuple[str, int]]] = None,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -347,6 +381,7 @@ def render_shift_table(
     else:
         short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
     changed_cells = changed_cells or set()
+    off_request_cells = off_request_cells or set()
 
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
@@ -455,10 +490,15 @@ def render_shift_table(
                 "box-shadow:inset 0 0 0 3px #f97316; font-weight:bold;"
                 if (name, d) in changed_cells else ""
             )
+            off_request_style = (
+                "outline:2px solid #dc2626; outline-offset:-3px; "
+                "font-weight:900; color:#991b1b;"
+                if (name, d) in off_request_cells and cell_text == "×" else ""
+            )
             html += (
                 f'<td style="padding:6px; border:1px solid #ccc; '
                 f'text-align:center; background:{cell_bg}; font-size:16px; '
-                f'{changed_style}">{cell_text}</td>'
+                f'{changed_style} {off_request_style}">{cell_text}</td>'
             )
 
         # 人員少マーク
@@ -483,6 +523,24 @@ def get_session_shift() -> Optional[MonthlyShift]:
 def save_session_shift(shift: MonthlyShift) -> None:
     """シフトをセッションに保存"""
     st.session_state["current_shift"] = shift
+
+
+def format_day_list(days: list[int] | set[int] | tuple[int, ...]) -> str:
+    """日付リストを画面表示用に整える。"""
+    safe_days = sorted({int(d) for d in days if str(d).isdigit()})
+    if not safe_days:
+        return "なし"
+    return "、".join(f"{d}日" for d in safe_days)
+
+
+def build_off_request_cells(off_requests: dict[str, list[int]]) -> set[tuple[str, int]]:
+    """本人が提出した絶対休み（×）のセル集合を作る。"""
+    cells: set[tuple[str, int]] = set()
+    for emp_name, days in (off_requests or {}).items():
+        for day in days:
+            if str(day).isdigit():
+                cells.add((emp_name, int(day)))
+    return cells
 
 
 # ============================================================
@@ -862,7 +920,7 @@ if mode == "📊 経営者ビュー":
             f'</div>'
             f'<div style="font-size:13px; color:#92400e;">'
             f'⏳ 未提出 {summary["total_pending"]}名: <strong>{", ".join(submission_status["not_submitted"])}</strong>'
-            f'<br>✨ 一部提出のままでもシフト生成できます。未提出者は希望未指定として自由配置されます。'
+            f'<br>📝 原則として全員提出後に生成してください。急ぎの場合のみ、操作欄で確認して生成できます。'
             f'<br>📝 長期欠勤の場合は「⚙️ 設定 → 👥 従業員マスタ」で雇用形態を「休職中」に変更してください（シフト対象外になります）。'
             f'</div></div>',
             unsafe_allow_html=True,
@@ -886,8 +944,9 @@ if mode == "📊 経営者ビュー":
                     submitted_data.append({
                         "氏名": s["employee"],
                         "提出日時": s["submitted_at"][:19].replace("T", " "),
-                        "休み希望": f"{s['off_request_count']}日",
-                        "△希望": f"{s['flexible_off_count']}件",
+                        "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
+                        "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
+                        "有給": f"{s.get('paid_leave_days', 0)}日",
                         "備考": "📝 あり" if s["has_note"] else "",
                     })
                 st.dataframe(submitted_data, width="stretch", hide_index=True)
@@ -935,17 +994,62 @@ if mode == "📊 経営者ビュー":
         if st.button("🔄 提出状況を更新", key="refresh_submissions"):
             st.rerun()
 
+    with st.expander("🧾 本人提出希望の一覧（調整時の確認用）", expanded=summary["total_submitted"] > 0):
+        st.caption(
+            "×は本人が提出した絶対休みです。シフト作成・AI対話・手動調整でも勤務にしない前提で扱います。"
+        )
+        submitted_by_name = {
+            s["employee"]: s for s in submission_status["submitted"]
+        }
+        request_rows = []
+        for emp_name in expected_employees:
+            s = submitted_by_name.get(emp_name)
+            if s:
+                request_rows.append({
+                    "氏名": emp_name,
+                    "状態": "提出済み",
+                    "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
+                    "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
+                    "出勤希望": format_day_list(s.get("work_request_days", [])),
+                    "有給": f"{s.get('paid_leave_days', 0)}日",
+                    "備考": s.get("note_excerpt", ""),
+                })
+            else:
+                request_rows.append({
+                    "氏名": emp_name,
+                    "状態": "未提出",
+                    "× 休み希望（絶対）": "",
+                    "△ できれば休み": "",
+                    "出勤希望": "",
+                    "有給": "",
+                    "備考": "",
+                })
+        st.dataframe(request_rows, width="stretch", hide_index=True, height=360)
+
     st.markdown("---")
 
     # 操作ボタン群
     st.markdown("##### 操作")
+    allow_partial_generation = summary["total_pending"] == 0
+    if summary["total_pending"] > 0:
+        st.warning(
+            f"未提出者が {summary['total_pending']}名います。"
+            "本人の×希望を守るため、原則は全員提出後に生成してください。"
+        )
+        allow_partial_generation = st.checkbox(
+            "未提出者を希望未指定として生成する（緊急時のみ）",
+            key=f"allow_partial_generation_{int(target_year)}_{int(target_month)}",
+        )
     bcol1, bcol2, bcol3, bcol4 = st.columns(4)
 
     with bcol1:
         # 生成ボタン: ロック中は無効、未提出者がいれば警告
-        gen_disabled = lock_info is not None
+        gen_disabled = lock_info is not None or not allow_partial_generation
         if gen_disabled:
-            gen_help = "ロック解除してから再生成してください"
+            if lock_info is not None:
+                gen_help = "ロック解除してから再生成してください"
+            else:
+                gen_help = "未提出者がいるため、緊急時の確認チェックを入れるまで生成できません"
         elif summary["total_pending"] > 0:
             gen_help = f"⚠ {summary['total_pending']}名 未提出です。それでも生成しますか？"
         else:
@@ -1025,6 +1129,7 @@ if mode == "📊 経営者ビュー":
                         use_work_requests = [
                             (emp, d, store) for (emp, d, store) in sub_data.work_requests
                             if 1 <= d <= days_in_m
+                            and d not in set(use_off_requests.get(emp, []))
                         ]
                         use_flexible_off = []
                         for fo in sub_data.flexible_off:
@@ -1449,6 +1554,12 @@ if mode == "📊 経営者ビュー":
             st.markdown("---")
 
             render_shift_legend()
+            _table_vi = st.session_state.get("last_validation_inputs", {})
+            _table_off_cells = set()
+            if _table_vi.get("ym") == f"{int(shift.year):04d}-{int(shift.month):02d}":
+                _table_off_cells = build_off_request_cells(_table_vi.get("off_requests", {}))
+            if _table_off_cells:
+                st.caption("赤枠の × は、本人が提出した「絶対休み」の希望です。")
 
             # 人員不足日を計算
             short_staff_by_store = detect_short_staff_by_store(shift)
@@ -1460,7 +1571,11 @@ if mode == "📊 経営者ビュー":
                     f"（黄色でハイライト・人員少欄に店舗別マーク表示）"
                 )
 
-            render_shift_table(shift, short_staff_by_store=short_staff_by_store)
+            render_shift_table(
+                shift,
+                short_staff_by_store=short_staff_by_store,
+                off_request_cells=_table_off_cells,
+            )
 
             st.markdown("---")
             st.markdown("##### 📝 下部注意書き（Excel/PDF出力に反映）")
@@ -1628,12 +1743,29 @@ if mode == "📊 経営者ビュー":
                     "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
+                _chat_validation_inputs = st.session_state.get("last_validation_inputs", {})
+                _chat_validation_match = (
+                    _chat_validation_inputs.get("ym")
+                    == f"{int(shift.year):04d}-{int(shift.month):02d}"
+                )
+                if not _chat_validation_match:
+                    _chat_validation_inputs = {}
+                _chat_max_consec = rule_cfg.parameters.get("max_consec_work", 5)
                 if "chat_engine" not in st.session_state or st.session_state.get("chat_shift_id") != id(shift):
-                    st.session_state.chat_engine = ShiftChatEngine(shift, api_key=api_key)
+                    st.session_state.chat_engine = ShiftChatEngine(
+                        shift,
+                        api_key=api_key,
+                        validation_inputs=_chat_validation_inputs,
+                        max_consec=_chat_max_consec,
+                    )
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_messages = []
 
                 chat_engine = st.session_state.chat_engine
+                chat_engine.set_validation_context(
+                    _chat_validation_inputs,
+                    max_consec=_chat_max_consec,
+                )
 
                 st.markdown("##### 📋 現在のシフト表")
                 st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
@@ -1758,7 +1890,7 @@ if mode == "📊 経営者ビュー":
                 display_shift = chat_engine.get_preview_shift() if pending_count else chat_engine.shift
                 changed_cells = chat_engine.get_pending_change_keys() if pending_count else set()
 
-                _cv_inputs = st.session_state.get("last_validation_inputs", {})
+                _cv_inputs = _chat_validation_inputs
                 _cv_match = (
                     _cv_inputs.get("ym")
                     == f"{int(display_shift.year):04d}-{int(display_shift.month):02d}"
@@ -1783,11 +1915,14 @@ if mode == "📊 経営者ビュー":
                 short_days_chat = set(short_staff_by_store_chat.keys())
 
                 render_shift_legend()
+                if _cv_off:
+                    st.caption("赤枠の × は、本人が提出した「絶対休み」の希望です。")
                 render_shift_table(
                     display_shift,
                     short_staff_by_store=short_staff_by_store_chat,
                     sticky=True,
                     changed_cells=changed_cells,
+                    off_request_cells=build_off_request_cells(_cv_off),
                 )
 
                 _render_chat_action_buttons()
@@ -2059,6 +2194,9 @@ elif mode == "👤 従業員ビュー":
     target_year = st.session_state["emp_target_year"]
     target_month = st.session_state["emp_target_month"]
     days_in_month = monthrange(target_year, target_month)[1]
+    free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
+    paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
+    review_key = f"pref_review_{selected}_{target_year}_{target_month}"
 
     # テスト月（過去・今月）の場合は注意表示
     is_test_month = (
@@ -2175,6 +2313,96 @@ elif mode == "👤 従業員ビュー":
 
     prefs = st.session_state.user_prefs[user_key]
 
+    # 当該従業員の月間基準日数を取得
+    try:
+        from prototype.employees import get_employee as _get_emp
+        _emp_obj = _get_emp(selected)
+        annual_target = _emp_obj.annual_target_days
+    except Exception:
+        annual_target = None
+
+    if annual_target:
+        monthly_target = round(annual_target / 12)
+        base_holidays = days_in_month - monthly_target
+    else:
+        monthly_target = None
+        base_holidays = None
+
+    def _save_employee_preferences(paid_leave_days_value: int, free_text_value: str) -> Path:
+        backup = ShiftBackup()
+        off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
+        flexible_days = [d for d, m in prefs.items() if m == "△"]
+        natural_language_notes = {selected: free_text_value}
+        save_path = backup.save_preferences(
+            year=target_year, month=target_month,
+            off_requests=off_requests,
+            work_requests=[],
+            flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
+            natural_language_notes=natural_language_notes,
+            author=selected,
+        )
+        try:
+            import json
+            with open(save_path, encoding="utf-8") as f:
+                _data = json.load(f)
+            _data["paid_leave_days"] = int(paid_leave_days_value)
+            _data["monthly_target_workdays"] = monthly_target
+            _data["base_holidays"] = base_holidays
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        try:
+            from prototype.github_backup import push_preference_to_github
+            push_preference_to_github(
+                save_path, employee_name=selected,
+                year=target_year, month=target_month,
+            )
+        except Exception:
+            pass
+        return save_path
+
+    if st.session_state.get(review_key):
+        paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
+        free_text_review = st.session_state.get(free_text_key, "")
+        x_days = [d for d, m in prefs.items() if m == "×"]
+        triangle_days = [d for d, m in prefs.items() if m == "△"]
+        ok_days = [d for d, m in prefs.items() if m == "○"]
+
+        st.markdown("### 提出前の確認")
+        st.warning(
+            "この画面で内容を確認してください。"
+            "× を付けた日は、例外なく「休み希望（絶対）」として扱われます。"
+        )
+        review_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days), "日数": len(x_days)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days), "日数": len(triangle_days)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days), "日数": len(ok_days)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_days_review}日", "日数": paid_leave_days_review},
+            {"項目": "自由記述", "内容": free_text_review.strip() or "なし", "日数": ""},
+        ]
+        st.dataframe(review_rows, width="stretch", hide_index=True)
+
+        confirm_col1, confirm_col2 = st.columns([1, 1])
+        with confirm_col1:
+            if st.button("入力に戻る", key="emp_review_back", width="stretch"):
+                st.session_state[review_key] = False
+                st.rerun()
+        with confirm_col2:
+            if st.button("この内容で提出する", key="emp_review_submit", type="primary", width="stretch"):
+                _save_employee_preferences(paid_leave_days_review, free_text_review)
+                st.session_state[review_key] = False
+                st.success(
+                    f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました！\n\n"
+                    f"📊 入力内容: ○ 出勤可能 {len(ok_days)}日 / "
+                    f"× 休み希望 {len(x_days)}日 / "
+                    f"△ できれば休み {len(triangle_days)}日"
+                    f"{f' / 🏖 希望有給 {paid_leave_days_review}日' if paid_leave_days_review > 0 else ''}"
+                )
+                st.balloons()
+        st.stop()
+
     # 従業員のインデックス（Japaneseキーを避けてASCII-safeなキーにする）
     emp_idx = employee_names.index(selected)
 
@@ -2255,6 +2483,7 @@ elif mode == "👤 従業員ビュー":
         "希望有給日数（任意）",
         min_value=0, max_value=31, value=0, step=1,
         help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
+        key=paid_leave_key,
     )
 
     # 現在の入力状況を集計
@@ -2334,62 +2563,16 @@ elif mode == "👤 従業員ビュー":
             "    16日と17日のどちらか1日は休めると助かります。"
         ),
         height=120,
-        key=f"free_text_{selected}_{target_year}_{target_month}",
+        key=free_text_key,
     )
 
     if st.button(
-        f"📤 {target_year}年{target_month}月分 を提出する",
+        f"確認画面へ進む",
         type="primary",
         width="stretch",
     ):
-        # 入力内容を保存
-        backup = ShiftBackup()
-        off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
-        flexible_days = [d for d, m in prefs.items() if m == "△"]
-        # 有給日数とコメントを備考の構造化データに含める
-        natural_language_notes = {selected: free_text}
-        # 拡張データ（有給など）も保存
-        save_path = backup.save_preferences(
-            year=target_year, month=target_month,
-            off_requests=off_requests,
-            work_requests=[],
-            flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
-            natural_language_notes=natural_language_notes,
-            author=selected,
-        )
-        # 有給日数を別ファイルとして追記保存（既存のJSONを編集して有給フィールド追加）
-        try:
-            import json
-            with open(save_path, encoding="utf-8") as f:
-                _data = json.load(f)
-            _data["paid_leave_days"] = int(paid_leave_days)
-            _data["monthly_target_workdays"] = monthly_target
-            _data["base_holidays"] = base_holidays
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-        # GitHub にも自動バックアップ（設定されていれば）
-        try:
-            from prototype.github_backup import push_preference_to_github
-            push_preference_to_github(
-                save_path, employee_name=selected,
-                year=target_year, month=target_month,
-            )
-        except Exception:
-            pass
-
-        # 集計サマリー
-        x_count = sum(1 for m in prefs.values() if m == "×")
-        triangle_count = sum(1 for m in prefs.values() if m == "△")
-        ok_count = sum(1 for m in prefs.values() if m == "○")
-        leave_msg = f" / 🏖 希望有給 {paid_leave_days}日" if paid_leave_days > 0 else ""
-        st.success(
-            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました！\n\n"
-            f"📊 入力内容: ○ 出勤可能 {ok_count}日 / × 休み希望 {x_count}日 / △ できれば休み {triangle_count}日{leave_msg}"
-        )
-        st.balloons()
+        st.session_state[review_key] = True
+        st.rerun()
 
 
 # ============================================================
@@ -2668,7 +2851,7 @@ elif mode == "⚙️ 設定":
             "eco_required": "東口・西口の必須エコ要員",
             "consec_work": "最大連勤チェック",
             "holiday_days": "月内最低休日数",
-            "consec_off_3": "3連休禁止",
+            "consec_off_3": "3連休の確認",
             "two_off_per_month": "月内 2連休回数（最低1回・最大2回）",
             "off_request": "休み希望厳守",
             "work_request": "出勤希望厳守",
@@ -2801,22 +2984,22 @@ elif mode == "⚙️ 設定":
         rule_inventory = [
             _rule_row(
                 "店舗・人数", "赤羽駅前店の基本体制",
-                "エコ1名 + チケット2名。チケット不足時は山本さん補助投入の対象。",
+                "基本はエコ1名+チケット2名。例外でエコ2名+チケット1名、チケット対応不足時は山本さん補助。",
                 "反映中", "反映中", "人員少表示・Excel/PDFに反映",
                 "コード固定", "反映中",
             ),
             _rule_row(
                 "店舗・人数", "赤羽東口店の1名体制",
-                "月曜定休。原則エコ1名のみ。土井さんメイン、休みの日は他エコが代替。",
-                "反映中", "反映中", "2名以上は警告表示",
+                "月曜定休。エコ1名のみ。例外なし。土井さんメイン、休みの日は他エコが代替。",
+                "反映中", "反映中", "2名以上はエラー表示",
                 "コード固定", "反映中",
             ),
             _rule_row(
                 "店舗・人数", "大宮駅前店の基本体制",
-                "通常はエコ2名 + チケット1名。春山さん・下地さんのどちらか必須。",
+                "通常は最低3名（エコ1〜2名 + チケット1名以上）。不足時だけ2名体制を警告扱い。",
                 "反映中", "反映中", "人員少表示・Excel/PDFに反映",
                 "コード固定", "反映中",
-                "エコ1名運営を許容する条件は今後さらに厳密化余地あり。",
+                "春山さん・下地さんのどちらか必須。",
             ),
             _rule_row(
                 "店舗・人数", "大宮西口店の1名体制",
@@ -2826,7 +3009,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "店舗・人数", "大宮すずらん通り店の基本体制",
-                "エコ1+チケット2、またはエコ2+チケット1。",
+                "エコ1〜2名 + チケット2名。",
                 "反映中", "反映中", "人数不足表示に反映",
                 "コード固定", "反映中",
             ),
@@ -2869,17 +3052,17 @@ elif mode == "⚙️ 設定":
                 f"現在の本設定: 最低{cfg.parameters.get('min_2off_per_month', 1)}回 / 最大{cfg.parameters.get('max_2off_per_month', 2)}回。",
                 "コード固定", "コード固定", "警告として表示",
                 "この画面で変更可", "未接続",
-                "画面の数値は保存されますが、実チェックへの接続は次段階です。",
+                "原則ルール。例外的に0回・2回以上もあり得るため警告扱いです。",
             ),
             _rule_row(
-                "連勤・休日", "3連休禁止",
-                "希望休を含む3連休は許容し、それ以外の3連休を禁止。",
-                "反映中", "反映中", "検証結果に表示",
-                "コード固定", "反映中",
+                "連勤・休日", "3連休の確認",
+                "原則避けるが、人員過多や本人希望がある場合は許容。",
+                "ソフト反映", "警告表示", "検証結果に表示",
+                "コード固定", "一部反映",
             ),
             _rule_row(
                 "希望・提出", "休み希望厳守",
-                "提出された休み希望日は勤務にしない。",
+                "提出された×は例外なく勤務にしない。出勤希望と重なった場合も×を優先。",
                 "反映中", "反映中", "検証結果に表示",
                 "提出データ依存", "反映中",
             ),
@@ -2903,6 +3086,25 @@ elif mode == "⚙️ 設定":
                 "生成では効きますが、手動・AI変更後の検証は今後強化余地あり。",
             ),
             _rule_row(
+                "スタッフ別", "赤羽東口店の代替要員",
+                "土井さんメイン。休みの日は楯さん・春山さん・長尾さん・今津さんのいずれか。",
+                "ソフト反映", "警告表示", "検証結果に表示",
+                "コード固定", "一部反映",
+                "過去月とのすり合わせ後にハード条件化する想定です。",
+            ),
+            _rule_row(
+                "スタッフ別", "固定店舗",
+                "店舗固定は土井さん（赤羽東口）・下地さん（大宮駅前）の2名のみ。",
+                "反映中", "一部反映", "従業員マスタで管理",
+                "従業員マスタ", "反映中",
+            ),
+            _rule_row(
+                "スタッフ別", "メイン店舗以外への月3日勤務",
+                "楯さん・春山さん・長尾さんは月3日、自分のメイン店舗以外で勤務する。",
+                "未接続", "未接続", "メモのみ",
+                "月次ルール候補", "未接続",
+            ),
+            _rule_row(
                 "スタッフ別", "在勤要望（強・中・弱）",
                 "強・中・弱を生成時の重みとして使う。",
                 "一部反映", "未接続", "従業員マスタで管理",
@@ -2923,9 +3125,16 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "山本さん補助ロジック",
-                "赤羽がエコ1+チケット0/1の日に補助として配置。人数カウント対象外。",
+                "赤羽駅前店のチケット対応が不足する時だけ補助配置。その他は手動入力対象。",
                 "反映中", "反映中", "シフト表では空白/赤羽補助として表示",
                 "コード固定", "反映中",
+            ),
+            _rule_row(
+                "月次ルール", "月ごとの追加条件",
+                "研修・一時的な店舗移動・例外スタッフなど、その月だけの条件を追加する考え方。",
+                "未接続", "未接続", "カスタムルールにメモ保存可",
+                "今後追加予定", "未接続",
+                "例: 6月は牧野さんを研修のため大宮西口または赤羽東口に3回。",
             ),
             _rule_row(
                 "スタッフ別", "すずらん不在時の補填",
