@@ -95,6 +95,8 @@ def generate_shift(
     prev_month: list[PreviousMonthCarryover],
     flexible_off: Optional[list[tuple[str, list[int], int]]] = None,
     holiday_overrides: Optional[dict[str, int]] = None,
+    preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
+    preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -116,6 +118,8 @@ def generate_shift(
     """
     flexible_off = flexible_off or []
     holiday_overrides = holiday_overrides or {}
+    preferred_work_requests = preferred_work_requests or []
+    preferred_consecutive_off = preferred_consecutive_off or []
     operation_modes = operation_modes or determine_operation_modes(year, month)
     consec_exceptions = consec_exceptions or []
 
@@ -155,6 +159,19 @@ def generate_shift(
         normalized_work_requests.append((name, day, store))
     work_requests = normalized_work_requests
 
+    normalized_preferred_work_requests = []
+    for name, d, store in (preferred_work_requests or []):
+        try:
+            day = int(d)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= day <= days_in_month):
+            continue
+        if day in set(off_requests.get(name, [])):
+            continue
+        normalized_preferred_work_requests.append((name, day, store))
+    preferred_work_requests = normalized_preferred_work_requests
+
     normalized_flexible_off = []
     for name, candidate_days, n_required in (flexible_off or []):
         safe_candidates = sorted({
@@ -164,6 +181,15 @@ def generate_shift(
         if safe_candidates:
             normalized_flexible_off.append((name, safe_candidates, int(n_required)))
     flexible_off = normalized_flexible_off
+    normalized_preferred_consecutive_off = []
+    for name, block_len in (preferred_consecutive_off or []):
+        try:
+            block_len_int = int(block_len)
+        except (TypeError, ValueError):
+            continue
+        if 2 <= block_len_int <= min(7, days_in_month):
+            normalized_preferred_consecutive_off.append((name, block_len_int))
+    preferred_consecutive_off = normalized_preferred_consecutive_off
     yamamoto_off_days = set(off_requests.get("山本", []))
 
     # ============================================================
@@ -473,6 +499,31 @@ def generate_shift(
     # 目的関数（ソフト制約）: 在勤要望の達成度を最大化
     # ============================================================
     objective_terms = []
+    preferred_consecutive_off_indicators = []
+    preferred_work_terms = []
+
+    # 自由記載の「出勤希望」「○日は赤羽希望」などは、解なしを避けるためソフト制約で強く優先。
+    for name, d, store in preferred_work_requests:
+        if name not in main_employee_names:
+            continue
+        if store is not None and store in main_stores:
+            preferred_work_terms.append(140 * x[name][d][store])
+        else:
+            preferred_work_terms.append(
+                80 * sum(x[name][d][s] for s in main_stores)
+            )
+
+    # 自由記載の「4連休がほしい」などは、解なしを避けるためソフト制約として強く優先する。
+    for name, block_len in preferred_consecutive_off:
+        if name not in main_employee_names:
+            continue
+        for start in range(1, days_in_month - block_len + 2):
+            window = list(range(start, start + block_len))
+            block = model.NewBoolVar(f"preferred_off_block_{name}_{block_len}_{start}")
+            off_sum = sum(off[name][d] for d in window)
+            model.Add(off_sum == block_len).OnlyEnforceIf(block)
+            model.Add(off_sum <= block_len - 1).OnlyEnforceIf(block.Not())
+            preferred_consecutive_off_indicators.append(block)
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
@@ -513,6 +564,11 @@ def generate_shift(
     if three_off_indicators:
         # 3連休はあり得るが、必要がなければ避ける
         obj = obj - 15 * sum(three_off_indicators)
+    if preferred_consecutive_off_indicators:
+        # 自由記載で明示された連休希望は、通常の3連休回避ペナルティより強く優先する。
+        obj = obj + 180 * sum(preferred_consecutive_off_indicators)
+    if preferred_work_terms:
+        obj = obj + sum(preferred_work_terms)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
     obj = obj - 100 * sum(omiya_short.values())
     if higashi_unexpected_assignments:
