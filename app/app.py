@@ -1880,11 +1880,15 @@ if mode == "📊 経営者ビュー":
             try:
                 from calendar import monthrange as _mr
                 days_in_m = _mr(_saved_target_year, _saved_target_month)[1]
+                solver_limit_seconds = max(
+                    120,
+                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 120)),
+                )
 
                 progress_area.info(
                     f"⏳ ステップ 1/4: {_saved_target_year}年{_saved_target_month}月の提出データを読み込み中..."
                 )
-                with st.spinner(f"シフト案を生成中... (最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"):
+                with st.spinner(f"シフト案を生成中... (最大{solver_limit_seconds}秒)"):
                     # 実際の提出データを読み込む
                     from prototype.submission_loader import load_submissions_for_month
                     sub_data = load_submissions_for_month(
@@ -2015,7 +2019,7 @@ if mode == "📊 経営者ビュー":
 
                     progress_area.info(
                         f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
-                        f"(最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"
+                        f"(最大{solver_limit_seconds}秒)"
                     )
                     generation_kwargs = {
                         "year": _saved_target_year,
@@ -2029,7 +2033,7 @@ if mode == "📊 経営者ビュー":
                         "consec_exceptions": use_consec_exceptions,
                         "default_holidays": rule_cfg.parameters.get("default_holiday_days", 8),
                         "max_consec_override": rule_cfg.parameters.get("max_consec_work", 5),
-                        "time_limit_seconds": rule_cfg.parameters.get("solver_time_limit_seconds", 30),
+                        "time_limit_seconds": solver_limit_seconds,
                         "random_seed": rule_cfg.parameters.get("solver_seed", 42),
                         "verbose": False,
                     }
@@ -2040,7 +2044,24 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
                     if "monthly_store_count_rules" in generator_params:
                         generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
+                    if "strict_warning_constraints" in generator_params:
+                        generation_kwargs["strict_warning_constraints"] = True
                     shift = generate_shift(**generation_kwargs)
+                    relaxed_warning_constraints = False
+                    if shift is None and "strict_warning_constraints" in generator_params:
+                        progress_area.info(
+                            "⏳ 厳しめ条件では解が見つからなかったため、"
+                            "警告候補だけを緩めて再探索しています..."
+                        )
+                        relaxed_kwargs = dict(generation_kwargs)
+                        relaxed_kwargs["strict_warning_constraints"] = False
+                        shift = generate_shift(**relaxed_kwargs)
+                        relaxed_warning_constraints = shift is not None
+                    if relaxed_warning_constraints:
+                        data_source_msg += (
+                            "\n※警告が出ない条件では解が見つからなかったため、"
+                            "一部の警告条件だけ緩めて生成しました。"
+                        )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
@@ -2067,6 +2088,8 @@ if mode == "📊 経営者ビュー":
                     ),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                    "relaxed_warning_constraints": bool(relaxed_warning_constraints),
+                    "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
                     ),
@@ -2112,7 +2135,7 @@ if mode == "📊 経営者ビュー":
                     diag_lines = [
                         "❌ **シフトを生成できませんでした**",
                         "",
-                        f"ソルバーが {rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒以内に "
+                        f"ソルバーが {solver_limit_seconds}秒以内に "
                         "制約を全て満たすシフトを見つけられませんでした。",
                         "",
                         "**考えられる原因:**",
