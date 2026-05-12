@@ -744,7 +744,7 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         return
     columns = [
         "氏名", "状態", "× 休み希望（絶対）", "△ できれば休み",
-        "出勤希望", "有給", "備考",
+        "出勤希望", "有給", "自由記載から反映", "備考",
     ]
     widths = {
         "氏名": 110,
@@ -753,6 +753,7 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         "△ できれば休み": 220,
         "出勤希望": 180,
         "有給": 90,
+        "自由記載から反映": 220,
         "備考": 560,
     }
     html_parts = [
@@ -907,11 +908,39 @@ def enrich_submission_days_from_files(
         submitted["paid_leave_days"] = int(data.get("paid_leave_days", submitted.get("paid_leave_days", 0)) or 0)
 
         notes = data.get("natural_language_notes", {})
+        note_text = ""
         if isinstance(notes, dict) and notes.get(author):
             note_text = notes[author]
             submitted["note"] = note_text
             submitted["note_excerpt"] = note_text[:50] + ("..." if len(note_text) > 50 else "")
             submitted["has_note"] = True
+        try:
+            from prototype.submission_loader import parse_natural_language_note
+            parsed_note = parse_natural_language_note(note_text, year, month)
+            off_days = sorted(set(off_days) | set(parsed_note.off_requests))
+            flexible_extra_days = [
+                day
+                for candidate_days, _ in parsed_note.flexible_off
+                for day in candidate_days
+            ]
+            flexible_days = sorted(set(flexible_days) | set(flexible_extra_days))
+            work_days = sorted(set(work_days) | {day for day, _ in parsed_note.work_requests})
+            if parsed_note.paid_leave_days is not None:
+                submitted["paid_leave_days"] = max(
+                    int(submitted.get("paid_leave_days", 0) or 0),
+                    int(parsed_note.paid_leave_days),
+                )
+            if parsed_note.requested_holiday_days is not None:
+                submitted["requested_holiday_days"] = parsed_note.requested_holiday_days
+            if parsed_note.preferred_consecutive_off_days is not None:
+                submitted["preferred_consecutive_off_days"] = parsed_note.preferred_consecutive_off_days
+        except Exception:
+            pass
+        submitted["off_request_days"] = off_days
+        submitted["off_request_count"] = len(off_days)
+        submitted["flexible_off_days"] = flexible_days
+        submitted["flexible_off_count"] = len(flexible_days)
+        submitted["work_request_days"] = work_days
     return submission_status
 
 
@@ -1217,7 +1246,20 @@ if mode == "📊 経営者ビュー":
                             st.write(f"    - {emp}: {n}日{warn}")
                     if _isum.get("paid_leave_days"):
                         st.write(f"- 有給申請: {_isum['paid_leave_days']}")
+                    if _isum.get("parsed_note_summaries"):
+                        st.write(
+                            f"- 自由記載から追加反映: "
+                            f"{len(_isum['parsed_note_summaries'])}名分"
+                        )
+                    if _isum.get("requested_holiday_days"):
+                        st.write(f"- 自由記載の休日日数指定: {_isum['requested_holiday_days']}")
+                    if _isum.get("preferred_consecutive_off"):
+                        st.write(f"- 自由記載の連休希望: {_isum['preferred_consecutive_off']}")
                     st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
+                    st.write(
+                        f"- 自由記載の出勤希望（優先反映）: "
+                        f"{_isum.get('preferred_work_requests_count', 0)}件"
+                    )
                     st.write(f"- 柔軟休み: {_isum.get('flexible_off_count', 0)}件")
             if _last_gen.get("error_detail"):
                 with st.expander("🔧 技術者向け: 例外スタックトレース", expanded=False):
@@ -1411,6 +1453,11 @@ if mode == "📊 経営者ビュー":
         for emp_name in expected_employees:
             s = submitted_by_name.get(emp_name)
             if s:
+                note_applied = []
+                if s.get("requested_holiday_days"):
+                    note_applied.append(f"休み計{s['requested_holiday_days']}日")
+                if s.get("preferred_consecutive_off_days"):
+                    note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
                 request_rows.append({
                     "氏名": emp_name,
                     "状態": "提出済み",
@@ -1418,6 +1465,7 @@ if mode == "📊 経営者ビュー":
                     "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
                     "出勤希望": format_day_list(s.get("work_request_days", [])),
                     "有給": f"{s.get('paid_leave_days', 0)}日",
+                    "自由記載から反映": " / ".join(note_applied),
                     "備考": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             else:
@@ -1428,6 +1476,7 @@ if mode == "📊 経営者ビュー":
                     "△ できれば休み": "",
                     "出勤希望": "",
                     "有給": "",
+                    "自由記載から反映": "",
                     "備考": "",
                 })
         render_scrollable_request_table(request_rows)
@@ -1537,6 +1586,12 @@ if mode == "📊 経営者ビュー":
                             if 1 <= d <= days_in_m
                             and d not in set(use_off_requests.get(emp, []))
                         ]
+                        use_preferred_work_requests = [
+                            (emp, d, store)
+                            for (emp, d, store) in sub_data.preferred_work_requests
+                            if 1 <= d <= days_in_m
+                            and d not in set(use_off_requests.get(emp, []))
+                        ]
                         use_flexible_off = []
                         for fo in sub_data.flexible_off:
                             if isinstance(fo, tuple) and len(fo) >= 3:
@@ -1545,6 +1600,7 @@ if mode == "📊 経営者ビュー":
                                 if cands:
                                     use_flexible_off.append((emp, cands, n))
                         use_holiday_overrides = {}
+                        use_preferred_consecutive_off = list(sub_data.preferred_consecutive_off)
                         # 有給日数を holiday_overrides に反映（基準＋有給日数）
                         for emp_name, paid_days in sub_data.paid_leave_days.items():
                             try:
@@ -1556,12 +1612,23 @@ if mode == "📊 経営者ビュー":
                                     use_holiday_overrides[emp_name] = base_holidays + paid_days
                             except Exception:
                                 pass
+                        for emp_name, requested_days in sub_data.requested_holiday_days.items():
+                            if 0 <= int(requested_days) <= days_in_m:
+                                use_holiday_overrides[emp_name] = max(
+                                    int(use_holiday_overrides.get(emp_name, 0) or 0),
+                                    int(requested_days),
+                                )
                         # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
                             f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                         )
+                        if sub_data.parsed_note_summaries:
+                            data_source_msg += (
+                                f"\n自由記載から "
+                                f"{len(sub_data.parsed_note_summaries)}名分の希望も反映しました。"
+                            )
                         if sub_data.pending_employees:
                             data_source_msg += (
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
@@ -1573,8 +1640,10 @@ if mode == "📊 経営者ビュー":
                         # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                         use_off_requests = OFF_REQUESTS
                         use_work_requests = WORK_REQUESTS
+                        use_preferred_work_requests = []
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                        use_preferred_consecutive_off = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
                         data_source_msg = (
@@ -1584,8 +1653,10 @@ if mode == "📊 経営者ビュー":
                         # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
                         use_off_requests = {}
                         use_work_requests = []
+                        use_preferred_work_requests = []
                         use_flexible_off = []
                         use_holiday_overrides = {}
+                        use_preferred_consecutive_off = []
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -1611,6 +1682,8 @@ if mode == "📊 経営者ビュー":
                         prev_month=use_prev_month,
                         flexible_off=use_flexible_off,
                         holiday_overrides=use_holiday_overrides,
+                        preferred_work_requests=use_preferred_work_requests,
+                        preferred_consecutive_off=use_preferred_consecutive_off,
                         operation_modes=modes,
                         consec_exceptions=use_consec_exceptions,
                         max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
@@ -1635,9 +1708,17 @@ if mode == "📊 経営者ビュー":
                         emp: list(days) for emp, days in use_off_requests.items()
                     },
                     "work_requests_count": len(use_work_requests),
+                    "preferred_work_requests_count": len(use_preferred_work_requests),
                     "flexible_off_count": len(use_flexible_off),
                     "holiday_overrides": dict(use_holiday_overrides),
                     "paid_leave_days": dict(sub_data.paid_leave_days),
+                    "requested_holiday_days": dict(
+                        getattr(sub_data, "requested_holiday_days", {})
+                    ),
+                    "preferred_consecutive_off": list(use_preferred_consecutive_off),
+                    "parsed_note_summaries": dict(
+                        getattr(sub_data, "parsed_note_summaries", {})
+                    ),
                     "days_in_month": days_in_m,
                     "total_off_days_requested": sum(
                         len(v) for v in use_off_requests.values()
