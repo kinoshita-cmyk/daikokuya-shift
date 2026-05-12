@@ -1001,6 +1001,47 @@ def render_scrollable_review_table(rows: list[dict]) -> None:
     st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
+def render_scrollable_dict_table(
+    rows: list[dict],
+    columns: list[str],
+    widths: dict[str, int],
+    empty_message: str,
+    max_height: int = 360,
+) -> None:
+    """任意の dict 行を横スクロール可能な表で表示する。"""
+    if not rows:
+        st.caption(empty_message)
+        return
+    min_width = sum(widths.get(col, 140) for col in columns)
+    html_parts = [
+        f'<div style="overflow:auto; max-height:{max_height}px; border:1px solid #e5e7eb; '
+        'border-radius:6px; background:white;">',
+        f'<table style="border-collapse:collapse; min-width:{min_width}px; width:max-content; '
+        'font-size:14px;">',
+        '<thead><tr>',
+    ]
+    for col in columns:
+        html_parts.append(
+            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
+            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
+            f'min-width:{widths.get(col, 140)}px;">{escape(col)}</th>'
+        )
+    html_parts.append('</tr></thead><tbody>')
+    for row in rows:
+        html_parts.append('<tr>')
+        for col in columns:
+            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
+            html_parts.append(
+                f'<td style="border:1px solid #e5e7eb; padding:8px; '
+                f'vertical-align:top; min-width:{widths.get(col, 140)}px; '
+                'white-space:pre-wrap;">'
+                f'{value}</td>'
+            )
+        html_parts.append('</tr>')
+    html_parts.append('</tbody></table></div>')
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
 def _safe_preference_days(values) -> list[int]:
     """希望提出JSONの表記ゆれから日付だけを取り出す。"""
     days: list[int] = []
@@ -1101,7 +1142,16 @@ def enrich_submission_days_from_files(
             continue
         file_path = month_dir / file_name
         if not file_path.exists():
-            continue
+            legacy_path = (
+                backup_mgr.backup_dir.parent
+                / "preferences"
+                / f"{year:04d}-{month:02d}"
+                / file_name
+            )
+            if legacy_path.exists():
+                file_path = legacy_path
+            else:
+                continue
         try:
             with open(file_path, encoding="utf-8") as f:
                 data = json.load(f)
@@ -1816,7 +1866,63 @@ if mode == "📊 経営者ビュー":
                 })
         render_scrollable_request_table(request_rows)
 
+    if int(target_year) == 2026 and int(target_month) in (4, 5):
+        with st.expander("🔎 過去実績との照合（4月・5月のすり合わせ用）", expanded=False):
+            st.caption(
+                "過去の手作業シフトと本人提出希望を照合します。"
+                "ここに出た日は、口頭変更などがあった可能性があるため、"
+                "ルール調整の比較対象から一旦分けて確認します。"
+            )
+            try:
+                from prototype.reconciliation import compare_submissions_to_actual_rows
+                reconcile_rows = compare_submissions_to_actual_rows(
+                    int(target_year), int(target_month), expected_employees,
+                )
+            except Exception as exc:
+                reconcile_rows = []
+                st.warning(f"照合データを読み込めませんでした: {type(exc).__name__}")
+            render_scrollable_dict_table(
+                reconcile_rows,
+                columns=["氏名", "日付", "種別", "提出希望", "実績シフト", "確認メモ"],
+                widths={
+                    "氏名": 100,
+                    "日付": 90,
+                    "種別": 210,
+                    "提出希望": 180,
+                    "実績シフト": 120,
+                    "確認メモ": 360,
+                },
+                empty_message="提出希望と実績シフトの食い違いは見つかりませんでした。",
+            )
+
     st.markdown("---")
+
+    with st.expander("📌 今月の適用ルール", expanded=False):
+        current_month_rules = active_monthly_store_count_rules(
+            rule_cfg, int(target_year), int(target_month),
+        )
+        st.markdown(
+            "\n".join([
+                "- 本人の `×` 休み希望は例外なく休みとして扱います。",
+                f"- 最大連勤は `{rule_cfg.parameters.get('max_consec_work', 5)}連勤`、"
+                f"2連休は最低 `{rule_cfg.parameters.get('min_2off_per_month', 1)}回` を目標にします。",
+                f"- 自動生成の探索時間は最大 `{max(180, int(rule_cfg.parameters.get('solver_time_limit_seconds', 180)))}秒` です。",
+                "- 顧問は自動生成では原則使いません。必要な場合は月別ルールや手動調整で扱います。",
+                "- 南さんは、`×` が付いていない日は出勤候補として扱います。",
+                "- 大宮西口店は楯さんメインですが、楯さん不在時・研修時は春山さんなどの代替を許容します。",
+                "- 赤羽東口店は休店日以外は開店前提です。省人員日でも閉店扱いにはしません。",
+            ])
+        )
+        if current_month_rules:
+            st.markdown("**月別ルール**")
+            for rule in current_month_rules:
+                st.write(
+                    f"- {rule.get('name', '月別ルール')}: "
+                    f"{rule.get('employee')} / {rule.get('stores')} / "
+                    f"{rule.get('count')}回以上 / {rule.get('severity')}"
+                )
+        else:
+            st.caption("この月だけの追加ルールは未設定です。")
 
     # 操作ボタン群
     st.markdown("##### 操作")
@@ -2047,7 +2153,7 @@ if mode == "📊 経営者ビュー":
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
                     if "advisor_max_days" in generator_params:
-                        generation_kwargs["advisor_max_days"] = 3
+                        generation_kwargs["advisor_max_days"] = 0
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
@@ -2060,26 +2166,10 @@ if mode == "📊 経営者ビュー":
                         relaxed_kwargs["strict_warning_constraints"] = False
                         shift = generate_shift(**relaxed_kwargs)
                         relaxed_warning_constraints = shift is not None
-                    if shift is None and "advisor_max_days" in generator_params:
-                        progress_area.info(
-                            "⏳ 顧問の出勤を最小限にする条件でも解が見つからないため、"
-                            "顧問を最終手段として追加で許容して再探索しています..."
-                        )
-                        advisor_relaxed_kwargs = dict(generation_kwargs)
-                        if "strict_warning_constraints" in generator_params:
-                            advisor_relaxed_kwargs["strict_warning_constraints"] = False
-                        advisor_relaxed_kwargs["advisor_max_days"] = None
-                        shift = generate_shift(**advisor_relaxed_kwargs)
-                        relaxed_advisor_limit = shift is not None
                     if relaxed_warning_constraints:
                         data_source_msg += (
                             "\n※警告が出ない条件では解が見つからなかったため、"
                             "一部の警告条件だけ緩めて生成しました。"
-                        )
-                    if relaxed_advisor_limit:
-                        data_source_msg += (
-                            "\n※顧問の出勤を3日以内に抑える条件では解が見つからなかったため、"
-                            "顧問を最終手段として追加許容しました。"
                         )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
@@ -4549,8 +4639,8 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "南さんの出勤希望日のみ稼働",
-                "出勤希望がある日のみ勤務対象にする。",
-                "反映中", "一部反映", "従業員マスタで管理",
+                "×休み希望以外の日は、通常の出勤候補として扱う。",
+                "対象外", "一部反映", "従業員マスタで管理",
                 "従業員マスタ", "反映中",
             ),
             _rule_row(
