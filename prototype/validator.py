@@ -254,7 +254,7 @@ def _check_store_capacity(
                         message=(
                             f"赤羽東口店に配置できるのは土井さん、楯さん、春山さん、長尾さん、今津さんのみです"
                             f"／対象: {', '.join(unexpected_workers)}"
-                            "。過去月とのすり合わせ後にハード条件化してください。"
+                            "。自動生成では避ける条件として扱います。"
                         ),
                     ))
                 continue
@@ -565,6 +565,10 @@ def _check_work_requests(
 ) -> None:
     """出勤希望日が出勤になっているか（指定店舗があればそこに配置）"""
     for name, day, requested_store in work_requests:
+        # 山本さんは赤羽不足時の補助・手動入力枠なので、通常スタッフと同じ
+        # 「出勤希望未充足」警告には含めない。×休み希望は別チェックで厳守する。
+        if name == "山本":
+            continue
         # 同じ日に「×」休み希望がある場合は、休み希望を最優先する。
         if day in set(off_requests.get(name, [])):
             continue
