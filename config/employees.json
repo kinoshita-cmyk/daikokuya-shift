@@ -116,10 +116,10 @@
         "HIGASHIGUCHI": "弱",
         "SUZURAN": "弱",
         "AKABANE": "不可",
-        "NISHIGUCHI": "不可"
+        "NISHIGUCHI": "弱"
       },
       "annual_target_days": 268,
-      "notes": "大宮強、東口2回、すずらん不足時補填",
+      "notes": "大宮強、東口2回、すずらん不足時補填。楯不在時・研修時は西口代替あり",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
