@@ -36,7 +36,7 @@ from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
-    OFF_MAIN_STORE_MINIMUMS,
+    OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
 )
 
 
@@ -99,6 +99,7 @@ def generate_shift(
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
+    strict_warning_constraints: bool = True,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -313,6 +314,8 @@ def generate_shift(
                 for e in main_employees:
                     if e.name not in HIGASHIGUCHI_ALLOWED_STAFF:
                         higashi_unexpected_assignments.append(x[e.name][d][s])
+                        if strict_warning_constraints:
+                            model.Add(x[e.name][d][s] == 0)
                 model.Add(eco_at_store == 1)
                 model.Add(ticket_at_store == 0)
                 continue
@@ -401,6 +404,7 @@ def generate_shift(
 
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
     three_off_indicators = []  # 希望休を含まない3連休のインジケータ
+    two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
@@ -453,6 +457,25 @@ def generate_shift(
             continue
         required_off = holiday_overrides.get(e.name, default_holidays)
         model.Add(sum(off[e.name][d] for d in days) >= required_off)
+
+    # ============================================================
+    # 制約 10.5: 2連休を月1回以上
+    # ============================================================
+    for e in main_employees:
+        if e.constraint_check_excluded or e.name in CONSTRAINT_EXCLUDED:
+            continue
+        two_day_blocks = []
+        for start in range(1, days_in_month):
+            block = model.NewBoolVar(f"two_off_block_{e.name}_{start}")
+            model.AddBoolAnd([off[e.name][start], off[e.name][start + 1]]).OnlyEnforceIf(block)
+            model.AddBoolOr([off[e.name][start].Not(), off[e.name][start + 1].Not()]).OnlyEnforceIf(block.Not())
+            two_day_blocks.append(block)
+        if two_day_blocks:
+            has_two_day_block = model.NewBoolVar(f"has_two_off_block_{e.name}")
+            model.AddMaxEquality(has_two_day_block, two_day_blocks)
+            if strict_warning_constraints:
+                model.Add(has_two_day_block == 1)
+            two_off_goal_terms.append(has_two_day_block)
 
     # ============================================================
     # 制約 11: 3連休は原則避ける（ソフト）
@@ -621,6 +644,9 @@ def generate_shift(
     if over_4_indicators:
         # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
         obj = obj - 50 * sum(over_4_indicators)
+    if two_off_goal_terms:
+        # 2連休不足の警告が出ないよう、緩和時でも強く優先する。
+        obj = obj + 260 * sum(two_off_goal_terms)
     if three_off_indicators:
         # 3連休はあり得るが、必要がなければ避ける
         obj = obj - 15 * sum(three_off_indicators)

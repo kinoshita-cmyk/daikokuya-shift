@@ -290,13 +290,6 @@ def _check_store_capacity(
                             f"／配属: {all_worker_str}"
                         ),
                     ))
-                elif yamamoto_present:
-                    result.issues.append(Issue(
-                        severity="WARNING",
-                        category="山本補助",
-                        day=day, employee="山本",
-                        message=f"赤羽駅前店のチケット対応不足を山本さんで補助／配属: {all_worker_str}",
-                    ))
                 continue
 
             # 大宮の「人数少」例外: eco_count==1 + ticket_count>=1 でも許容（警告のみ）
@@ -493,9 +486,9 @@ def _check_consecutive_off(
             if is_off:
                 consec_off += 1
             else:
-                if consec_off == 2:
+                if consec_off >= 2:
                     two_off_count += 1
-                elif consec_off >= 3:
+                if consec_off >= 3:
                     # 3連休になった日（最終日）を特定
                     third_day = day - 1
                     off_block = list(range(day - consec_off, day))
@@ -515,8 +508,22 @@ def _check_consecutive_off(
                 consec_off = 0
 
         # 月末の処理
-        if consec_off == 2:
+        if consec_off >= 2:
             two_off_count += 1
+            if consec_off >= 3:
+                off_block = list(range(days - consec_off + 1, days + 1))
+                has_request = any(d in emp_off_requests for d in off_block)
+                if not has_request:
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="3連休確認",
+                        day=days, employee=emp.name,
+                        message=(
+                            f"{consec_off}連休"
+                            f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
+                            "。人数過多などの事情があれば許容可能です。"
+                        ),
+                    ))
 
         if two_off_count < min_2off:
             result.issues.append(Issue(
