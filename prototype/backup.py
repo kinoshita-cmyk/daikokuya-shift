@@ -30,7 +30,7 @@ from .models import (
     MonthlyShift, ShiftAssignment, Store, OperationMode,
     DayPreference, PreferenceMark,
 )
-from .paths import BACKUP_DIR as DEFAULT_BACKUP_DIR
+from .paths import BACKUP_DIR as DEFAULT_BACKUP_DIR, PROJECT_ROOT
 
 
 class ShiftBackup:
@@ -285,8 +285,13 @@ class ShiftBackup:
                 return sorted(set(days))
             return _safe_days(raw)
 
+        legacy_month_dir = PROJECT_ROOT / "preferences" / f"{year}-{month:02d}"
+        candidate_files = sorted(month_dir.glob("preferences_*.json"))
+        if legacy_month_dir.exists():
+            candidate_files.extend(sorted(legacy_month_dir.glob("*.json")))
+
         # 提出ファイルを走査して、各従業員の最新提出を取得
-        for file in sorted(month_dir.glob("preferences_*.json")):
+        for file in candidate_files:
             try:
                 with open(file, encoding="utf-8") as f:
                     data = json.load(f)

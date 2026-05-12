@@ -100,10 +100,10 @@ ECO_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.WEAK,    # 月2回
             Store.SUZURAN: Affinity.WEAK,         # 不足時補填
             Store.AKABANE: Affinity.NONE,
-            Store.NISHIGUCHI: Affinity.NONE,
+            Store.NISHIGUCHI: Affinity.WEAK,      # 楯不在時・研修時の代替
         },
         annual_target_days=268,
-        notes="大宮強、東口2回、すずらん不足時補填",
+        notes="大宮強、東口2回、すずらん不足時補填。楯不在時・研修時は西口代替あり",
     ),
     Employee(
         name="下地",

@@ -143,7 +143,7 @@ def push_preference_to_github(
     """
     従業員の希望提出データを GitHub にプッシュ。
 
-    保存先: preferences/YYYY-MM/{従業員名}_TIMESTAMP.json
+    保存先: backups/YYYY-MM/preferences_TIMESTAMP_{従業員名}.json
     """
     if not is_github_backup_enabled():
         return False, "未設定"
@@ -152,9 +152,13 @@ def push_preference_to_github(
         if not local_file_path.exists():
             return False, "ローカルファイルが見つからない"
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-        # ファイル名から特殊文字を除く
+        # アプリは backups/YYYY-MM/preferences_*.json を読み込むため、
+        # 再起動後もそのまま復元できるパスへ保存する。
         safe_name = "".join(c if c.isalnum() else "_" for c in employee_name)
-        repo_path = f"preferences/{year:04d}-{month:02d}/{safe_name}_{ts}.json"
+        repo_path = (
+            f"backups/{year:04d}-{month:02d}/"
+            f"preferences_{ts}_{safe_name}.json"
+        )
         content = local_file_path.read_bytes()
         commit_msg = f"Preference: {employee_name} for {year}-{month:02d}"
         return _push_file(repo_path, content, commit_msg)

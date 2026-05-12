@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .paths import BACKUP_DIR
+from .paths import BACKUP_DIR, PROJECT_ROOT
 from .models import Store
 
 
@@ -345,14 +345,21 @@ def load_submissions_for_month(
     """
     data = SubmissionData(year=year, month=month)
     month_dir = BACKUP_DIR / f"{year:04d}-{month:02d}"
-    if not month_dir.exists():
+    legacy_month_dir = PROJECT_ROOT / "preferences" / f"{year:04d}-{month:02d}"
+    candidate_files: list[Path] = []
+    if month_dir.exists():
+        candidate_files.extend(sorted(month_dir.glob("preferences_*.json")))
+    if legacy_month_dir.exists():
+        candidate_files.extend(sorted(legacy_month_dir.glob("*.json")))
+
+    if not candidate_files:
         if expected_employees:
             data.pending_employees = list(expected_employees)
         return data
 
     # 各従業員の最新提出を取得
     latest: dict[str, dict] = {}
-    for f in sorted(month_dir.glob("preferences_*.json")):
+    for f in candidate_files:
         try:
             with open(f, encoding="utf-8") as fp:
                 d = json.load(fp)

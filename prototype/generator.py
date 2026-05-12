@@ -100,7 +100,7 @@ def generate_shift(
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
     strict_warning_constraints: bool = True,
-    advisor_max_days: Optional[int] = 3,
+    advisor_max_days: Optional[int] = 0,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -129,8 +129,7 @@ def generate_shift(
     consec_exceptions = consec_exceptions or []
 
     # 主要なメイン稼働メンバーリスト（山本を除く）。
-    # 顧問は通常は使わないが、どうしても足りない時の最終手段として
-    # 大きなペナルティ付きで候補に含める。
+    # 顧問は基本的に自動投入しない。必要な場合だけ advisor_max_days を上げる。
     main_employees = [
         e for e in shift_active_employees() if not e.is_auxiliary
     ]
@@ -518,18 +517,7 @@ def generate_shift(
             model.Add(sum(1 - off["大塚"][d] for d in days) == 10)
 
     # ============================================================
-    # 制約 13: 南さんは出勤希望日のみ稼働
-    # ============================================================
-    if any(e.name == "南" for e in main_employees):
-        minami_work_days = set(
-            d for name, d, _ in work_requests if name == "南"
-        )
-        for d in days:
-            if d not in minami_work_days:
-                model.Add(off["南"][d] == 1)
-
-    # ============================================================
-    # 制約 14: 楯・春山・長尾は月3日以上、メイン店舗以外で勤務
+    # 制約 13: 楯・春山・長尾は月3日以上、メイン店舗以外で勤務
     # ============================================================
     for name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
         if name not in main_employee_names:
