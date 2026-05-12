@@ -28,6 +28,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
+from urllib.parse import quote, unquote
 
 from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
@@ -364,6 +365,8 @@ def render_shift_table(
     changed_cells: Optional[set[tuple[str, int]]] = None,
     off_request_cells: Optional[set[tuple[str, int]]] = None,
     changed_cell_color: str = "#f97316",
+    selectable_cells: bool = False,
+    selected_cell: Optional[tuple[str, int]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -378,6 +381,7 @@ def render_shift_table(
         short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
     changed_cells = changed_cells or set()
     off_request_cells = off_request_cells or set()
+    selected_cell = selected_cell or ("", 0)
 
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
@@ -486,15 +490,30 @@ def render_shift_table(
                 f"box-shadow:inset 0 0 0 3px {changed_cell_color}; font-weight:bold;"
                 if (name, d) in changed_cells else ""
             )
+            selected_style = (
+                "box-shadow:inset 0 0 0 3px #2563eb; font-weight:bold;"
+                if (name, d) == selected_cell else ""
+            )
             off_request_style = (
                 "outline:2px solid #dc2626; outline-offset:-3px; "
                 "font-weight:900; color:#991b1b;"
                 if (name, d) in off_request_cells and cell_text == "×" else ""
             )
+            cell_body = cell_text
+            if selectable_cells:
+                ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+                href = (
+                    f"?edit_ym={ym}&edit_day={d}"
+                    f"&edit_employee={quote(name)}"
+                )
+                cell_body = (
+                    f'<a href="{href}" style="display:block; min-width:28px; '
+                    f'color:inherit; text-decoration:none;">{cell_text or "&nbsp;"}</a>'
+                )
             html += (
                 f'<td style="padding:6px; border:1px solid #ccc; '
                 f'text-align:center; background:{cell_bg}; font-size:16px; '
-                f'{changed_style} {off_request_style}">{cell_text}</td>'
+                f'{changed_style} {selected_style} {off_request_style}">{cell_body}</td>'
             )
 
         # 人員少マーク
@@ -1748,8 +1767,8 @@ if mode == "📊 経営者ビュー":
 
             edit_ym = f"{int(shift.year):04d}_{int(shift.month):02d}"
             inline_pending_key = f"inline_edit_pending_{edit_ym}"
-            inline_undo_key = f"inline_edit_undo_{edit_ym}"
-            inline_redo_key = f"inline_edit_redo_{edit_ym}"
+            inline_undo_key = f"inline_edit_undo_stack_{edit_ym}"
+            inline_redo_key = f"inline_edit_redo_stack_{edit_ym}"
             inline_status_key = f"inline_edit_status_{edit_ym}"
             if inline_pending_key not in st.session_state:
                 st.session_state[inline_pending_key] = {}
@@ -1762,6 +1781,32 @@ if mode == "📊 経営者ビュー":
             inline_changed_cells = set(pending_symbol_changes.keys())
             if st.session_state.get(inline_status_key):
                 st.success(st.session_state.pop(inline_status_key))
+
+            selected_edit_day = int(st.session_state.get(f"inline_edit_day_{edit_ym}", 1) or 1)
+            selected_edit_employee = st.session_state.get(
+                f"inline_edit_employee_{edit_ym}",
+                EXPORT_COLUMN_ORDER[0],
+            )
+            try:
+                query_edit_ym = st.query_params.get("edit_ym", "")
+                query_edit_day = int(st.query_params.get("edit_day", selected_edit_day))
+                query_edit_employee = unquote(
+                    st.query_params.get("edit_employee", selected_edit_employee)
+                )
+                if (
+                    query_edit_ym == f"{int(shift.year):04d}-{int(shift.month):02d}"
+                    and 1 <= query_edit_day <= monthrange(shift.year, shift.month)[1]
+                    and query_edit_employee in EXPORT_COLUMN_ORDER
+                ):
+                    selected_edit_day = query_edit_day
+                    selected_edit_employee = query_edit_employee
+                    st.session_state[f"inline_edit_day_{edit_ym}"] = selected_edit_day
+                    st.session_state[f"inline_edit_employee_{edit_ym}"] = selected_edit_employee
+                    for _param in ("edit_ym", "edit_day", "edit_employee"):
+                        if _param in st.query_params:
+                            del st.query_params[_param]
+            except Exception:
+                pass
 
             # 人員不足日を計算
             short_staff_by_store = detect_short_staff_by_store(inline_display_shift)
@@ -1779,9 +1824,14 @@ if mode == "📊 経営者ビュー":
                 off_request_cells=_table_off_cells,
                 changed_cells=inline_changed_cells,
                 changed_cell_color="#16a34a",
+                selectable_cells=True,
+                selected_cell=(selected_edit_employee, selected_edit_day),
             )
 
-            with st.expander("✏️ このシフト表を修正する", expanded=bool(inline_changed_cells)):
+            with st.expander(
+                "✏️ 選択したセルを修正する",
+                expanded=bool(inline_changed_cells) or "edit_day" in st.query_params,
+            ):
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
@@ -1791,6 +1841,7 @@ if mode == "📊 経営者ビュー":
                     edit_day = st.selectbox(
                         "日付",
                         options=list(range(1, days_in_shift + 1)),
+                        index=max(0, min(days_in_shift - 1, selected_edit_day - 1)),
                         format_func=lambda d: f"{d}日",
                         key=f"inline_edit_day_{edit_ym}",
                         disabled=lock_info is not None,
@@ -1799,6 +1850,8 @@ if mode == "📊 経営者ビュー":
                     edit_employee = st.selectbox(
                         "スタッフ",
                         options=EXPORT_COLUMN_ORDER,
+                        index=EXPORT_COLUMN_ORDER.index(selected_edit_employee)
+                        if selected_edit_employee in EXPORT_COLUMN_ORDER else 0,
                         key=f"inline_edit_employee_{edit_ym}",
                         disabled=lock_info is not None,
                     )
@@ -1822,6 +1875,30 @@ if mode == "📊 経営者ビュー":
                         st.caption("本人×固定")
 
                 btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 1, 1, 2])
+                quick_cols = st.columns(len(STORE_SYMBOL_OPTIONS))
+                for quick_col, symbol in zip(quick_cols, STORE_SYMBOL_OPTIONS):
+                    label = symbol or "空白"
+                    with quick_col:
+                        if st.button(
+                            label,
+                            key=f"inline_quick_{edit_ym}_{edit_day}_{edit_employee}_{symbol or 'blank'}",
+                            width="stretch",
+                            disabled=lock_info is not None,
+                        ):
+                            if (edit_employee, int(edit_day)) in _table_off_cells and symbol != "×":
+                                st.error("本人の×休み希望は変更できません。")
+                            else:
+                                before_symbol = assignment_to_symbol(
+                                    shift.get_assignment(edit_employee, int(edit_day))
+                                )
+                                key = (edit_employee, int(edit_day))
+                                if normalize_store_symbol(symbol) == before_symbol:
+                                    pending_symbol_changes.pop(key, None)
+                                else:
+                                    pending_symbol_changes[key] = normalize_store_symbol(symbol)
+                                st.session_state[inline_pending_key] = pending_symbol_changes
+                                st.rerun()
+                st.caption("シフト表のセルをクリックして選択し、上の記号ボタンで変更できます。")
                 with btn_col1:
                     if st.button(
                         "このセルを変更",
