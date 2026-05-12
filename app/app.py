@@ -17,6 +17,7 @@ import os
 import json
 from pathlib import Path
 from typing import Optional
+from html import escape
 
 # パス設定: プロジェクトルートと app ディレクトリの両方を Python パスに追加
 # これにより `from prototype.X` と `from auth` 両方の形式が動く
@@ -736,6 +737,53 @@ def format_day_list(days) -> str:
     return "、".join(f"{d}日" for d in safe_days)
 
 
+def render_scrollable_request_table(rows: list[dict]) -> None:
+    """本人提出希望を横スクロール可能な表で表示する。"""
+    if not rows:
+        st.caption("表示する提出データがありません")
+        return
+    columns = [
+        "氏名", "状態", "× 休み希望（絶対）", "△ できれば休み",
+        "出勤希望", "有給", "備考",
+    ]
+    widths = {
+        "氏名": 110,
+        "状態": 110,
+        "× 休み希望（絶対）": 260,
+        "△ できれば休み": 220,
+        "出勤希望": 180,
+        "有給": 90,
+        "備考": 560,
+    }
+    html_parts = [
+        '<div style="overflow:auto; max-height:430px; border:1px solid #e5e7eb; '
+        'border-radius:6px; background:white;">',
+        '<table style="border-collapse:collapse; min-width:1530px; width:max-content; '
+        'font-size:14px;">',
+        '<thead><tr>',
+    ]
+    for col in columns:
+        html_parts.append(
+            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
+            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
+            f'min-width:{widths[col]}px;">{escape(col)}</th>'
+        )
+    html_parts.append('</tr></thead><tbody>')
+    for row in rows:
+        html_parts.append('<tr>')
+        for col in columns:
+            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
+            white_space = "pre-wrap" if col == "備考" else "nowrap"
+            html_parts.append(
+                f'<td style="border:1px solid #e5e7eb; padding:8px; '
+                f'vertical-align:top; min-width:{widths[col]}px; '
+                f'white-space:{white_space};">{value}</td>'
+            )
+        html_parts.append('</tr>')
+    html_parts.append('</tbody></table></div>')
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
 def _safe_preference_days(values) -> list[int]:
     """希望提出JSONの表記ゆれから日付だけを取り出す。"""
     days: list[int] = []
@@ -1370,7 +1418,7 @@ if mode == "📊 経営者ビュー":
                     "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
                     "出勤希望": format_day_list(s.get("work_request_days", [])),
                     "有給": f"{s.get('paid_leave_days', 0)}日",
-                    "備考": s.get("note_excerpt", ""),
+                    "備考": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             else:
                 request_rows.append({
@@ -1382,7 +1430,7 @@ if mode == "📊 経営者ビュー":
                     "有給": "",
                     "備考": "",
                 })
-        st.dataframe(request_rows, width="stretch", hide_index=True, height=360)
+        render_scrollable_request_table(request_rows)
 
     st.markdown("---")
 
@@ -1411,7 +1459,7 @@ if mode == "📊 経営者ビュー":
         elif summary["total_pending"] > 0:
             gen_help = f"⚠ {summary['total_pending']}名 未提出です。それでも生成しますか？"
         else:
-            gen_help = "AIが希望データから新規シフトを作成します"
+            gen_help = "シフト計算エンジンが希望データから新規シフトを作成します"
 
         # 一部提出でも生成可能（未提出者は自由配置）
         gen_button_label = "🔄 シフトを自動生成"
@@ -1452,7 +1500,7 @@ if mode == "📊 経営者ビュー":
                 progress_area.info(
                     f"⏳ ステップ 1/4: {_saved_target_year}年{_saved_target_month}月の提出データを読み込み中..."
                 )
-                with st.spinner(f"AIがシフト案を生成中... (最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"):
+                with st.spinner(f"シフト案を生成中... (最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"):
                     # 実際の提出データを読み込む
                     from prototype.submission_loader import load_submissions_for_month
                     sub_data = load_submissions_for_month(
@@ -1552,7 +1600,7 @@ if mode == "📊 経営者ビュー":
                     modes = determine_operation_modes(_saved_target_year, _saved_target_month)
 
                     progress_area.info(
-                        f"⏳ ステップ 4/4: AIソルバー実行中... "
+                        f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
                         f"(最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"
                     )
                     shift = generate_shift(
