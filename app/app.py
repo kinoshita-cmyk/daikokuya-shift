@@ -702,12 +702,14 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
             "off_requests": {},
             "prev_month": [],
             "holiday_overrides": {},
+            "monthly_store_count_rules": [],
         }
     return {
         "work_requests": inputs.get("work_requests", []),
         "off_requests": inputs.get("off_requests", {}),
         "prev_month": inputs.get("prev_month", []),
         "holiday_overrides": inputs.get("holiday_overrides", {}),
+        "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
     }
 
 
@@ -999,6 +1001,106 @@ def shift_submission_employee_names() -> list[str]:
         if "山本" not in names:
             names.append("山本")
     return names
+
+
+def save_shift_snapshot_with_github(
+    backup_mgr: ShiftBackup,
+    shift: MonthlyShift,
+    kind: str,
+    author: str,
+    note: str = "",
+) -> Path:
+    """シフトをローカル保存し、設定済みならGitHubにも自動保存する。"""
+    path = backup_mgr.save_shift(shift, kind=kind, author=author, note=note)
+    try:
+        from prototype.github_backup import push_shift_to_github
+        push_shift_to_github(path, int(shift.year), int(shift.month), kind=kind)
+    except Exception:
+        pass
+    return path
+
+
+def push_lock_file_to_github(lock_path: Path, year: int, month: int, action: str) -> None:
+    """ロック情報をGitHubへ自動保存する。"""
+    try:
+        from prototype.github_backup import push_lock_to_github
+        push_lock_to_github(lock_path, int(year), int(month), action=action)
+    except Exception:
+        pass
+
+
+def record_edit_history_with_github(
+    backup_mgr: ShiftBackup,
+    year: int,
+    month: int,
+    before_shift: MonthlyShift,
+    after_shift: MonthlyShift,
+    changed_cells: set[tuple[str, int]],
+    actor: str,
+    reason: str,
+) -> None:
+    """手動編集履歴をローカルとGitHubへ残す。"""
+    if not changed_cells:
+        return
+    for employee, day in sorted(changed_cells, key=lambda x: (x[1], x[0])):
+        before_symbol = assignment_to_symbol(before_shift.get_assignment(employee, int(day))) or "空白"
+        after_symbol = assignment_to_symbol(after_shift.get_assignment(employee, int(day))) or "空白"
+        if before_symbol == after_symbol:
+            continue
+        try:
+            backup_mgr.log_edit(
+                int(year), int(month),
+                employee=employee,
+                day=int(day),
+                before_store=before_symbol,
+                after_store=after_symbol,
+                actor=actor,
+                reason=reason,
+            )
+        except Exception:
+            pass
+    try:
+        from prototype.github_backup import push_edit_log_to_github
+        log_path = (
+            backup_mgr.backup_dir
+            / f"{int(year):04d}-{int(month):02d}"
+            / f"edits_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        )
+        if log_path.exists():
+            push_edit_log_to_github(log_path, int(year), int(month))
+    except Exception:
+        pass
+
+
+def active_monthly_store_count_rules(
+    rule_cfg: RuleConfig,
+    year: int,
+    month: int,
+) -> list[dict]:
+    """対象年月に有効な月別配置ルールだけを生成・検証用に取り出す。"""
+    active_rules = []
+    for rule in getattr(rule_cfg, "custom_rules", []):
+        if not getattr(rule, "enabled", True):
+            continue
+        if getattr(rule, "rule_type", "note") != "employee_store_count":
+            continue
+        try:
+            target_year = getattr(rule, "target_year", None)
+            target_month = getattr(rule, "target_month", None)
+            if target_year is not None and int(target_year) != int(year):
+                continue
+            if target_month is not None and int(target_month) != int(month):
+                continue
+        except (TypeError, ValueError):
+            continue
+        active_rules.append({
+            "name": rule.name,
+            "employee": getattr(rule, "employee", ""),
+            "stores": list(getattr(rule, "stores", []) or []),
+            "count": int(getattr(rule, "count", 0) or 0),
+            "severity": getattr(rule, "severity", "WARNING"),
+        })
+    return active_rules
 
 
 # ============================================================
@@ -1302,6 +1404,14 @@ if mode == "📊 経営者ビュー":
                         st.write(f"- 自由記載の休日日数指定: {_isum['requested_holiday_days']}")
                     if _isum.get("preferred_consecutive_off"):
                         st.write(f"- 自由記載の連休希望: {_isum['preferred_consecutive_off']}")
+                    if _isum.get("monthly_store_count_rules"):
+                        st.write("- 月別ルール:")
+                        for rule in _isum["monthly_store_count_rules"]:
+                            st.write(
+                                f"    - {rule.get('name', '月別ルール')}: "
+                                f"{rule.get('employee')} / {rule.get('stores')} / "
+                                f"{rule.get('count')}回以上 / {rule.get('severity')}"
+                            )
                     st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
                     st.write(
                         f"- 自由記載の出勤希望（優先反映）: "
@@ -1719,6 +1829,9 @@ if mode == "📊 経営者ビュー":
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
                     )
                     modes = determine_operation_modes(_saved_target_year, _saved_target_month)
+                    use_monthly_store_count_rules = active_monthly_store_count_rules(
+                        rule_cfg, _saved_target_year, _saved_target_month,
+                    )
 
                     progress_area.info(
                         f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
@@ -1734,6 +1847,7 @@ if mode == "📊 経営者ビュー":
                         "holiday_overrides": use_holiday_overrides,
                         "operation_modes": modes,
                         "consec_exceptions": use_consec_exceptions,
+                        "default_holidays": rule_cfg.parameters.get("default_holiday_days", 8),
                         "max_consec_override": rule_cfg.parameters.get("max_consec_work", 5),
                         "time_limit_seconds": rule_cfg.parameters.get("solver_time_limit_seconds", 30),
                         "random_seed": rule_cfg.parameters.get("solver_seed", 42),
@@ -1744,6 +1858,8 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["preferred_work_requests"] = use_preferred_work_requests
                     if "preferred_consecutive_off" in generator_params:
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
+                    if "monthly_store_count_rules" in generator_params:
+                        generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
                     shift = generate_shift(**generation_kwargs)
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
@@ -1770,6 +1886,7 @@ if mode == "📊 経営者ビュー":
                         getattr(sub_data, "requested_holiday_days", {})
                     ),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
+                    "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
                     ),
@@ -1782,7 +1899,8 @@ if mode == "📊 経営者ビュー":
                 if shift is not None:
                     save_session_shift(shift)
                     try:
-                        backup_mgr.save_shift(
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
                             shift,
                             kind="draft",
                             author="自動保存",
@@ -1797,6 +1915,7 @@ if mode == "📊 経営者ビュー":
                         "work_requests": list(use_work_requests),
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
+                        "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     }
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
@@ -1978,16 +2097,20 @@ if mode == "📊 経営者ビュー":
                 cancel_lock = st.form_submit_button("キャンセル", width="stretch")
             if submit_lock and current_shift is not None:
                 # バックアップ保存
-                snapshot_path = backup_mgr.save_shift(
+                snapshot_path = save_shift_snapshot_with_github(
+                    backup_mgr,
                     current_shift, kind="finalized",
                     author=lock_author, note=lock_note,
                 )
                 # ロック登録
-                lock_mgr.lock(
+                lock_path = lock_mgr.lock(
                     year=int(target_year), month=int(target_month),
                     locked_by=lock_author,
                     snapshot_file=snapshot_path.name,
                     note=lock_note,
+                )
+                push_lock_file_to_github(
+                    lock_path, int(target_year), int(target_month), "lock",
                 )
                 st.success(f"✅ {int(target_year)}年{int(target_month)}月をロックしました")
                 st.session_state["show_lock_dialog"] = False
@@ -2009,7 +2132,23 @@ if mode == "📊 経営者ビュー":
             with col_b:
                 cancel_unlock = st.form_submit_button("キャンセル", width="stretch")
             if submit_unlock:
-                lock_mgr.unlock(int(target_year), int(target_month))
+                if lock_mgr.unlock(int(target_year), int(target_month)):
+                    try:
+                        archive_dir = lock_mgr.lock_dir / "archive"
+                        pattern = f"{int(target_year):04d}-{int(target_month):02d}_unlocked_*.json"
+                        archive_files = sorted(
+                            archive_dir.glob(pattern),
+                            key=lambda p: p.stat().st_mtime,
+                        )
+                        if archive_files:
+                            push_lock_file_to_github(
+                                archive_files[-1],
+                                int(target_year),
+                                int(target_month),
+                                "unlock",
+                            )
+                    except Exception:
+                        pass
                 st.success(f"✅ ロックを解除しました")
                 st.session_state["show_unlock_dialog"] = False
                 st.rerun()
@@ -2105,161 +2244,73 @@ if mode == "📊 経営者ビュー":
                 st.caption("赤枠の × は、本人が提出した「絶対休み」の希望です。")
 
             edit_ym = f"{int(shift.year):04d}_{int(shift.month):02d}"
-            inline_pending_key = f"inline_edit_pending_{edit_ym}"
+            inline_version_key = f"inline_shift_editor_version_{edit_ym}"
             inline_undo_key = f"inline_edit_undo_stack_{edit_ym}"
             inline_redo_key = f"inline_edit_redo_stack_{edit_ym}"
             inline_status_key = f"inline_edit_status_{edit_ym}"
-            if inline_pending_key not in st.session_state:
-                st.session_state[inline_pending_key] = {}
+            inline_autosave_key = f"inline_edit_autosave_signature_{edit_ym}"
+            if inline_version_key not in st.session_state:
+                st.session_state[inline_version_key] = 0
             if inline_undo_key not in st.session_state:
                 st.session_state[inline_undo_key] = []
             if inline_redo_key not in st.session_state:
                 st.session_state[inline_redo_key] = []
-            pending_symbol_changes = st.session_state[inline_pending_key]
-            inline_display_shift = apply_pending_symbol_changes(shift, pending_symbol_changes)
-            inline_changed_cells = set(pending_symbol_changes.keys())
             if st.session_state.get(inline_status_key):
                 st.success(st.session_state.pop(inline_status_key))
 
-            selected_edit_day = int(st.session_state.get(f"inline_edit_day_{edit_ym}", 1) or 1)
-            selected_edit_employee = st.session_state.get(
-                f"inline_edit_employee_{edit_ym}",
-                EXPORT_COLUMN_ORDER[0],
+            st.markdown("##### ✏️ シフト表を直接クリックして修正")
+            st.caption(
+                "セルをクリックすると、空白・×・各店舗記号を選べます。"
+                "変更は下の「変更を確定」を押すまで本シフトには保存されません。"
             )
-            cell_selected_from_table = False
-            try:
-                query_edit_ym = st.query_params.get("edit_ym", "")
-                query_edit_day = int(st.query_params.get("edit_day", selected_edit_day))
-                query_edit_employee = unquote(
-                    st.query_params.get("edit_employee", selected_edit_employee)
-                )
-                if (
-                    query_edit_ym == f"{int(shift.year):04d}-{int(shift.month):02d}"
-                    and 1 <= query_edit_day <= monthrange(shift.year, shift.month)[1]
-                    and query_edit_employee in EXPORT_COLUMN_ORDER
-                ):
-                    selected_edit_day = query_edit_day
-                    selected_edit_employee = query_edit_employee
-                    st.session_state[f"inline_edit_day_{edit_ym}"] = selected_edit_day
-                    st.session_state[f"inline_edit_employee_{edit_ym}"] = selected_edit_employee
-                    cell_selected_from_table = True
-                    for _param in ("edit_ym", "edit_day", "edit_employee"):
-                        if _param in st.query_params:
-                            del st.query_params[_param]
-            except Exception:
-                pass
-
-            # 人員不足日を計算
-            short_staff_by_store = detect_short_staff_by_store(inline_display_shift)
-            short_days = set(short_staff_by_store.keys())
-            if short_days:
-                short_day_text = format_short_staff_summary(inline_display_shift, short_staff_by_store)
-                st.warning(
-                    f"⚠ 人員不足の日: {short_day_text}"
-                    f"（黄色でハイライト・人員少欄に店舗別マーク表示）"
-                )
-
-            st.markdown("##### ✏️ シフト表の上で修正")
             with st.container(border=True):
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
-                edit_col1, edit_col2, edit_col3, edit_col4 = st.columns([1, 1, 1, 1])
-                days_in_shift = monthrange(shift.year, shift.month)[1]
-                with edit_col1:
-                    edit_day = st.selectbox(
-                        "日付",
-                        options=list(range(1, days_in_shift + 1)),
-                        index=max(0, min(days_in_shift - 1, selected_edit_day - 1)),
-                        format_func=lambda d: f"{d}日",
-                        key=f"inline_edit_day_{edit_ym}",
-                        disabled=lock_info is not None,
-                    )
-                with edit_col2:
-                    edit_employee = st.selectbox(
-                        "スタッフ",
-                        options=EXPORT_COLUMN_ORDER,
-                        index=EXPORT_COLUMN_ORDER.index(selected_edit_employee)
-                        if selected_edit_employee in EXPORT_COLUMN_ORDER else 0,
-                        key=f"inline_edit_employee_{edit_ym}",
-                        disabled=lock_info is not None,
-                    )
-                current_symbol = assignment_to_symbol(
-                    inline_display_shift.get_assignment(edit_employee, int(edit_day))
-                )
-                with edit_col3:
-                    next_symbol = st.selectbox(
-                        "変更先",
+                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER
+                editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
+                column_config = {
+                    "日": st.column_config.NumberColumn("日", width="small"),
+                    "曜": st.column_config.TextColumn("曜", width="small"),
+                }
+                for name in EXPORT_COLUMN_ORDER:
+                    column_config[name] = st.column_config.SelectboxColumn(
+                        name,
                         options=STORE_SYMBOL_OPTIONS,
-                        index=STORE_SYMBOL_OPTIONS.index(current_symbol)
-                        if current_symbol in STORE_SYMBOL_OPTIONS else 0,
-                        format_func=lambda s: s or "空白",
-                        key=f"inline_edit_symbol_{edit_ym}_{edit_day}_{edit_employee}",
-                        disabled=lock_info is not None,
+                        width="small",
+                        help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                     )
-                with edit_col4:
-                    st.caption(f"現在: {current_symbol or '空白'}")
-                    is_fixed_off_cell = (edit_employee, int(edit_day)) in _table_off_cells
-                    if is_fixed_off_cell:
-                        st.caption("本人×固定")
+                disabled_columns = ["日", "曜"]
+                if lock_info is not None:
+                    disabled_columns = editor_columns
 
-                btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 1, 1, 2])
-                quick_cols = st.columns(len(STORE_SYMBOL_OPTIONS))
-                for quick_col, symbol in zip(quick_cols, STORE_SYMBOL_OPTIONS):
-                    label = symbol or "空白"
-                    with quick_col:
-                        if st.button(
-                            label,
-                            key=f"inline_quick_{edit_ym}_{edit_day}_{edit_employee}_{symbol or 'blank'}",
-                            width="stretch",
-                            disabled=lock_info is not None,
-                        ):
-                            if (edit_employee, int(edit_day)) in _table_off_cells and symbol != "×":
-                                st.error("本人の×休み希望は変更できません。")
-                            else:
-                                before_symbol = assignment_to_symbol(
-                                    shift.get_assignment(edit_employee, int(edit_day))
-                                )
-                                key = (edit_employee, int(edit_day))
-                                if normalize_store_symbol(symbol) == before_symbol:
-                                    pending_symbol_changes.pop(key, None)
-                                else:
-                                    pending_symbol_changes[key] = normalize_store_symbol(symbol)
-                                st.session_state[inline_pending_key] = pending_symbol_changes
-                                st.rerun()
-                st.caption("日付とスタッフを選び、記号ボタンで変更します。下のシフト表とエラー表示は変更のたびに更新されます。")
-                with btn_col1:
-                    if st.button(
-                        "このセルを変更",
-                        key=f"inline_edit_change_{edit_ym}",
-                        type="primary",
-                        width="stretch",
-                        disabled=lock_info is not None,
-                    ):
-                        if (edit_employee, int(edit_day)) in _table_off_cells and next_symbol != "×":
-                            st.error("本人の×休み希望は変更できません。")
-                        else:
-                            before_symbol = assignment_to_symbol(
-                                shift.get_assignment(edit_employee, int(edit_day))
-                            )
-                            key = (edit_employee, int(edit_day))
-                            if normalize_store_symbol(next_symbol) == before_symbol:
-                                pending_symbol_changes.pop(key, None)
-                            else:
-                                pending_symbol_changes[key] = normalize_store_symbol(next_symbol)
-                            st.session_state[inline_pending_key] = pending_symbol_changes
-                            st.rerun()
-                with btn_col2:
-                    if st.button(
-                        "このセルを戻す",
-                        key=f"inline_edit_revert_cell_{edit_ym}",
-                        width="stretch",
-                        disabled=lock_info is not None
-                        or (edit_employee, int(edit_day)) not in pending_symbol_changes,
-                    ):
-                        pending_symbol_changes.pop((edit_employee, int(edit_day)), None)
-                        st.session_state[inline_pending_key] = pending_symbol_changes
-                        st.rerun()
+                edited_value = st.data_editor(
+                    editor_df,
+                    key=f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}",
+                    hide_index=True,
+                    width="stretch",
+                    height=620,
+                    num_rows="fixed",
+                    column_config=column_config,
+                    disabled=disabled_columns,
+                )
+                edited_records = editor_rows_to_records(edited_value)
+                if not edited_records:
+                    edited_records = shift_to_editor_rows(shift)
+
+                inline_changed_cells = get_editor_changed_cells(shift, edited_records)
+                inline_display_shift = editor_rows_to_shift(shift, edited_records)
+                fixed_off_violations = get_fixed_off_edit_violations(
+                    edited_records, _table_off_cells,
+                )
+                short_staff_by_store = detect_short_staff_by_store(inline_display_shift)
+                short_days = set(short_staff_by_store.keys())
+                if short_days:
+                    short_day_text = format_short_staff_summary(inline_display_shift, short_staff_by_store)
+                    st.warning(
+                        f"⚠ 人員不足の日: {short_day_text}"
+                        "（黄色でハイライト・人員少欄に店舗別マーク表示）"
+                    )
 
                 inline_result = validate(
                     shift=inline_display_shift,
@@ -2268,16 +2319,58 @@ if mode == "📊 経営者ビュー":
                     prev_month=_table_validation_context.get("prev_month", []),
                     holiday_overrides=_table_validation_context.get("holiday_overrides", {}),
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                    monthly_store_count_rules=_table_validation_context.get("monthly_store_count_rules", []),
                 )
-                fixed_off_violations = [
-                    f"{employee}さん {day}日"
-                    for (employee, day), symbol in pending_symbol_changes.items()
-                    if (employee, day) in _table_off_cells and symbol != "×"
-                ]
-                with btn_col3:
+
+                if inline_changed_cells and lock_info is None:
+                    autosave_signature = json.dumps(
+                        [
+                            [
+                                employee,
+                                day,
+                                assignment_to_symbol(
+                                    inline_display_shift.get_assignment(employee, day)
+                                ),
+                            ]
+                            for employee, day in sorted(inline_changed_cells)
+                        ],
+                        ensure_ascii=False,
+                    )
+                    if st.session_state.get(inline_autosave_key) != autosave_signature:
+                        try:
+                            save_shift_snapshot_with_github(
+                                backup_mgr,
+                                inline_display_shift,
+                                kind="draft",
+                                author="手動修正",
+                                note=f"編集中の自動保存（未確定・{len(inline_changed_cells)}件）",
+                            )
+                            st.session_state[inline_autosave_key] = autosave_signature
+                        except Exception:
+                            pass
+
+                state_col1, state_col2, state_col3, state_col4 = st.columns(4)
+                state_col1.metric("編集中の変更", len(inline_changed_cells))
+                state_col2.metric("エラー", inline_result.error_count, delta_color="inverse")
+                state_col3.metric("警告", inline_result.warning_count, delta_color="inverse")
+                state_col4.metric("人員不足日", len(short_staff_by_store), delta_color="inverse")
+
+                if fixed_off_violations:
+                    st.error(
+                        "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
+                        + "、".join(fixed_off_violations)
+                        + "。確定するには×へ戻してください。"
+                    )
+                elif inline_result.error_count == 0:
+                    st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
+                else:
+                    st.error("エラーが残っています。下の詳細を確認して修正してください。")
+
+                btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 1, 1, 2])
+                with btn_col1:
                     apply_disabled = (
                         lock_info is not None
-                        or not pending_symbol_changes
+                        or not inline_changed_cells
                         or bool(fixed_off_violations)
                         or inline_result.error_count > 0
                     )
@@ -2292,68 +2385,114 @@ if mode == "📊 経営者ビュー":
                         st.session_state[inline_undo_key] = st.session_state[inline_undo_key][-20:]
                         st.session_state[inline_redo_key] = []
                         save_session_shift(inline_display_shift)
-                        try:
-                            backup_mgr.save_shift(
-                                inline_display_shift,
-                                kind="draft",
-                                author="手動修正",
-                                note=f"シフト表画面で{len(pending_symbol_changes)}件変更",
-                            )
-                        except Exception:
-                            pass
-                        st.session_state[inline_pending_key] = {}
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=inline_display_shift,
+                            changed_cells=inline_changed_cells,
+                            actor="手動修正",
+                            reason="シフト表直接編集",
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            inline_display_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note=f"シフト表直接編集で{len(inline_changed_cells)}件変更",
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
                         st.session_state.pop("chat_engine", None)
                         st.session_state.pop("chat_shift_id", None)
-                        st.session_state[inline_status_key] = f"{len(pending_symbol_changes)}件の変更を確定しました。"
+                        st.session_state[inline_status_key] = f"{len(inline_changed_cells)}件の変更を確定しました。"
                         st.rerun()
-                with btn_col4:
+                with btn_col2:
                     if st.button(
                         "変更を破棄",
                         key=f"inline_edit_discard_{edit_ym}",
                         width="stretch",
-                        disabled=lock_info is not None or not pending_symbol_changes,
+                        disabled=not inline_changed_cells,
                     ):
-                        st.session_state[inline_pending_key] = {}
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
                         st.session_state[inline_status_key] = "編集中の変更を破棄しました。"
                         st.rerun()
+                with btn_col3:
+                    if st.button(
+                        "← 戻る",
+                        key=f"inline_edit_undo_{edit_ym}",
+                        width="stretch",
+                        disabled=lock_info is not None or not st.session_state[inline_undo_key],
+                    ):
+                        previous_shift = st.session_state[inline_undo_key].pop()
+                        st.session_state[inline_redo_key].append(clone_monthly_shift(shift))
+                        undo_cells = get_editor_changed_cells(shift, shift_to_editor_rows(previous_shift))
+                        save_session_shift(previous_shift)
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=previous_shift,
+                            changed_cells=undo_cells,
+                            actor="手動修正",
+                            reason="戻る",
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            previous_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note="戻るでシフトを復元",
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop("chat_engine", None)
+                        st.session_state.pop("chat_shift_id", None)
+                        st.session_state[inline_status_key] = "直前の変更を元に戻しました。"
+                        st.rerun()
+                with btn_col4:
+                    if st.button(
+                        "進む →",
+                        key=f"inline_edit_redo_{edit_ym}",
+                        width="stretch",
+                        disabled=lock_info is not None or not st.session_state[inline_redo_key],
+                    ):
+                        next_shift = st.session_state[inline_redo_key].pop()
+                        st.session_state[inline_undo_key].append(clone_monthly_shift(shift))
+                        redo_cells = get_editor_changed_cells(shift, shift_to_editor_rows(next_shift))
+                        save_session_shift(next_shift)
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=next_shift,
+                            changed_cells=redo_cells,
+                            actor="手動修正",
+                            reason="進む",
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            next_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note="進むでシフトを再反映",
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop("chat_engine", None)
+                        st.session_state.pop("chat_shift_id", None)
+                        st.session_state[inline_status_key] = "元に戻した変更をもう一度反映しました。"
+                        st.rerun()
                 with btn_col5:
-                    undo_col, redo_col = st.columns(2)
-                    with undo_col:
-                        if st.button(
-                            "← 戻る",
-                            key=f"inline_edit_undo_{edit_ym}",
-                            width="stretch",
-                            disabled=lock_info is not None or not st.session_state[inline_undo_key],
-                        ):
-                            previous_shift = st.session_state[inline_undo_key].pop()
-                            st.session_state[inline_redo_key].append(clone_monthly_shift(shift))
-                            st.session_state[inline_pending_key] = {}
-                            save_session_shift(previous_shift)
-                            st.session_state[inline_status_key] = "直前の変更を元に戻しました。"
-                            st.rerun()
-                    with redo_col:
-                        if st.button(
-                            "進む →",
-                            key=f"inline_edit_redo_{edit_ym}",
-                            width="stretch",
-                            disabled=lock_info is not None or not st.session_state[inline_redo_key],
-                        ):
-                            next_shift = st.session_state[inline_redo_key].pop()
-                            st.session_state[inline_undo_key].append(clone_monthly_shift(shift))
-                            st.session_state[inline_pending_key] = {}
-                            save_session_shift(next_shift)
-                            st.session_state[inline_status_key] = "元に戻した変更をもう一度反映しました。"
-                            st.rerun()
+                    if inline_changed_cells:
+                        st.caption("緑枠のセルが、現在編集中の変更です。")
+                    else:
+                        st.caption("まだ変更はありません。")
 
-                state_col1, state_col2, state_col3 = st.columns(3)
-                state_col1.metric("編集中の変更", len(pending_symbol_changes))
-                state_col2.metric("エラー", inline_result.error_count, delta_color="inverse")
-                state_col3.metric("警告", inline_result.warning_count, delta_color="inverse")
-                if fixed_off_violations:
-                    st.error(
-                        "本人の×休み希望を変更しようとしているセルがあります: "
-                        + "、".join(fixed_off_violations)
-                    )
                 if inline_result.error_count > 0 or inline_result.warning_count > 0:
                     with st.expander(
                         f"エラー・警告の詳細（{inline_result.error_count + inline_result.warning_count}件）",
@@ -2363,9 +2502,11 @@ if mode == "📊 経営者ビュー":
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
 
+            st.markdown("##### 表示確認")
             render_shift_table(
                 inline_display_shift,
                 short_staff_by_store=short_staff_by_store,
+                sticky=True,
                 off_request_cells=_table_off_cells,
                 changed_cells=inline_changed_cells,
                 changed_cell_color="#16a34a",
@@ -2461,6 +2602,7 @@ if mode == "📊 経営者ビュー":
                 prev_month=validation_context.get("prev_month", []),
                 holiday_overrides=validation_context.get("holiday_overrides", {}),
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                monthly_store_count_rules=validation_context.get("monthly_store_count_rules", []),
             )
             edit_short_staff_by_store = detect_short_staff_by_store(edited_shift)
 
@@ -2503,8 +2645,19 @@ if mode == "📊 経営者ビュー":
                     st.session_state[undo_key] = st.session_state[undo_key][-20:]
                     st.session_state[redo_key] = []
                     save_session_shift(edited_shift)
+                    record_edit_history_with_github(
+                        backup_mgr,
+                        shift.year,
+                        shift.month,
+                        before_shift=before_shift,
+                        after_shift=edited_shift,
+                        changed_cells=changed_cells,
+                        actor="手動修正",
+                        reason="クリック編集",
+                    )
                     try:
-                        backup_mgr.save_shift(
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
                             edited_shift,
                             kind="draft",
                             author="手動修正",
@@ -2600,6 +2753,7 @@ if mode == "📊 経営者ビュー":
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                monthly_store_count_rules=_validation_context.get("monthly_store_count_rules", []),
             )
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("エラー", result.error_count, delta_color="inverse")
@@ -2710,7 +2864,9 @@ if mode == "📊 経営者ビュー":
             if st.button("バックアップ保存", key="save_backup"):
                 backup = ShiftBackup()
                 kind = "finalized" if note else "draft"
-                path = backup.save_shift(shift, kind=kind, author="代表取締役", note=note)
+                path = save_shift_snapshot_with_github(
+                    backup, shift, kind=kind, author="代表取締役", note=note,
+                )
                 st.success(f"✅ バックアップ保存: {path.name}")
 
         elif selected_shift_view == "💬 AI相談":
@@ -2756,7 +2912,8 @@ if mode == "📊 経営者ビュー":
 
                 def _save_chat_shift_snapshot(note: str) -> None:
                     try:
-                        backup_mgr.save_shift(
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
                             chat_engine.shift,
                             kind="draft",
                             author="AI対話",
@@ -2884,16 +3041,19 @@ if mode == "📊 経営者ビュー":
                     _cv_off = _cv_inputs.get("off_requests", {})
                     _cv_prev = _cv_inputs.get("prev_month", [])
                     _cv_holiday = _cv_inputs.get("holiday_overrides", {})
+                    _cv_monthly_rules = _cv_inputs.get("monthly_store_count_rules", [])
                 else:
                     _cv_work = []
                     _cv_off = {}
                     _cv_prev = []
                     _cv_holiday = {}
+                    _cv_monthly_rules = []
                 chat_result = validate(
                     shift=display_shift, work_requests=_cv_work,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                    monthly_store_count_rules=_cv_monthly_rules,
                 )
                 short_staff_by_store_chat = detect_short_staff_by_store(display_shift)
                 short_days_chat = set(short_staff_by_store_chat.keys())
@@ -3929,6 +4089,12 @@ elif mode == "⚙️ 設定":
                 severity=rule.severity,
                 created_at=rule.created_at,
                 created_by=rule.created_by,
+                target_year=rule.target_year,
+                target_month=rule.target_month,
+                rule_type=rule.rule_type,
+                employee=rule.employee,
+                stores=list(rule.stores),
+                count=rule.count,
             )
 
         def _sync_rule_widgets(source_cfg: RuleConfig) -> None:
@@ -4058,9 +4224,9 @@ elif mode == "⚙️ 設定":
             _rule_row(
                 "連勤・休日", "既定の月内最低休日数",
                 f"現在の本設定: {cfg.parameters.get('default_holiday_days', 8)}日。",
-                "未接続", "未接続", "設定保存のみ",
-                "この画面で変更可", "未接続",
-                "現状はコード側の既定値が使われています。",
+                "反映中", "反映中", "検証結果に表示",
+                "この画面で変更可", "反映中",
+                "個別指定がないスタッフの最低休日数として使います。",
             ),
             _rule_row(
                 "連勤・休日", "2連休の最低・最大回数",
@@ -4116,8 +4282,8 @@ elif mode == "⚙️ 設定":
             _rule_row(
                 "スタッフ別", "メイン店舗以外への月3日勤務",
                 "楯さん・春山さん・長尾さんは月3日、自分のメイン店舗以外で勤務する。",
-                "未接続", "未接続", "メモのみ",
-                "月次ルール候補", "未接続",
+                "反映中", "反映中", "検証結果に表示",
+                "コード固定", "反映中",
             ),
             _rule_row(
                 "スタッフ別", "在勤要望（強・中・弱）",
@@ -4147,8 +4313,8 @@ elif mode == "⚙️ 設定":
             _rule_row(
                 "月次ルール", "月ごとの追加条件",
                 "研修・一時的な店舗移動・例外スタッフなど、その月だけの条件を追加する考え方。",
-                "未接続", "未接続", "カスタムルールにメモ保存可",
-                "今後追加予定", "未接続",
+                "反映中", "反映中", "カスタムルールに保存",
+                "この画面で変更可", "反映中",
                 "例: 6月は牧野さんを研修のため大宮西口または赤羽東口に3回。",
             ),
             _rule_row(
@@ -4179,9 +4345,9 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "設定画面", "カスタムルール",
-                "自然言語のメモとして保存。まだ生成・検証には使わない。",
-                "未接続", "未接続", "ルール変更履歴に記録",
-                "この画面で変更可", "表示/メモ",
+                "メモ保存に加えて、月別の指定店舗回数ルールは生成・検証に反映する。",
+                "一部反映", "一部反映", "ルール変更履歴に記録",
+                "この画面で変更可", "一部反映",
             ),
         ]
 
@@ -4352,9 +4518,9 @@ elif mode == "⚙️ 設定":
         st.markdown("---")
         st.markdown("#### ➕ カスタムルール")
         st.info(
-            "💡 **このセクションは安全です**：カスタムルールは現在「メモ」として記録されるだけで、"
-            "シフト生成・検証ロジックには影響しません。**追加・変更・削除でバグや停止は起こりません。**"
-            "将来的に検証ロジックに連動させたい場合は、技術者にご相談ください。"
+            "💡 カスタムルールは2種類あります。"
+            "「メモのみ」は記録用、"
+            "「月別: スタッフを指定店舗へ回数配置」はシフト生成・検証に反映されます。"
         )
 
         added_rule_objs = [
@@ -4373,13 +4539,26 @@ elif mode == "⚙️ 設定":
                 rule_col1, rule_col2, rule_col3 = st.columns([5, 1, 1])
                 with rule_col1:
                     badge = "仮追加" if rule.id in added_ids else "本設定"
+                    type_label = "月別配置" if rule.rule_type == "employee_store_count" else "メモ"
+                    monthly_detail = ""
+                    if rule.rule_type == "employee_store_count":
+                        store_text = "・".join(rule.stores) if rule.stores else "店舗未指定"
+                        month_text = (
+                            f"{rule.target_year or '-'}年{rule.target_month or '-'}月"
+                        )
+                        monthly_detail = (
+                            f'<br><span style="font-size:12px; color:#4b5563;">'
+                            f'対象: {month_text} / {rule.employee or "スタッフ未指定"} / '
+                            f'{store_text} / {rule.count}回以上</span><br>'
+                        )
                     st.markdown(
                         f'<div style="padding:8px; border-left:3px solid #6366f1; '
                         f'background:#f5f3ff; border-radius:4px;">'
                         f'<strong>{rule.name}</strong> '
                         f'<span style="font-size:11px; color:#6b7280;">'
-                        f'({rule.severity} / {badge})</span><br>'
+                        f'({type_label} / {rule.severity} / {badge})</span><br>'
                         f'<span style="font-size:13px;">{rule.description}</span><br>'
+                        f'{monthly_detail}'
                         f'<span style="font-size:11px; color:#9ca3af;">'
                         f'追加: {rule.created_at[:10]} by {rule.created_by}</span>'
                         f'</div>',
@@ -4408,12 +4587,56 @@ elif mode == "⚙️ 設定":
         # 新規ルールの追加フォーム
         with st.expander("➕ 新しいカスタムルールを追加", expanded=False):
             with st.form("add_rule_form", clear_on_submit=True):
+                rule_kind = st.selectbox(
+                    "種類",
+                    options=["メモのみ", "月別: スタッフを指定店舗へ回数配置"],
+                    help="月別配置ルールは、対象年月のシフト生成・検証に反映されます。",
+                )
                 rule_name = st.text_input("ルール名", placeholder="例: 楯さんは日曜休み優先")
                 rule_desc = st.text_area(
                     "詳細",
                     placeholder="例: 楯さんは家族の事情で日曜休み優先で組む",
                     height=80,
                 )
+                rule_target_year = None
+                rule_target_month = None
+                rule_employee = ""
+                rule_stores = []
+                rule_count = 0
+                if rule_kind == "月別: スタッフを指定店舗へ回数配置":
+                    st.caption("例: 2026年6月、牧野さんを赤羽東口店または大宮西口店へ3回以上配置。")
+                    ym_col1, ym_col2 = st.columns(2)
+                    with ym_col1:
+                        rule_target_year = int(st.number_input(
+                            "対象年",
+                            min_value=2026,
+                            max_value=2035,
+                            value=int(st.session_state.get("target_year", date.today().year)),
+                        ))
+                    with ym_col2:
+                        rule_target_month = int(st.number_input(
+                            "対象月",
+                            min_value=1,
+                            max_value=12,
+                            value=int(st.session_state.get("target_month", date.today().month)),
+                        ))
+                    store_options = [s.name for s in Store if s != Store.OFF]
+                    store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
+                    rule_employee = st.selectbox(
+                        "対象スタッフ",
+                        options=shift_submission_employee_names(),
+                    )
+                    rule_stores = st.multiselect(
+                        "対象店舗",
+                        options=store_options,
+                        format_func=lambda name: store_labels.get(name, name),
+                    )
+                    rule_count = int(st.number_input(
+                        "月内の最低回数",
+                        min_value=1,
+                        max_value=31,
+                        value=3,
+                    ))
                 rule_severity = st.selectbox(
                     "重要度",
                     options=["WARNING", "ERROR"],
@@ -4421,13 +4644,22 @@ elif mode == "⚙️ 設定":
                 )
                 rule_actor = st.text_input("追加者", value="代表取締役")
                 if st.form_submit_button("追加", type="primary"):
-                    if rule_name and rule_desc:
+                    is_monthly_count = rule_kind == "月別: スタッフを指定店舗へ回数配置"
+                    if is_monthly_count and (not rule_employee or not rule_stores or not rule_count):
+                        st.error("月別配置ルールは、スタッフ・対象店舗・回数を入力してください。")
+                    elif rule_name and rule_desc:
                         new_rule = CustomRule(
                             id=f"custom_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                             name=rule_name, description=rule_desc,
                             severity=rule_severity, enabled=True,
                             created_at=datetime.now().isoformat(),
                             created_by=rule_actor,
+                            target_year=rule_target_year,
+                            target_month=rule_target_month,
+                            rule_type="employee_store_count" if is_monthly_count else "note",
+                            employee=rule_employee,
+                            stores=rule_stores,
+                            count=rule_count,
                         )
                         st.session_state["rule_added_custom_rules"] = (
                             st.session_state.get("rule_added_custom_rules", [])
@@ -4439,6 +4671,12 @@ elif mode == "⚙️ 設定":
                                 "severity": new_rule.severity,
                                 "created_at": new_rule.created_at,
                                 "created_by": new_rule.created_by,
+                                "target_year": new_rule.target_year,
+                                "target_month": new_rule.target_month,
+                                "rule_type": new_rule.rule_type,
+                                "employee": new_rule.employee,
+                                "stores": new_rule.stores,
+                                "count": new_rule.count,
                             }]
                         )
                         st.session_state["rule_apply_confirm"] = False
@@ -4501,6 +4739,12 @@ elif mode == "⚙️ 設定":
                         disabled=has_setting_error,
                     ):
                         changes = rule_mgr.save(draft_cfg, actor=save_actor, note=save_note)
+                        if changes:
+                            try:
+                                from prototype.github_backup import push_config_to_github
+                                push_config_to_github("rule_config", draft_cfg.to_dict())
+                            except Exception:
+                                pass
                         st.session_state["rule_apply_confirm"] = False
                         st.session_state["rule_added_custom_rules"] = []
                         st.session_state["rule_deleted_ids"] = []
