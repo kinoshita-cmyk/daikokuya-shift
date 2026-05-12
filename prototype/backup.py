@@ -237,6 +237,54 @@ class ShiftBackup:
         month_dir = self._get_month_dir(year, month)
         submission_map: dict[str, dict] = {}  # 従業員名 → 最新の提出情報
 
+        def _safe_days(values) -> list[int]:
+            days = []
+            if values is None:
+                return days
+            if isinstance(values, (str, int)):
+                values = [values]
+            if isinstance(values, dict):
+                values = values.values()
+            for value in values:
+                if isinstance(value, dict):
+                    for key in ("day", "日", "date"):
+                        if str(value.get(key, "")).isdigit():
+                            days.append(int(value[key]))
+                            break
+                    continue
+                if str(value).isdigit():
+                    days.append(int(value))
+            return sorted(set(days))
+
+        def _extract_employee_days(raw, author: str) -> list[int]:
+            if isinstance(raw, dict):
+                if author in raw:
+                    return _safe_days(raw.get(author))
+                if "employee" in raw and raw.get("employee") != author:
+                    return []
+                for key in ("days", "candidate_days", "off_requests", "work_requests"):
+                    if key in raw:
+                        return _safe_days(raw.get(key))
+                # 旧データで従業員名キーが別表記の場合に備え、値をまとめて拾う
+                combined = []
+                for value in raw.values():
+                    combined.extend(_safe_days(value))
+                return sorted(set(combined))
+            if isinstance(raw, list):
+                days = []
+                for item in raw:
+                    if isinstance(item, dict):
+                        if item.get("employee") and item.get("employee") != author:
+                            continue
+                        days.extend(_extract_employee_days(item, author))
+                    elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                        if item[0] == author:
+                            days.extend(_safe_days(item[1:]))
+                    else:
+                        days.extend(_safe_days([item]))
+                return sorted(set(days))
+            return _safe_days(raw)
+
         # 提出ファイルを走査して、各従業員の最新提出を取得
         for file in sorted(month_dir.glob("preferences_*.json")):
             try:
@@ -250,27 +298,15 @@ class ShiftBackup:
                 if (author not in submission_map
                         or saved_at > submission_map[author].get("submitted_at", "")):
                     # off_requestsの中身を集計（提出内容のサマリー）
-                    off_count = sum(
-                        len(v) for v in data.get("off_requests", {}).values()
-                    )
-                    off_days = []
                     off_requests = data.get("off_requests", {})
-                    if isinstance(off_requests, dict):
-                        off_days = list(off_requests.get(author, []))
+                    off_days = _extract_employee_days(off_requests, author)
+                    off_count = len(off_days)
                     flex_items = data.get("flexible_off", [])
-                    flex_count = len(flex_items)
-                    flexible_days = []
-                    for item in flex_items:
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get("employee") == author:
-                            flexible_days.extend(item.get("candidate_days", []))
-                    work_request_days = []
-                    for item in data.get("work_requests", []):
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get("employee") == author:
-                            work_request_days.append(item.get("day"))
+                    flexible_days = _extract_employee_days(flex_items, author)
+                    flex_count = len(flexible_days)
+                    work_request_days = _extract_employee_days(
+                        data.get("work_requests", []), author
+                    )
                     note_text = ""
                     notes = data.get("natural_language_notes", {})
                     if isinstance(notes, dict):
@@ -280,16 +316,10 @@ class ShiftBackup:
                         "submitted_at": saved_at,
                         "file": file.name,
                         "off_request_count": off_count,
-                        "off_request_days": sorted(
-                            int(d) for d in off_days if str(d).isdigit()
-                        ),
+                        "off_request_days": off_days,
                         "flexible_off_count": flex_count,
-                        "flexible_off_days": sorted(
-                            int(d) for d in flexible_days if str(d).isdigit()
-                        ),
-                        "work_request_days": sorted(
-                            int(d) for d in work_request_days if str(d).isdigit()
-                        ),
+                        "flexible_off_days": flexible_days,
+                        "work_request_days": work_request_days,
                         "paid_leave_days": int(data.get("paid_leave_days", 0) or 0),
                         "has_note": bool(note_text and note_text.strip()),
                         "note": note_text,
