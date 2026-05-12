@@ -88,13 +88,13 @@
       "station_type": "流動",
       "affinities": {
         "OMIYA": "強",
-        "HIGASHIGUCHI": "弱",
-        "NISHIGUCHI": "不可",
+        "HIGASHIGUCHI": "不可",
+        "NISHIGUCHI": "弱",
         "AKABANE": "不可",
         "SUZURAN": "不可"
       },
       "annual_target_days": 268,
-      "notes": "大宮強、月3回東口（楯+牧野・春山+牧野・長尾+牧野の組み合わせ）、西口不可",
+      "notes": "大宮強。東口1名体制は当面不可。月次ルールで西口研修配置の候補",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
