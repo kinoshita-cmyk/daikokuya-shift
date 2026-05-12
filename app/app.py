@@ -25,6 +25,7 @@ sys.path.insert(0, str(_PROJECT_ROOT))   # for: from prototype.X import Y
 sys.path.insert(0, str(_THIS_DIR))       # for: from auth import Z
 
 import streamlit as st
+import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
 
@@ -368,6 +369,7 @@ def render_shift_table(
     sticky: bool = False,
     changed_cells: Optional[set[tuple[str, int]]] = None,
     off_request_cells: Optional[set[tuple[str, int]]] = None,
+    changed_cell_color: str = "#f97316",
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -487,7 +489,7 @@ def render_shift_table(
                 cell_text = a.store.value
                 cell_bg = color_map.get(cell_text, "white")
             changed_style = (
-                "box-shadow:inset 0 0 0 3px #f97316; font-weight:bold;"
+                f"box-shadow:inset 0 0 0 3px {changed_cell_color}; font-weight:bold;"
                 if (name, d) in changed_cells else ""
             )
             off_request_style = (
@@ -523,6 +525,160 @@ def get_session_shift() -> Optional[MonthlyShift]:
 def save_session_shift(shift: MonthlyShift) -> None:
     """シフトをセッションに保存"""
     st.session_state["current_shift"] = shift
+
+
+STORE_SYMBOL_OPTIONS = ["", "×", "○", "□", "△", "☆", "◆"]
+STORE_SYMBOL_TO_STORE = {
+    "×": Store.OFF,
+    "○": Store.AKABANE,
+    "□": Store.HIGASHIGUCHI,
+    "△": Store.OMIYA,
+    "☆": Store.NISHIGUCHI,
+    "◆": Store.SUZURAN,
+}
+
+
+def clone_monthly_shift(shift: MonthlyShift) -> MonthlyShift:
+    """シフトを編集履歴用にコピーする。"""
+    return MonthlyShift(
+        year=shift.year,
+        month=shift.month,
+        assignments=[
+            ShiftAssignment(
+                employee=a.employee,
+                day=a.day,
+                store=a.store,
+                is_paid_leave=a.is_paid_leave,
+            )
+            for a in shift.assignments
+        ],
+        operation_modes=dict(shift.operation_modes),
+    )
+
+
+def assignment_to_symbol(assignment: Optional[ShiftAssignment]) -> str:
+    """配属を表の記号に変換する。"""
+    if assignment is None:
+        return ""
+    return assignment.store.value
+
+
+def normalize_store_symbol(value) -> str:
+    """編集表の値を安全な店舗記号に丸める。"""
+    if value is None:
+        return ""
+    symbol = str(value).strip()
+    return symbol if symbol in STORE_SYMBOL_OPTIONS else ""
+
+
+def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
+    """シフトを編集表用の行データに変換する。"""
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    rows = []
+    for day in range(1, days_in_month + 1):
+        row = {
+            "日": day,
+            "曜": weekday_jp[date(shift.year, shift.month, day).weekday()],
+        }
+        for name in EXPORT_COLUMN_ORDER:
+            row[name] = assignment_to_symbol(shift.get_assignment(name, day))
+        rows.append(row)
+    return rows
+
+
+def editor_rows_to_records(editor_value) -> list[dict]:
+    """st.data_editor の戻り値を list[dict] に揃える。"""
+    if hasattr(editor_value, "to_dict"):
+        return editor_value.to_dict("records")
+    if isinstance(editor_value, list):
+        return editor_value
+    return []
+
+
+def editor_rows_to_shift(base_shift: MonthlyShift, rows: list[dict]) -> MonthlyShift:
+    """編集表の内容からプレビュー用シフトを作る。"""
+    visible_names = set(EXPORT_COLUMN_ORDER)
+    updated = MonthlyShift(
+        year=base_shift.year,
+        month=base_shift.month,
+        operation_modes=dict(base_shift.operation_modes),
+    )
+    updated.assignments = [
+        ShiftAssignment(
+            employee=a.employee,
+            day=a.day,
+            store=a.store,
+            is_paid_leave=a.is_paid_leave,
+        )
+        for a in base_shift.assignments
+        if a.employee not in visible_names
+    ]
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            symbol = normalize_store_symbol(row.get(name, ""))
+            if not symbol:
+                continue
+            store = STORE_SYMBOL_TO_STORE[symbol]
+            updated.assignments.append(ShiftAssignment(employee=name, day=day, store=store))
+    return updated
+
+
+def get_editor_changed_cells(base_shift: MonthlyShift, rows: list[dict]) -> set[tuple[str, int]]:
+    """編集表で変更されたセルを返す。"""
+    changed = set()
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            before = assignment_to_symbol(base_shift.get_assignment(name, day))
+            after = normalize_store_symbol(row.get(name, ""))
+            if before != after:
+                changed.add((name, day))
+    return changed
+
+
+def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
+    """生成時に使った希望データを、対象シフトに合う場合だけ返す。"""
+    inputs = st.session_state.get("last_validation_inputs", {})
+    if inputs.get("ym") != f"{int(shift.year):04d}-{int(shift.month):02d}":
+        return {
+            "work_requests": [],
+            "off_requests": {},
+            "prev_month": [],
+            "holiday_overrides": {},
+        }
+    return {
+        "work_requests": inputs.get("work_requests", []),
+        "off_requests": inputs.get("off_requests", {}),
+        "prev_month": inputs.get("prev_month", []),
+        "holiday_overrides": inputs.get("holiday_overrides", {}),
+    }
+
+
+def get_fixed_off_edit_violations(
+    rows: list[dict],
+    off_request_cells: set[tuple[str, int]],
+) -> list[str]:
+    """本人の×希望を別記号へ変えていないか確認する。"""
+    violations = []
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            if (name, day) not in off_request_cells:
+                continue
+            if normalize_store_symbol(row.get(name, "")) != "×":
+                violations.append(f"{name}さん {day}日")
+    return violations
 
 
 def format_day_list(days: list[int] | set[int] | tuple[int, ...]) -> str:
@@ -1513,7 +1669,7 @@ if mode == "📊 経営者ビュー":
         shift = None
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
-        shift_view_options = ["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI対話"]
+        shift_view_options = ["📋 シフト表", "✏️ シフト修正", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI相談"]
         selected_shift_view = st.radio(
             "表示切替",
             options=shift_view_options,
@@ -1593,24 +1749,213 @@ if mode == "📊 経営者ビュー":
             st.session_state["excel_footer"] = footer_text
 
         elif selected_shift_view == shift_view_options[1]:
-            # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
-            _vi = st.session_state.get("last_validation_inputs", {})
-            _vi_match = (
-                _vi.get("ym")
-                == f"{int(shift.year):04d}-{int(shift.month):02d}"
+            st.markdown("##### ✏️ シフト修正")
+            st.caption(
+                "表のセルをクリックして、空白・休み・各店舗を選びます。"
+                "本人が提出した×は赤枠で固定扱いです。変更中のセルは下のプレビュー表で緑枠になります。"
             )
-            if _vi_match:
-                _v_work = _vi.get("work_requests", [])
-                _v_off = _vi.get("off_requests", {})
-                _v_prev = _vi.get("prev_month", [])
-                _v_holiday = _vi.get("holiday_overrides", {})
+
+            validation_context = get_validation_context_for_shift(shift)
+            off_request_cells = build_off_request_cells(
+                validation_context.get("off_requests", {})
+            )
+            if off_request_cells:
+                st.info("赤枠の×は、本人が提出した「絶対休み」です。ここは勤務へ変更できません。")
+            if lock_info is not None:
+                st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
+
+            edit_ym = f"{int(shift.year):04d}_{int(shift.month):02d}"
+            version_key = f"manual_edit_version_{edit_ym}"
+            undo_key = f"manual_edit_undo_{edit_ym}"
+            redo_key = f"manual_edit_redo_{edit_ym}"
+            status_key = f"manual_edit_status_{edit_ym}"
+            if version_key not in st.session_state:
+                st.session_state[version_key] = 0
+            if undo_key not in st.session_state:
+                st.session_state[undo_key] = []
+            if redo_key not in st.session_state:
+                st.session_state[redo_key] = []
+            if st.session_state.get(status_key):
+                st.success(st.session_state.pop(status_key))
+
+            editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER
+            editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
+            column_config = {
+                "日": st.column_config.NumberColumn("日", width="small"),
+                "曜": st.column_config.TextColumn("曜", width="small"),
+            }
+            for name in EXPORT_COLUMN_ORDER:
+                column_config[name] = st.column_config.SelectboxColumn(
+                    name,
+                    options=STORE_SYMBOL_OPTIONS,
+                    width="small",
+                    help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
+                )
+            disabled_columns = ["日", "曜"]
+            if lock_info is not None:
+                disabled_columns = editor_columns
+
+            edited_value = st.data_editor(
+                editor_df,
+                key=f"manual_shift_editor_{edit_ym}_{st.session_state[version_key]}",
+                hide_index=True,
+                width="stretch",
+                height=620,
+                num_rows="fixed",
+                column_config=column_config,
+                disabled=disabled_columns,
+            )
+            edited_records = editor_rows_to_records(edited_value)
+            if not edited_records:
+                edited_records = shift_to_editor_rows(shift)
+
+            changed_cells = get_editor_changed_cells(shift, edited_records)
+            edited_shift = editor_rows_to_shift(shift, edited_records)
+            fixed_off_violations = get_fixed_off_edit_violations(
+                edited_records, off_request_cells,
+            )
+
+            edit_result = validate(
+                shift=edited_shift,
+                work_requests=validation_context.get("work_requests", []),
+                off_requests=validation_context.get("off_requests", {}),
+                prev_month=validation_context.get("prev_month", []),
+                holiday_overrides=validation_context.get("holiday_overrides", {}),
+                max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+            )
+            edit_short_staff_by_store = detect_short_staff_by_store(edited_shift)
+
+            st.markdown("##### 編集中の状態")
+            state_col1, state_col2, state_col3, state_col4 = st.columns(4)
+            state_col1.metric("変更セル", len(changed_cells))
+            state_col2.metric("エラー", edit_result.error_count, delta_color="inverse")
+            state_col3.metric("警告", edit_result.warning_count, delta_color="inverse")
+            state_col4.metric("人員不足日", len(edit_short_staff_by_store), delta_color="inverse")
+
+            if fixed_off_violations:
+                st.error(
+                    "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
+                    + "、".join(fixed_off_violations)
+                    + "。確定するには×へ戻してください。"
+                )
+            elif edit_result.error_count == 0:
+                st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
             else:
-                # シフトの月と検証データの月が違う場合は何もチェックしない
-                # （= 5月のテストデータで6月のシフトを検証してエラー大量発生を防ぐ）
-                _v_work = []
-                _v_off = {}
-                _v_prev = []
-                _v_holiday = {}
+                st.error("エラーが残っています。下の詳細を確認して修正してください。")
+
+            action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns([1, 1, 1, 1, 2])
+            with action_col1:
+                confirm_disabled = (
+                    lock_info is not None
+                    or not changed_cells
+                    or bool(fixed_off_violations)
+                    or edit_result.error_count > 0
+                )
+                if st.button(
+                    "変更を確定",
+                    key="manual_edit_apply",
+                    type="primary",
+                    width="stretch",
+                    disabled=confirm_disabled,
+                    help="エラーが0件の時だけ現在の編集内容を本シフトに反映します",
+                ):
+                    before_shift = clone_monthly_shift(shift)
+                    st.session_state[undo_key].append(before_shift)
+                    st.session_state[undo_key] = st.session_state[undo_key][-20:]
+                    st.session_state[redo_key] = []
+                    save_session_shift(edited_shift)
+                    try:
+                        backup_mgr.save_shift(
+                            edited_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note=f"クリック編集で{len(changed_cells)}件変更",
+                        )
+                    except Exception:
+                        pass
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = f"{len(changed_cells)}件の変更を確定しました。"
+                    st.rerun()
+            with action_col2:
+                if st.button(
+                    "変更を破棄",
+                    key="manual_edit_discard",
+                    width="stretch",
+                    disabled=not changed_cells,
+                    help="表で編集中の内容を捨てて、本シフトの内容に戻します",
+                ):
+                    st.session_state[version_key] += 1
+                    st.session_state[status_key] = "編集中の変更を破棄しました。"
+                    st.rerun()
+            with action_col3:
+                if st.button(
+                    "← 戻る",
+                    key="manual_edit_undo",
+                    width="stretch",
+                    disabled=lock_info is not None or not st.session_state[undo_key],
+                    help="直前に確定した手動修正を元に戻します",
+                ):
+                    previous_shift = st.session_state[undo_key].pop()
+                    st.session_state[redo_key].append(clone_monthly_shift(shift))
+                    save_session_shift(previous_shift)
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = "直前の手動修正を元に戻しました。"
+                    st.rerun()
+            with action_col4:
+                if st.button(
+                    "進む →",
+                    key="manual_edit_redo",
+                    width="stretch",
+                    disabled=lock_info is not None or not st.session_state[redo_key],
+                    help="元に戻した手動修正をもう一度反映します",
+                ):
+                    next_shift = st.session_state[redo_key].pop()
+                    st.session_state[undo_key].append(clone_monthly_shift(shift))
+                    save_session_shift(next_shift)
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = "元に戻した手動修正をもう一度反映しました。"
+                    st.rerun()
+            with action_col5:
+                if changed_cells:
+                    st.caption("緑枠のセルが、現在編集中の変更です。")
+                else:
+                    st.caption("まだ変更はありません。")
+
+            with st.expander(
+                f"エラー・警告の詳細（{edit_result.error_count + edit_result.warning_count}件）",
+                expanded=edit_result.error_count > 0,
+            ):
+                if not edit_result.issues:
+                    st.write("問題はありません。")
+                else:
+                    for issue in edit_result.issues:
+                        prefix = "❌" if issue.severity == "ERROR" else "⚠"
+                        st.write(f"{prefix} {issue}")
+
+            st.markdown("##### プレビュー")
+            render_shift_legend()
+            render_shift_table(
+                edited_shift,
+                short_staff_by_store=edit_short_staff_by_store,
+                sticky=True,
+                changed_cells=changed_cells,
+                changed_cell_color="#16a34a",
+                off_request_cells=off_request_cells,
+            )
+
+        elif selected_shift_view == shift_view_options[2]:
+            # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
+            _validation_context = get_validation_context_for_shift(shift)
+            _v_work = _validation_context.get("work_requests", [])
+            _v_off = _validation_context.get("off_requests", {})
+            _v_prev = _validation_context.get("prev_month", [])
+            _v_holiday = _validation_context.get("holiday_overrides", {})
             result = validate(
                 shift=shift, work_requests=_v_work,
                 off_requests=_v_off, prev_month=_v_prev,
@@ -1635,7 +1980,7 @@ if mode == "📊 経営者ビュー":
                     if issue.severity == "WARNING":
                         st.write(f"⚠ {issue}")
 
-        elif selected_shift_view == shift_view_options[2]:
+        elif selected_shift_view == shift_view_options[3]:
             # 出勤日数統計
             from prototype.employees import ALL_EMPLOYEES
             data = []
@@ -1657,7 +2002,7 @@ if mode == "📊 経営者ビュー":
                 })
             st.dataframe(data, width="stretch", hide_index=True)
 
-        elif selected_shift_view == shift_view_options[3]:
+        elif selected_shift_view == shift_view_options[4]:
             output_dir = OUTPUT_DIR
             output_dir.mkdir(exist_ok=True)
 
@@ -1729,10 +2074,10 @@ if mode == "📊 経営者ビュー":
                 path = backup.save_shift(shift, kind=kind, author="代表取締役", note=note)
                 st.success(f"✅ バックアップ保存: {path.name}")
 
-        elif selected_shift_view == shift_view_options[4]:
-            st.markdown("##### 💬 シフトを見ながらAIと対話")
+        elif selected_shift_view == shift_view_options[5]:
+            st.markdown("##### 💬 AI相談（補助機能）")
             st.caption(
-                "AIが作る変更はまずプレビューになります。シフト表で確認してから本シフトに反映できます。"
+                "基本の修正は「シフト修正」画面で行います。AIは、エラーの直し方や候補探しを相談する補助機能として使えます。"
             )
 
             api_key = get_anthropic_api_key()
