@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:54:40.240066",
+  "author": "板倉",
+  "off_requests": {
+    "板倉": [
+      12,
+      19
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "板倉": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 23,
+  "base_holidays": 7
+}

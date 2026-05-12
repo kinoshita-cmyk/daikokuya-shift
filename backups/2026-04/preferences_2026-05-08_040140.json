@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T04:01:40.714088",
+  "author": "黒澤",
+  "off_requests": {
+    "黒澤": [
+      4,
+      22,
+      25,
+      26
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "黒澤": "4/1と4/30は、月初月末のため大宮出勤希望です。\n3月末2連勤してるので5連勤にならないよう調整してください。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

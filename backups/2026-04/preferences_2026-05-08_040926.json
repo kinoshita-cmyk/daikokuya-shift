@@ -1,0 +1,17 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T04:09:26.881564",
+  "author": "大塚",
+  "off_requests": {
+    "大塚": []
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "大塚": "休み希望はなし。\n出勤１３日間（３連勤はNG）"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": null,
+  "base_holidays": null
+}

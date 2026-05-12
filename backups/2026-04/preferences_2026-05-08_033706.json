@@ -1,0 +1,21 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:37:06.614375",
+  "author": "鈴木",
+  "off_requests": {
+    "鈴木": [
+      1,
+      14,
+      26
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "鈴木": "4/2は赤羽希望"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

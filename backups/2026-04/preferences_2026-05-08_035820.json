@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:58:20.370991",
+  "author": "岩野",
+  "off_requests": {
+    "岩野": [
+      3,
+      4,
+      22,
+      23
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "岩野": "2,5,24は赤羽出勤希望です。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

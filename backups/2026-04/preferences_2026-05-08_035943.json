@@ -1,0 +1,22 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:59:43.971644",
+  "author": "大類",
+  "off_requests": {
+    "大類": [
+      2,
+      19,
+      22,
+      23
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "大類": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

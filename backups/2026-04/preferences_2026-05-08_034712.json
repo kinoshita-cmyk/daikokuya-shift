@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:47:12.838613",
+  "author": "下地",
+  "off_requests": {
+    "下地": [
+      2,
+      27
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "下地": "9,14は出勤したいです。\n土日祝は必ず出勤したいです。\n大宮4/1と4/30は、月初月末のため大宮出勤希望です。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

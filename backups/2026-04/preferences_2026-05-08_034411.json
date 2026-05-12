@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:44:11.030063",
+  "author": "牧野",
+  "off_requests": {
+    "牧野": [
+      4,
+      5
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "牧野": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

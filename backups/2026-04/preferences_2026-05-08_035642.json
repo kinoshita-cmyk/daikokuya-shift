@@ -1,0 +1,21 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:56:42.069690",
+  "author": "田中",
+  "off_requests": {
+    "田中": [
+      8,
+      12,
+      13
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "田中": "13日以降、大宮かすずらんに出勤（\n4日ずつくらい出勤を想定していて、割合としては半々）\nその場合、店舗必要人数にはカウントしないでください。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

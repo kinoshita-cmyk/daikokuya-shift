@@ -1,0 +1,19 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:47:47.207692",
+  "author": "長尾",
+  "off_requests": {
+    "長尾": [
+      5
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "長尾": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 23,
+  "base_holidays": 7
+}

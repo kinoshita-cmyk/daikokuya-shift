@@ -1,0 +1,23 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T06:47:17.813420",
+  "author": "楯",
+  "off_requests": {
+    "楯": [
+      6,
+      8,
+      11,
+      14,
+      24
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "楯": "18，19どちらか１日を休日希望。\n25，26，29のどれか１日を休日希望。\n1は西口出勤確定。"
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 22,
+  "base_holidays": 8
+}

@@ -1,0 +1,20 @@
+{
+  "year": 2026,
+  "month": 4,
+  "saved_at": "2026-05-08T03:35:35.210637",
+  "author": "今津",
+  "off_requests": {
+    "今津": [
+      6,
+      21
+    ]
+  },
+  "work_requests": [],
+  "flexible_off": [],
+  "natural_language_notes": {
+    "今津": ""
+  },
+  "paid_leave_days": 0,
+  "monthly_target_workdays": 23,
+  "base_holidays": 7
+}
