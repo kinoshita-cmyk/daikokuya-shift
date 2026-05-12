@@ -33,6 +33,16 @@ from datetime import date, datetime
 from calendar import monthrange
 from urllib.parse import quote, unquote
 
+try:
+    from st_aggrid import AgGrid, JsCode
+    try:
+        from st_aggrid import GridUpdateMode
+    except Exception:
+        GridUpdateMode = None
+    HAS_AGGRID = True
+except Exception:
+    HAS_AGGRID = False
+
 from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
 )
@@ -603,6 +613,121 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
     return rows
 
 
+def render_colored_shift_editor(
+    shift: MonthlyShift,
+    editor_df: pd.DataFrame,
+    grid_key: str,
+    locked: bool = False,
+):
+    """色付きセルのまま編集できるシフト表を表示する。"""
+    cell_style = JsCode(
+        """
+        function(params) {
+            const value = params.value;
+            const base = {
+                textAlign: 'center',
+                fontWeight: '800',
+                fontSize: '16px',
+                borderRight: '1px solid #cbd5e1',
+                borderBottom: '1px solid #e5e7eb'
+            };
+            if (value === '○') { return {...base, backgroundColor: '#fef3c7', color: '#92400e'}; }
+            if (value === '□') { return {...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}; }
+            if (value === '△') { return {...base, backgroundColor: '#d1fae5', color: '#047857'}; }
+            if (value === '☆') { return {...base, backgroundColor: '#fce7f3', color: '#be185d'}; }
+            if (value === '◆') { return {...base, backgroundColor: '#e0e7ff', color: '#4338ca'}; }
+            if (value === '×') { return {...base, backgroundColor: '#f3f4f6', color: '#4b5563'}; }
+            return {...base, backgroundColor: '#ffffff', color: '#111827'};
+        }
+        """
+    )
+    header_style = JsCode(
+        """
+        function(params) {
+            return {
+                backgroundColor: '#1e3a8a',
+                color: '#ffffff',
+                fontWeight: '800',
+                textAlign: 'center'
+            };
+        }
+        """
+    )
+    column_defs = [
+        {
+            "field": "日",
+            "editable": False,
+            "pinned": "left",
+            "width": 72,
+            "cellStyle": {
+                "textAlign": "center",
+                "fontWeight": "800",
+                "backgroundColor": "#f8fafc",
+            },
+        },
+        {
+            "field": "曜",
+            "editable": False,
+            "pinned": "left",
+            "width": 56,
+            "cellStyle": {
+                "textAlign": "center",
+                "fontWeight": "700",
+                "backgroundColor": "#f8fafc",
+            },
+        },
+    ]
+    for name in EXPORT_COLUMN_ORDER:
+        column_defs.append({
+            "field": name,
+            "editable": not locked,
+            "cellEditor": "agSelectCellEditor",
+            "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
+            "singleClickEdit": True,
+            "width": 58,
+            "cellStyle": cell_style,
+            "headerClass": "shift-grid-header",
+        })
+    grid_options = {
+        "columnDefs": column_defs,
+        "defaultColDef": {
+            "sortable": False,
+            "filter": False,
+            "resizable": True,
+            "suppressMenu": True,
+            "headerClass": "shift-grid-header",
+        },
+        "stopEditingWhenCellsLoseFocus": True,
+        "suppressRowClickSelection": True,
+        "ensureDomOrder": True,
+        "rowHeight": 34,
+        "headerHeight": 38,
+        "domLayout": "normal",
+        "getRowStyle": JsCode(
+            """
+            function(params) {
+                const dayLabel = params.data['曜'];
+                if (dayLabel === '日') { return {backgroundColor: '#fee2e2'}; }
+                if (dayLabel === '土') { return {backgroundColor: '#dbeafe'}; }
+                return {backgroundColor: '#ffffff'};
+            }
+            """
+        ),
+    }
+    aggrid_kwargs = {
+        "gridOptions": grid_options,
+        "key": grid_key,
+        "height": 650,
+        "width": "100%",
+        "fit_columns_on_grid_load": False,
+        "allow_unsafe_jscode": True,
+        "theme": "streamlit",
+    }
+    if GridUpdateMode is not None:
+        aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
+    return AgGrid(editor_df, **aggrid_kwargs)
+
+
 def editor_rows_to_records(editor_value) -> list[dict]:
     """st.data_editor の戻り値を list[dict] に揃える。"""
     if hasattr(editor_value, "to_dict"):
@@ -711,6 +836,13 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         "holiday_overrides": inputs.get("holiday_overrides", {}),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
     }
+
+
+def run_shift_validation(**kwargs):
+    """Cloud側で古い検証関数が混ざっても落ちないよう、受け取れる引数だけ渡す。"""
+    allowed = inspect.signature(validate).parameters
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    return validate(**safe_kwargs)
 
 
 def get_fixed_off_edit_violations(
@@ -2258,7 +2390,7 @@ if mode == "📊 経営者ビュー":
             if st.session_state.get(inline_status_key):
                 st.success(st.session_state.pop(inline_status_key))
 
-            st.markdown("##### ✏️ シフト表を直接クリックして修正")
+            st.markdown("##### ✏️ 色付きシフト表を直接クリックして修正")
             st.caption(
                 "セルをクリックすると、空白・×・各店舗記号を選べます。"
                 "変更は下の「変更を確定」を押すまで本シフトには保存されません。"
@@ -2284,16 +2416,37 @@ if mode == "📊 経営者ビュー":
                 if lock_info is not None:
                     disabled_columns = editor_columns
 
-                edited_value = st.data_editor(
-                    editor_df,
-                    key=f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}",
-                    hide_index=True,
-                    width="stretch",
-                    height=620,
-                    num_rows="fixed",
-                    column_config=column_config,
-                    disabled=disabled_columns,
-                )
+                editor_key = f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}"
+                if HAS_AGGRID:
+                    grid_response = render_colored_shift_editor(
+                        shift,
+                        editor_df,
+                        grid_key=editor_key,
+                        locked=lock_info is not None,
+                    )
+                    edited_value = grid_response.get("data", editor_df)
+                else:
+                    st.warning(
+                        "色付きの直接編集部品がまだ入っていないため、一時的に標準の編集表で表示しています。"
+                        "GitHubに requirements.txt も反映すると、色付き編集に切り替わります。"
+                    )
+                    render_shift_table(
+                        shift,
+                        short_staff_by_store=detect_short_staff_by_store(shift),
+                        off_request_cells=_table_off_cells,
+                        sticky=True,
+                        selectable_cells=False,
+                    )
+                    edited_value = st.data_editor(
+                        editor_df,
+                        key=editor_key,
+                        hide_index=True,
+                        width="stretch",
+                        height=620,
+                        num_rows="fixed",
+                        column_config=column_config,
+                        disabled=disabled_columns,
+                    )
                 edited_records = editor_rows_to_records(edited_value)
                 if not edited_records:
                     edited_records = shift_to_editor_rows(shift)
@@ -2312,7 +2465,7 @@ if mode == "📊 経営者ビュー":
                         "（黄色でハイライト・人員少欄に店舗別マーク表示）"
                     )
 
-                inline_result = validate(
+                inline_result = run_shift_validation(
                     shift=inline_display_shift,
                     work_requests=_table_validation_context.get("work_requests", []),
                     off_requests=_table_validation_context.get("off_requests", {}),
@@ -2502,16 +2655,17 @@ if mode == "📊 経営者ビュー":
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
 
-            st.markdown("##### 表示確認")
-            render_shift_table(
-                inline_display_shift,
-                short_staff_by_store=short_staff_by_store,
-                sticky=True,
-                off_request_cells=_table_off_cells,
-                changed_cells=inline_changed_cells,
-                changed_cell_color="#16a34a",
-                selectable_cells=False,
-            )
+            if not HAS_AGGRID:
+                st.markdown("##### 色付きプレビュー")
+                render_shift_table(
+                    inline_display_shift,
+                    short_staff_by_store=short_staff_by_store,
+                    sticky=True,
+                    off_request_cells=_table_off_cells,
+                    changed_cells=inline_changed_cells,
+                    changed_cell_color="#16a34a",
+                    selectable_cells=False,
+                )
 
             st.markdown("---")
             st.markdown("##### 📝 下部注意書き（Excel/PDF出力に反映）")
@@ -2595,7 +2749,7 @@ if mode == "📊 経営者ビュー":
                 edited_records, off_request_cells,
             )
 
-            edit_result = validate(
+            edit_result = run_shift_validation(
                 shift=edited_shift,
                 work_requests=validation_context.get("work_requests", []),
                 off_requests=validation_context.get("off_requests", {}),
@@ -2748,7 +2902,7 @@ if mode == "📊 経営者ビュー":
             _v_off = _validation_context.get("off_requests", {})
             _v_prev = _validation_context.get("prev_month", [])
             _v_holiday = _validation_context.get("holiday_overrides", {})
-            result = validate(
+            result = run_shift_validation(
                 shift=shift, work_requests=_v_work,
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
@@ -3048,7 +3202,7 @@ if mode == "📊 経営者ビュー":
                     _cv_prev = []
                     _cv_holiday = {}
                     _cv_monthly_rules = []
-                chat_result = validate(
+                chat_result = run_shift_validation(
                     shift=display_shift, work_requests=_cv_work,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
