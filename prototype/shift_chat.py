@@ -53,6 +53,7 @@ SYSTEM_PROMPT = """\
 - 変更案を提案する際は、必ず影響を分析して伝える（連勤になる、希望に反する等）
 - 変更は必ず「プレビュー」として作る。確定・破棄は画面の操作ボタンで行う
 - 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
+- 本人が提出した「×」休み希望日は絶対に勤務へ変更しない
 - 制約違反のリスクがある場合は警告する
 - 簡潔で実用的な日本語で答える
 
@@ -142,6 +143,8 @@ class ShiftChatEngine:
         shift: MonthlyShift,
         api_key: Optional[str] = None,
         model: str = "claude-opus-4-7",
+        validation_inputs: Optional[dict] = None,
+        max_consec: int = 5,
     ):
         if not HAS_ANTHROPIC:
             raise ImportError("anthropic パッケージが必要です")
@@ -158,6 +161,8 @@ class ShiftChatEngine:
         self.undo_stack: list[tuple[str, MonthlyShift]] = []
         self.redo_stack: list[tuple[str, MonthlyShift]] = []
         self.last_status_message = ""
+        self.validation_inputs = validation_inputs or {}
+        self.max_consec = max_consec
 
     # ========== 内部ヘルパ ==========
 
@@ -199,6 +204,49 @@ class ShiftChatEngine:
         for p in self.pending_changes:
             changes[(p.employee, p.day)] = p
         return list(changes.values())
+
+    def set_validation_context(
+        self,
+        validation_inputs: Optional[dict] = None,
+        max_consec: Optional[int] = None,
+    ) -> None:
+        """画面側の最新検証条件をAI対話にも渡す。"""
+        if validation_inputs is not None:
+            self.validation_inputs = validation_inputs
+        if max_consec is not None:
+            self.max_consec = max_consec
+
+    def _off_request_violation_messages(
+        self,
+        changes: list[ShiftAssignment],
+    ) -> list[str]:
+        """本人の×休み希望を勤務へ変えようとしていないか確認する。"""
+        off_requests = self.validation_inputs.get("off_requests", {}) or {}
+        messages = []
+        for change in changes:
+            if change.store == Store.OFF:
+                continue
+            off_days = {
+                int(d) for d in off_requests.get(change.employee, [])
+                if str(d).isdigit()
+            }
+            if change.day in off_days:
+                messages.append(
+                    f"{change.employee}さんの{self.shift.month}/{change.day}は"
+                    "本人の×休み希望です。勤務への変更はできません。"
+                )
+        return messages
+
+    def _validate_shift_with_context(self, shift: MonthlyShift):
+        """生成時に使った希望データがあれば、それも含めて検証する。"""
+        return validate(
+            shift=shift,
+            work_requests=self.validation_inputs.get("work_requests", []),
+            off_requests=self.validation_inputs.get("off_requests", {}),
+            prev_month=self.validation_inputs.get("prev_month", []),
+            holiday_overrides=self.validation_inputs.get("holiday_overrides", {}),
+            max_consec=self.max_consec,
+        )
 
     def get_pending_change_count(self) -> int:
         return len(self._dedup_pending_changes())
@@ -273,8 +321,14 @@ class ShiftChatEngine:
         if a1 is None or a2 is None:
             return f"エラー: 配属が見つかりません ({emp1}/{day1}: {a1}, {emp2}/{day2}: {a2})"
         # 入れ替え
-        self.pending_changes.append(ShiftAssignment(employee=emp1, day=day1, store=a2.store))
-        self.pending_changes.append(ShiftAssignment(employee=emp2, day=day2, store=a1.store))
+        proposed = [
+            ShiftAssignment(employee=emp1, day=day1, store=a2.store),
+            ShiftAssignment(employee=emp2, day=day2, store=a1.store),
+        ]
+        violations = self._off_request_violation_messages(proposed)
+        if violations:
+            return "変更できません: " + " / ".join(violations)
+        self.pending_changes.extend(proposed)
         return (
             f"プレビュー: {emp1} {self.shift.month}/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
             f"{emp2} {self.shift.month}/{day2} ({a2.store.display_name} → {a1.store.display_name})"
@@ -287,12 +341,16 @@ class ShiftChatEngine:
             return f"エラー: 不明な店舗 {new_store}"
         before = self._get_effective_assignment(employee, day)
         before_str = before.store.display_name if before else "未配置"
-        self.pending_changes.append(ShiftAssignment(employee=employee, day=day, store=store))
+        proposed = ShiftAssignment(employee=employee, day=day, store=store)
+        violations = self._off_request_violation_messages([proposed])
+        if violations:
+            return "変更できません: " + " / ".join(violations)
+        self.pending_changes.append(proposed)
         return f"プレビュー: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
 
     def _tool_validate_current(self) -> str:
         copy = self._apply_pending_to_shift()
-        result = validate(shift=copy, max_consec=5)
+        result = self._validate_shift_with_context(copy)
         if result.error_count == 0 and result.warning_count == 0:
             return "✅ 制約違反はありません"
         out = [f"エラー {result.error_count}件 / 警告 {result.warning_count}件"]
@@ -306,6 +364,9 @@ class ShiftChatEngine:
         pending = self._dedup_pending_changes()
         if not pending:
             return "適用すべき変更はありません"
+        violations = self._off_request_violation_messages(pending)
+        if violations:
+            return "反映できません: " + " / ".join(violations)
         n = len(pending)
         before = self._clone_shift(self.shift)
         # 確定シフトに反映

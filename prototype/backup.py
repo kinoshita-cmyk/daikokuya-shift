@@ -253,7 +253,24 @@ class ShiftBackup:
                     off_count = sum(
                         len(v) for v in data.get("off_requests", {}).values()
                     )
-                    flex_count = len(data.get("flexible_off", []))
+                    off_days = []
+                    off_requests = data.get("off_requests", {})
+                    if isinstance(off_requests, dict):
+                        off_days = list(off_requests.get(author, []))
+                    flex_items = data.get("flexible_off", [])
+                    flex_count = len(flex_items)
+                    flexible_days = []
+                    for item in flex_items:
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("employee") == author:
+                            flexible_days.extend(item.get("candidate_days", []))
+                    work_request_days = []
+                    for item in data.get("work_requests", []):
+                        if not isinstance(item, dict):
+                            continue
+                        if item.get("employee") == author:
+                            work_request_days.append(item.get("day"))
                     note_text = ""
                     notes = data.get("natural_language_notes", {})
                     if isinstance(notes, dict):
@@ -263,8 +280,19 @@ class ShiftBackup:
                         "submitted_at": saved_at,
                         "file": file.name,
                         "off_request_count": off_count,
+                        "off_request_days": sorted(
+                            int(d) for d in off_days if str(d).isdigit()
+                        ),
                         "flexible_off_count": flex_count,
+                        "flexible_off_days": sorted(
+                            int(d) for d in flexible_days if str(d).isdigit()
+                        ),
+                        "work_request_days": sorted(
+                            int(d) for d in work_request_days if str(d).isdigit()
+                        ),
+                        "paid_leave_days": int(data.get("paid_leave_days", 0) or 0),
                         "has_note": bool(note_text and note_text.strip()),
+                        "note": note_text,
                         "note_excerpt": note_text[:50] + ("..." if len(note_text) > 50 else ""),
                     }
             except (json.JSONDecodeError, OSError):

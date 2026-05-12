@@ -26,6 +26,7 @@ ECO_STAFF: list[Employee] = [
         name="今津",
         full_name="今津悠貴",
         employee_id="076",
+        role=Role.MANAGER,
         skill=Skill.ECO,
         station_type=StationType.FLEXIBLE,
         affinities={
@@ -36,7 +37,7 @@ ECO_STAFF: list[Employee] = [
             Store.SUZURAN: Affinity.NONE,
         },
         annual_target_days=280,
-        notes="赤羽強、月1回東口、西口不足時補填",
+        notes="赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填",
     ),
     Employee(
         name="鈴木",

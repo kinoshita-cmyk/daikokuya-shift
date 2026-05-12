@@ -34,7 +34,7 @@ from .models import (
 from .employees import ALL_EMPLOYEES, ECO_STAFF, TICKET_STAFF, get_employee, shift_active_employees
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
-    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF,
+    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
 )
 
@@ -123,11 +123,48 @@ def generate_shift(
     main_employees = [
         e for e in shift_active_employees() if not e.is_auxiliary
     ]
+    main_employee_names = {e.name for e in main_employees}
     yamamoto = next((e for e in ALL_EMPLOYEES if e.name == "山本"), None)
 
     days_in_month = monthrange(year, month)[1]
     days = list(range(1, days_in_month + 1))
     main_stores = [s for s in ALL_STORES if s != Store.OFF]
+
+    # 本人の「×」休み希望は最優先。日付を安全に丸め、
+    # 同じ日に出勤希望が混ざっている場合も「休み希望」を優先する。
+    normalized_off_requests: dict[str, list[int]] = {}
+    for emp_name, off_days in (off_requests or {}).items():
+        safe_days = sorted({
+            int(d) for d in off_days
+            if str(d).isdigit() and 1 <= int(d) <= days_in_month
+        })
+        if safe_days:
+            normalized_off_requests[emp_name] = safe_days
+    off_requests = normalized_off_requests
+
+    normalized_work_requests = []
+    for name, d, store in (work_requests or []):
+        try:
+            day = int(d)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= day <= days_in_month):
+            continue
+        if day in set(off_requests.get(name, [])):
+            continue
+        normalized_work_requests.append((name, day, store))
+    work_requests = normalized_work_requests
+
+    normalized_flexible_off = []
+    for name, candidate_days, n_required in (flexible_off or []):
+        safe_candidates = sorted({
+            int(d) for d in candidate_days
+            if str(d).isdigit() and 1 <= int(d) <= days_in_month
+        })
+        if safe_candidates:
+            normalized_flexible_off.append((name, safe_candidates, int(n_required)))
+    flexible_off = normalized_flexible_off
+    yamamoto_off_days = set(off_requests.get("山本", []))
 
     # ============================================================
     # CP-SAT モデルの構築
@@ -158,7 +195,7 @@ def generate_shift(
     # 制約 2: 休み希望厳守
     # ============================================================
     for emp_name, off_days in off_requests.items():
-        if emp_name not in [e.name for e in main_employees]:
+        if emp_name not in main_employee_names:
             continue
         for d in off_days:
             model.Add(off[emp_name][d] == 1)
@@ -167,7 +204,7 @@ def generate_shift(
     # 制約 3: 出勤希望厳守（指定店舗があればその店舗）
     # ============================================================
     for name, d, store in work_requests:
-        if name not in [e.name for e in main_employees]:
+        if name not in main_employee_names:
             continue
         model.Add(off[name][d] == 0)  # その日は必ず出勤
         if store is not None:
@@ -177,7 +214,7 @@ def generate_shift(
     # 制約 4: 柔軟休み希望（候補日のうち N 日を休みに）
     # ============================================================
     for name, candidate_days, n_required in flexible_off:
-        if name not in [e.name for e in main_employees]:
+        if name not in main_employee_names:
             continue
         model.Add(sum(off[name][d] for d in candidate_days) >= n_required)
 
@@ -209,6 +246,7 @@ def generate_shift(
 
     # 大宮の「人数少」状態を表す変数（人員不足時はエコ1+チケット1で可）
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
+    higashi_unexpected_assignments = []
 
     for d in days:
         mode = operation_modes.get(d, OperationMode.NORMAL)
@@ -239,27 +277,45 @@ def generate_shift(
 
             eco_at_store = sum(x[e.name][d][s] for e in eco_employees)
             ticket_at_store = sum(x[e.name][d][s] for e in ticket_employees)
+            total_at_store = eco_at_store + ticket_at_store
+
+            # 赤羽東口店: エコ1名のみ。例外なし。
+            if s == Store.HIGASHIGUCHI:
+                for e in main_employees:
+                    if e.name not in HIGASHIGUCHI_ALLOWED_STAFF:
+                        higashi_unexpected_assignments.append(x[e.name][d][s])
+                model.Add(eco_at_store == 1)
+                model.Add(ticket_at_store == 0)
+                continue
+
+            # 赤羽駅前店:
+            # 基本はエコ1+チケット2。例外としてエコ2+チケット1も可。
+            # チケット対応が1名分だけの日は、後処理で山本さんを補助投入する。
+            if s == Store.AKABANE and mode == OperationMode.NORMAL:
+                model.Add(eco_at_store >= 1)
+                model.Add(eco_at_store <= 2)
+                if d in yamamoto_off_days:
+                    model.Add(total_at_store >= 3)
+                else:
+                    model.Add(total_at_store >= 2)
+                continue
 
             # 大宮の特殊ルール:
-            # 通常: eco 2 + ticket 1
-            # 人数少時: eco 1 + ticket 1 (omiya_short=1 でフラグ)
+            # 通常: 最低3名（エコ1〜2 + チケット1以上）
+            # 人数少時: エコ1 + チケット1 の2名体制も許容（omiya_short=1 でフラグ）
             if s == Store.OMIYA and mode == OperationMode.NORMAL:
-                # eco_at_store >= 2 OR omiya_short = 1
-                # → eco_at_store + 2 * omiya_short >= 2
-                model.Add(eco_at_store + 2 * omiya_short[d] >= 2)
                 model.Add(eco_at_store >= 1)  # 最低1名は必須
                 model.Add(eco_at_store <= 2)
                 model.Add(ticket_at_store >= 1)
+                model.Add(total_at_store + omiya_short[d] >= 3)
                 continue
 
-            # すずらんの特殊ルール: eco1+ticket2 OR eco2+ticket1
-            # → eco + ticket >= 3, eco >= 1, ticket >= 1
+            # すずらんの特殊ルール: エコ1〜2 + チケット2名
             if s == Store.SUZURAN and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)
                 model.Add(eco_at_store <= 2)
-                model.Add(ticket_at_store >= 1)
                 model.Add(ticket_at_store <= 2)
-                model.Add(eco_at_store + ticket_at_store >= 3)
+                model.Add(ticket_at_store >= 2)
                 continue
 
             # 通常の制約
@@ -315,6 +371,7 @@ def generate_shift(
         prev_consec_map[p.employee] = consec
 
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
+    three_off_indicators = []  # 希望休を含まない3連休のインジケータ
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
@@ -369,8 +426,9 @@ def generate_shift(
         model.Add(sum(off[e.name][d] for d in days) >= required_off)
 
     # ============================================================
-    # 制約 11: 3連休禁止（休み希望日が含まれる連休は除く）
-    # ★簡易版：休み希望が1つでも含まれる窓は除外（厳密には全部off要求の場合のみ除外すべきだが緩める）
+    # 制約 11: 3連休は原則避ける（ソフト）
+    # 人員が多い月は3連休もあり得るため、禁止ではなくペナルティとして扱う。
+    # 休み希望日が含まれる3連休は本人希望の反映としてペナルティ対象外にする。
     # ============================================================
     for e in main_employees:
         if e.constraint_check_excluded:
@@ -386,7 +444,11 @@ def generate_shift(
             # （希望休が連続2日 + 自然休1日 のパターンを許容するため）
             if any(d in emp_off_days for d in window):
                 continue
-            model.Add(off[e.name][start] + off[e.name][start + 1] + off[e.name][start + 2] <= 2)
+            three_off = model.NewBoolVar(f"three_off_{e.name}_{start}")
+            off_sum = off[e.name][start] + off[e.name][start + 1] + off[e.name][start + 2]
+            model.Add(off_sum == 3).OnlyEnforceIf(three_off)
+            model.Add(off_sum <= 2).OnlyEnforceIf(three_off.Not())
+            three_off_indicators.append(three_off)
 
     # ============================================================
     # 制約 12: 大塚さんの月間出勤日数（5月は10日）
@@ -448,6 +510,15 @@ def generate_shift(
     if over_4_indicators:
         # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
         obj = obj - 50 * sum(over_4_indicators)
+    if three_off_indicators:
+        # 3連休はあり得るが、必要がなければ避ける
+        obj = obj - 15 * sum(three_off_indicators)
+    # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
+    obj = obj - 100 * sum(omiya_short.values())
+    if higashi_unexpected_assignments:
+        # 東口は土井さんまたは指定代替4名を強く優先する。
+        # ただし過去月の実態確認前なので、解なしにせず大きめのペナルティに留める。
+        obj = obj - 200 * sum(higashi_unexpected_assignments)
     model.Maximize(obj)
 
     # ============================================================

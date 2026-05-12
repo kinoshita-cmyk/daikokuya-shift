@@ -23,7 +23,7 @@ from .models import (
 from .employees import ALL_EMPLOYEES, get_employee
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
-    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF,
+    HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
     get_capacity,
@@ -144,14 +144,14 @@ def validate(
     # 4. 休日日数チェック
     _check_holiday_days(shift, result, days_in_month, holiday_overrides, default_holidays)
 
-    # 5. 連休チェック（2連休回数、3連休禁止）
+    # 5. 連休チェック（2連休回数、3連休確認）
     _check_consecutive_off(shift, result, days_in_month, off_requests)
 
     # 6. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
 
     # 7. 出勤希望チェック
-    _check_work_requests(shift, result, work_requests)
+    _check_work_requests(shift, result, work_requests, off_requests)
 
     # 8. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
@@ -214,41 +214,115 @@ def _check_store_capacity(
             # 配属者の名前リスト
             worker_names = [a.employee for a in store_workers]
             worker_str = ", ".join(worker_names) if worker_names else "(誰もいない)"
+            all_store_workers = [a.employee for a in day_assignments if a.store == store]
+            all_worker_str = ", ".join(all_store_workers) if all_store_workers else "(誰もいない)"
+            yamamoto_present = any(
+                a.employee == YamamotoLogic.EMPLOYEE_NAME and a.store == store
+                for a in day_assignments
+            )
 
-            # 赤羽東口店は原則1名体制。土井さん不在時も代替エコ1名で運営する。
-            if store == Store.HIGASHIGUCHI and total > 1:
-                result.issues.append(Issue(
-                    severity="WARNING",
-                    category="1名体制（東口）",
-                    day=day, employee=None,
-                    message=(
-                        f"赤羽東口店は原則1名体制です"
-                        f"／配属: {worker_str}"
-                        f"／合計{total}名"
-                    ),
-                ))
-
-            # 大宮の「人数少」例外: eco_count==1 + ticket_count>=1 でも許容（警告のみ）
-            if (store == Store.OMIYA and mode == OperationMode.NORMAL
-                    and allow_omiya_short and eco_count == 1 and ticket_count >= 1):
-                result.issues.append(Issue(
-                    severity="WARNING",
-                    category="人数少（大宮）",
-                    day=day, employee=None,
-                    message=(
-                        f"大宮駅前店 エコ1名運営（本来エコ2名）"
-                        f"／配属: {worker_str}"
-                        f"／合計{total}名（通常{cap.eco_min + cap.ticket_min}名）"
-                    ),
-                ))
+            # 赤羽東口店はエコ1名のみ。例外なし。
+            if store == Store.HIGASHIGUCHI:
+                unexpected_workers = [
+                    name for name in all_store_workers
+                    if name not in HIGASHIGUCHI_ALLOWED_STAFF
+                ]
+                if eco_count != 1 or ticket_count != 0 or total != 1:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="1名体制（東口）",
+                        day=day, employee=None,
+                        message=(
+                            f"赤羽東口店はエコ1名のみです"
+                            f"／配属: {all_worker_str}"
+                            f"／エコ{eco_count}名・チケット{ticket_count}名"
+                        ),
+                    ))
+                if unexpected_workers:
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="東口代替要員",
+                        day=day, employee=None,
+                        message=(
+                            f"赤羽東口店に配置できるのは土井さん、楯さん、春山さん、長尾さん、今津さんのみです"
+                            f"／対象: {', '.join(unexpected_workers)}"
+                            "。過去月とのすり合わせ後にハード条件化してください。"
+                        ),
+                    ))
                 continue
 
-            # すずらんの柔軟構成: eco1+ticket2 または eco2+ticket1 のいずれか
+            # 赤羽駅前店: エコ1+チケット2が基本。
+            # エコ2+チケット1も可。山本さんはチケット対応不足時のみ補助扱い。
+            if store == Store.AKABANE and mode == OperationMode.NORMAL:
+                effective_ticket = ticket_count + max(0, eco_count - 1)
+                if yamamoto_present:
+                    effective_ticket += 1
+                if eco_count < 1:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数",
+                        day=day, employee=None,
+                        message=f"赤羽駅前店 エコ要員不足／配属: {all_worker_str}",
+                    ))
+                if eco_count > 2:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数",
+                        day=day, employee=None,
+                        message=f"赤羽駅前店 エコ要員が多すぎます（上限2名）／配属: {all_worker_str}",
+                    ))
+                if effective_ticket < 2:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数",
+                        day=day, employee=None,
+                        message=(
+                            f"赤羽駅前店 チケット対応が不足"
+                            f"（必要2名分、実質{effective_ticket}名分）"
+                            f"／配属: {all_worker_str}"
+                        ),
+                    ))
+                elif yamamoto_present:
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="山本補助",
+                        day=day, employee="山本",
+                        message=f"赤羽駅前店のチケット対応不足を山本さんで補助／配属: {all_worker_str}",
+                    ))
+                continue
+
+            # 大宮の「人数少」例外: eco_count==1 + ticket_count>=1 でも許容（警告のみ）
+            if store == Store.OMIYA and mode == OperationMode.NORMAL:
+                if eco_count >= 1 and ticket_count >= 1 and total >= 3:
+                    continue
+                if allow_omiya_short and eco_count == 1 and ticket_count == 1 and total == 2:
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="人数少（大宮）",
+                        day=day, employee=None,
+                        message=(
+                            f"大宮駅前店 2名体制（最終手段）"
+                            f"／配属: {worker_str}"
+                            f"／通常は最低3名"
+                        ),
+                    ))
+                    continue
+
+            # すずらん: エコ1〜2名 + チケット2名
             if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if (eco_count >= 1 and ticket_count >= 1
-                        and eco_count + ticket_count >= 3):
+                if 1 <= eco_count <= 2 and ticket_count == 2:
                     continue  # OK
-                # 違反として続けて検出
+                if ticket_count > 2:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数",
+                        day=day, employee=None,
+                        message=(
+                            f"大宮すずらん通り店 チケット要員が多すぎます"
+                            f"（原則2名、実績{ticket_count}名）／配属: {worker_str}"
+                        ),
+                    ))
+                    continue
 
             if eco_count < cap.eco_min:
                 shortage = cap.eco_min - eco_count
@@ -259,6 +333,17 @@ def _check_store_capacity(
                     message=(
                         f"{store.display_name} エコ要員 {shortage}名不足"
                         f"（必要{cap.eco_min}名、実績{eco_count}名）"
+                        f"／配属: {worker_str}"
+                    ),
+                ))
+            if eco_count > cap.eco_max:
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="店舗人数",
+                    day=day, employee=None,
+                    message=(
+                        f"{store.display_name} エコ要員が多すぎます"
+                        f"（上限{cap.eco_max}名、実績{eco_count}名）"
                         f"／配属: {worker_str}"
                     ),
                 ))
@@ -313,6 +398,8 @@ def _check_consecutive_work(
         max_consec = HARD_CONSTRAINTS["max_consecutive_work_days"]
 
     for emp in ALL_EMPLOYEES:
+        if not emp.is_shift_eligible:
+            continue
         if emp.name in CONSTRAINT_EXCLUDED and emp.name not in CONSEC_WORK_CHECK_APPLIES:
             continue
 
@@ -355,6 +442,8 @@ def _check_holiday_days(
 ) -> None:
     """月内の休日日数チェック"""
     for emp in ALL_EMPLOYEES:
+        if not emp.is_shift_eligible:
+            continue
         if emp.name in CONSTRAINT_EXCLUDED:
             continue
 
@@ -376,11 +465,13 @@ def _check_consecutive_off(
     shift: MonthlyShift, result: ValidationResult, days: int,
     off_requests: dict[str, list[int]],
 ) -> None:
-    """2連休回数（1〜2回）と3連休禁止のチェック"""
+    """2連休回数（1〜2回）と3連休の確認"""
     min_2off = HARD_CONSTRAINTS["min_two_day_off_per_month"]
     max_2off = HARD_CONSTRAINTS["max_two_day_off_per_month"]
 
     for emp in ALL_EMPLOYEES:
+        if not emp.is_shift_eligible:
+            continue
         if emp.name in CONSTRAINT_EXCLUDED:
             continue
 
@@ -404,12 +495,13 @@ def _check_consecutive_off(
                     has_request = any(d in emp_off_requests for d in off_block)
                     if not has_request:
                         result.issues.append(Issue(
-                            severity="ERROR",
-                            category="3連休禁止",
+                            severity="WARNING",
+                            category="3連休確認",
                             day=third_day, employee=emp.name,
                             message=(
                                 f"{consec_off}連休"
                                 f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
+                                "。人数過多などの事情があれば許容可能です。"
                             ),
                         ))
                 consec_off = 0
@@ -454,9 +546,13 @@ def _check_off_requests(
 def _check_work_requests(
     shift: MonthlyShift, result: ValidationResult,
     work_requests: list,
+    off_requests: dict[str, list[int]],
 ) -> None:
     """出勤希望日が出勤になっているか（指定店舗があればそこに配置）"""
     for name, day, requested_store in work_requests:
+        # 同じ日に「×」休み希望がある場合は、休み希望を最優先する。
+        if day in set(off_requests.get(name, [])):
+            continue
         a = shift.get_assignment(name, day)
         if a is None or a.store == Store.OFF:
             result.issues.append(Issue(

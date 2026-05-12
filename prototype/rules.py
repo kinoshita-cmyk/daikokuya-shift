@@ -29,8 +29,9 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
     Store.AKABANE: StoreCapacity(
         eco_min=1,
         ticket_min=2,
-        eco_max=1,
-        # 例外：エコ1+チケット1の時は山本投入でチケット2に補正
+        eco_max=2,
+        # 基本：エコ1+チケット2
+        # 例外：エコ2+チケット1、またはチケット対応が1名分のみの時は山本投入
     ),
     Store.HIGASHIGUCHI: StoreCapacity(
         eco_min=1,
@@ -54,8 +55,8 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
     Store.SUZURAN: StoreCapacity(
         eco_min=1,
         ticket_min=2,
-        eco_max=2,           # エコ2+チケット1パターンも可
-        # エコ1+チケット2 または エコ2+チケット1
+        eco_max=2,           # エコ2名体制も可。チケットは原則2名。
+        # エコ1+チケット2 または エコ2+チケット2
     ),
 }
 
@@ -92,8 +93,8 @@ def get_capacity(mode: OperationMode) -> dict[Store, StoreCapacity]:
 
 # 全体ルール
 HARD_CONSTRAINTS = {
-    "max_consecutive_work_days": 4,        # 最大4連勤
-    "max_consecutive_off_days": 2,         # 最大2連休（休み希望日は除く）
+    "max_consecutive_work_days": 4,        # 原則最大4連勤（例外的に5連勤あり）
+    "max_consecutive_off_days": 2,         # 原則最大2連休（希望や人数過多で3連休もあり得る）
     "min_two_day_off_per_month": 1,        # 2連休を月1回以上
     "max_two_day_off_per_month": 2,        # 2連休は最大2回
     "no_eco_zero_at_any_store": True,      # エコ0NG（全店舗）
@@ -106,6 +107,14 @@ HARD_CONSTRAINTS = {
 
 # 大宮店の追加制約：春山・下地どちらか1人は必ず在勤
 OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
+
+# 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
+HIGASHIGUCHI_PRIMARY_STAFF = "土井"
+HIGASHIGUCHI_SUBSTITUTE_STAFF: tuple[str, ...] = ("楯", "春山", "長尾", "今津")
+HIGASHIGUCHI_ALLOWED_STAFF: tuple[str, ...] = (
+    HIGASHIGUCHI_PRIMARY_STAFF,
+    *HIGASHIGUCHI_SUBSTITUTE_STAFF,
+)
 
 # すずらん不在時の補填要員（野澤がいない日のチケット担当）
 SUZURAN_BACKUP_TICKET: tuple[str, ...] = ("岩野", "大類")
@@ -121,8 +130,8 @@ class YamamotoLogic:
 
     1. 休み希望日 → ×（休み）
     2. それ以外で、その日の赤羽駅前店の構成が
-       - エコ1 + チケット0、または
-       - エコ1 + チケット1
+       - エコ1 + チケット1、または
+       - エコ2のみ（チケット対応が1名分のみ）
        の場合 → 山本を○（赤羽駅前店）で投入
     3. それ以外 → 空白（出勤しない、勤務日数にカウントしない）
 
@@ -142,8 +151,17 @@ class YamamotoLogic:
         """山本を赤羽に投入すべきかを判定"""
         if is_off_request:
             return False
-        # 赤羽がエコ1で、チケットが0または1ならば投入
-        return akabane_eco_count == 1 and akabane_ticket_count in (0, 1)
+        # 赤羽は「エコ1名 + チケット2名」が基本。
+        # エコが2名いる日は、エコ1名分をチケット対応として扱える。
+        effective_ticket_coverage = (
+            akabane_ticket_count + max(0, akabane_eco_count - 1)
+        )
+        assigned_people = akabane_eco_count + akabane_ticket_count
+        return (
+            akabane_eco_count >= 1
+            and assigned_people >= 2
+            and effective_ticket_coverage < 2
+        )
 
 
 # ============================================================
