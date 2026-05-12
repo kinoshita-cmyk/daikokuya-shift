@@ -601,6 +601,7 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
     """シフトを編集表用の行データに変換する。"""
     days_in_month = monthrange(shift.year, shift.month)[1]
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    short_staff_by_store = detect_short_staff_by_store(shift)
     rows = []
     for day in range(1, days_in_month + 1):
         row = {
@@ -609,8 +610,26 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
         }
         for name in EXPORT_COLUMN_ORDER:
             row[name] = assignment_to_symbol(shift.get_assignment(name, day))
+        row["人数少"] = format_short_staff_summary_for_day(short_staff_by_store.get(day, set()))
         rows.append(row)
     return rows
+
+
+def format_short_staff_summary_for_day(stores: set[Store]) -> str:
+    """編集グリッド内の人員少欄に入れる短いテキスト。"""
+    if not stores:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    labels = []
+    for store in sorted(
+        stores,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        labels.append(f"{mark}{name}")
+    return "・".join(labels)
 
 
 def render_colored_shift_editor(
@@ -618,12 +637,20 @@ def render_colored_shift_editor(
     editor_df: pd.DataFrame,
     grid_key: str,
     locked: bool = False,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
+    off_request_keys = json.dumps(
+        sorted(f"{employee}|{int(day)}" for employee, day in (off_request_cells or set())),
+        ensure_ascii=False,
+    )
     cell_style = JsCode(
         """
         function(params) {
             const value = params.value;
+            const fixedOffCells = new Set(__OFF_REQUEST_KEYS__);
+            const cellKey = String(params.colDef.field) + '|' + String(params.data['日']);
+            const isFixedOff = fixedOffCells.has(cellKey);
             const base = {
                 textAlign: 'center',
                 fontWeight: '800',
@@ -631,15 +658,23 @@ def render_colored_shift_editor(
                 borderRight: '1px solid #cbd5e1',
                 borderBottom: '1px solid #e5e7eb'
             };
-            if (value === '○') { return {...base, backgroundColor: '#fef3c7', color: '#92400e'}; }
-            if (value === '□') { return {...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}; }
-            if (value === '△') { return {...base, backgroundColor: '#d1fae5', color: '#047857'}; }
-            if (value === '☆') { return {...base, backgroundColor: '#fce7f3', color: '#be185d'}; }
-            if (value === '◆') { return {...base, backgroundColor: '#e0e7ff', color: '#4338ca'}; }
-            if (value === '×') { return {...base, backgroundColor: '#f3f4f6', color: '#4b5563'}; }
-            return {...base, backgroundColor: '#ffffff', color: '#111827'};
+            function withFixedOff(style) {
+                if (isFixedOff) {
+                    style.boxShadow = 'inset 0 0 0 3px #dc2626';
+                    style.color = '#991b1b';
+                    style.fontWeight = '900';
+                }
+                return style;
+            }
+            if (value === '○') { return withFixedOff({...base, backgroundColor: '#fef3c7', color: '#92400e'}); }
+            if (value === '□') { return withFixedOff({...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}); }
+            if (value === '△') { return withFixedOff({...base, backgroundColor: '#d1fae5', color: '#047857'}); }
+            if (value === '☆') { return withFixedOff({...base, backgroundColor: '#fce7f3', color: '#be185d'}); }
+            if (value === '◆') { return withFixedOff({...base, backgroundColor: '#e0e7ff', color: '#4338ca'}); }
+            if (value === '×') { return withFixedOff({...base, backgroundColor: '#f3f4f6', color: '#4b5563'}); }
+            return withFixedOff({...base, backgroundColor: '#ffffff', color: '#111827'});
         }
-        """
+        """.replace("__OFF_REQUEST_KEYS__", off_request_keys)
     )
     header_style = JsCode(
         """
@@ -688,6 +723,19 @@ def render_colored_shift_editor(
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
         })
+    column_defs.append({
+        "field": "人数少",
+        "editable": False,
+        "pinned": "right",
+        "width": 170,
+        "cellStyle": {
+            "textAlign": "center",
+            "fontWeight": "800",
+            "backgroundColor": "#fff3cd",
+            "color": "#92400e",
+            "borderLeft": "1px solid #cbd5e1",
+        },
+    })
     grid_options = {
         "columnDefs": column_defs,
         "defaultColDef": {
@@ -2399,7 +2447,7 @@ if mode == "📊 経営者ビュー":
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
-                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER
+                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少"]
                 editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
                 column_config = {
                     "日": st.column_config.NumberColumn("日", width="small"),
@@ -2418,11 +2466,20 @@ if mode == "📊 経営者ビュー":
 
                 editor_key = f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}"
                 if HAS_AGGRID:
+                    st.markdown(
+                        f'<div style="background:#0f172a; color:#ffffff; '
+                        f'padding:10px 12px; border:1px solid #999; '
+                        f'border-radius:6px 6px 0 0; font-weight:800; '
+                        f'font-size:16px;">'
+                        f'{int(shift.year)}年{int(shift.month)}月 シフト表</div>',
+                        unsafe_allow_html=True,
+                    )
                     grid_response = render_colored_shift_editor(
                         shift,
                         editor_df,
                         grid_key=editor_key,
                         locked=lock_info is not None,
+                        off_request_cells=_table_off_cells,
                     )
                     edited_value = grid_response.get("data", editor_df)
                 else:
