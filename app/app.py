@@ -2046,8 +2046,11 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
+                    if "advisor_max_days" in generator_params:
+                        generation_kwargs["advisor_max_days"] = 3
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
+                    relaxed_advisor_limit = False
                     if shift is None and "strict_warning_constraints" in generator_params:
                         progress_area.info(
                             "⏳ 厳しめ条件では解が見つからなかったため、"
@@ -2057,10 +2060,26 @@ if mode == "📊 経営者ビュー":
                         relaxed_kwargs["strict_warning_constraints"] = False
                         shift = generate_shift(**relaxed_kwargs)
                         relaxed_warning_constraints = shift is not None
+                    if shift is None and "advisor_max_days" in generator_params:
+                        progress_area.info(
+                            "⏳ 顧問の出勤を最小限にする条件でも解が見つからないため、"
+                            "顧問を最終手段として追加で許容して再探索しています..."
+                        )
+                        advisor_relaxed_kwargs = dict(generation_kwargs)
+                        if "strict_warning_constraints" in generator_params:
+                            advisor_relaxed_kwargs["strict_warning_constraints"] = False
+                        advisor_relaxed_kwargs["advisor_max_days"] = None
+                        shift = generate_shift(**advisor_relaxed_kwargs)
+                        relaxed_advisor_limit = shift is not None
                     if relaxed_warning_constraints:
                         data_source_msg += (
                             "\n※警告が出ない条件では解が見つからなかったため、"
                             "一部の警告条件だけ緩めて生成しました。"
+                        )
+                    if relaxed_advisor_limit:
+                        data_source_msg += (
+                            "\n※顧問の出勤を3日以内に抑える条件では解が見つからなかったため、"
+                            "顧問を最終手段として追加許容しました。"
                         )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
@@ -2089,6 +2108,7 @@ if mode == "📊 経営者ビュー":
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
+                    "relaxed_advisor_limit": bool(relaxed_advisor_limit),
                     "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
@@ -2384,7 +2404,8 @@ if mode == "📊 経営者ビュー":
         st.warning(
             f"⚠ **{target_year}年{target_month}月** を表示しようとしていますが、"
             f"前回生成したシフトは **{shift.year}年{shift.month}月** のものです。"
-            f"\n\n下のボタンで新規生成するか、過去シフトから読み込んでください。"
+            f"\n\n上の「シフトを自動生成」ボタンで作り直すか、"
+            "下書き・過去シフトから読み込んでください。"
         )
         if st.button(
             f"🗑 前回生成した {shift.year}/{shift.month} のシフトを破棄",
