@@ -277,7 +277,7 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
 
             # 人員少マークでは人数不足のみを見る。スキル構成は検証結果側で確認する。
             if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if total_count >= 3:
+                if eco_count >= 1 and total_count >= 3:
                     continue
                 short_by_store.setdefault(d, set()).add(store)
                 continue
@@ -369,6 +369,38 @@ def render_shift_legend() -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
+    """シフト表ヘッダーに出す「実績/基準」表示を返す。"""
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    work_days = sum(
+        1
+        for d in range(1, days_in_month + 1)
+        if (a := shift.get_assignment(name, d)) and a.store != Store.OFF
+    )
+    try:
+        employee = get_employee(name)
+        target = round(employee.annual_target_days / 12) if employee.annual_target_days else None
+    except Exception:
+        target = None
+    if target is None:
+        return str(work_days) if work_days else ""
+    return f"{work_days}/{target}"
+
+
+def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) -> str:
+    """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
+    count_text = employee_work_target_text(shift, name)
+    if html:
+        if count_text:
+            return (
+                f'<span style="display:block; font-weight:800;">{escape(name)}</span>'
+                f'<span style="display:block; font-size:11px; line-height:1.1; '
+                f'color:#dbeafe;">{escape(count_text)}</span>'
+            )
+        return escape(name)
+    return f"{name}\n{count_text}" if count_text else name
+
+
 def render_shift_table(
     shift: MonthlyShift,
     short_staff_days: Optional[set[int]] = None,
@@ -424,7 +456,7 @@ def render_shift_table(
         "position:sticky; left:70px; z-index:6; min-width:46px; width:46px;"
         if sticky else "min-width:46px; width:46px;"
     )
-    employee_header_style = "min-width:52px;"
+    employee_header_style = "min-width:62px; line-height:1.15;"
     short_header_style = "min-width:190px; width:190px;"
     html = (
         f'<div style="{wrapper_style}">'
@@ -448,9 +480,10 @@ def render_shift_table(
         f'{header_style} {left_weekday_style}">曜</th>'
     )
     for name in EXPORT_COLUMN_ORDER:
+        header_label = employee_header_label(shift, name, html=True)
         html += (
             f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
-            f'{header_style} {employee_header_style}">{name}</th>'
+            f'{header_style} {employee_header_style}">{header_label}</th>'
         )
     html += (
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
@@ -714,13 +747,16 @@ def render_colored_shift_editor(
     for name in EXPORT_COLUMN_ORDER:
         column_defs.append({
             "field": name,
+            "headerName": employee_header_label(shift, name),
             "editable": not locked,
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 58,
+            "width": 66,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
+            "wrapHeaderText": True,
+            "autoHeaderHeight": True,
         })
     column_defs.append({
         "field": "人数少",
@@ -748,7 +784,7 @@ def render_colored_shift_editor(
         "suppressRowClickSelection": True,
         "ensureDomOrder": True,
         "rowHeight": 34,
-        "headerHeight": 38,
+        "headerHeight": 54,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
@@ -1328,8 +1364,22 @@ def active_monthly_store_count_rules(
             "stores": list(getattr(rule, "stores", []) or []),
             "count": int(getattr(rule, "count", 0) or 0),
             "severity": getattr(rule, "severity", "WARNING"),
+            "comparison": getattr(rule, "comparison", "min"),
         })
     return active_rules
+
+
+def format_monthly_rule_condition(rule: dict) -> str:
+    """月別配置ルールの条件を画面表示用に整える。"""
+    comparison = str(rule.get("comparison") or "min").lower()
+    count = int(rule.get("count") or 0)
+    if comparison == "max":
+        return f"{count}回以下"
+    if comparison == "exact":
+        return f"{count}回ちょうど"
+    if comparison == "forbid":
+        return "配置禁止"
+    return f"{count}回以上"
 
 
 # ============================================================
@@ -1639,7 +1689,7 @@ if mode == "📊 経営者ビュー":
                             st.write(
                                 f"    - {rule.get('name', '月別ルール')}: "
                                 f"{rule.get('employee')} / {rule.get('stores')} / "
-                                f"{rule.get('count')}回以上 / {rule.get('severity')}"
+                                f"{format_monthly_rule_condition(rule)} / {rule.get('severity')}"
                             )
                     st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
                     st.write(
@@ -1918,7 +1968,7 @@ if mode == "📊 経営者ビュー":
                 st.write(
                     f"- {rule.get('name', '月別ルール')}: "
                     f"{rule.get('employee')} / {rule.get('stores')} / "
-                    f"{rule.get('count')}回以上 / {rule.get('severity')}"
+                    f"{format_monthly_rule_condition(rule)} / {rule.get('severity')}"
                 )
         else:
             st.caption("この月だけの追加ルールは未設定です。")
@@ -4488,6 +4538,7 @@ elif mode == "⚙️ 設定":
                 employee=rule.employee,
                 stores=list(rule.stores),
                 count=rule.count,
+                comparison=getattr(rule, "comparison", "min"),
             )
 
         def _sync_rule_widgets(source_cfg: RuleConfig) -> None:
@@ -4662,9 +4713,9 @@ elif mode == "⚙️ 設定":
             _rule_row(
                 "スタッフ別", "赤羽東口店の代替要員",
                 "土井さんメイン。休みの日は楯さん・春山さん・長尾さん・今津さんのいずれか。",
-                "ソフト反映", "警告表示", "検証結果に表示",
-                "コード固定", "一部反映",
-                "過去月とのすり合わせ後にハード条件化する想定です。",
+                "反映中", "警告表示", "検証結果に表示",
+                "コード固定", "反映中",
+                "牧野さんの東口1名体制は当面対象外です。",
             ),
             _rule_row(
                 "スタッフ別", "固定店舗",
@@ -4680,7 +4731,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "在勤要望（強・中・弱）",
-                "強・中・弱を生成時の重みとして使う。",
+                "強・中・弱を生成時の重みとして使う。春山さんの西口代替・研修も弱として反映。",
                 "一部反映", "未接続", "従業員マスタで管理",
                 "従業員マスタ", "一部反映",
                 "割合の厳密チェックではなく、現状は配置の好みとして扱います。",
@@ -4705,10 +4756,10 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "月次ルール", "月ごとの追加条件",
-                "研修・一時的な店舗移動・例外スタッフなど、その月だけの条件を追加する考え方。",
+                "研修・一時的な店舗移動・配置禁止など、その月だけの条件を追加する。",
                 "反映中", "反映中", "カスタムルールに保存",
                 "この画面で変更可", "反映中",
-                "例: 6月は牧野さんを研修のため大宮西口に3回。東口1名体制は当面対象外。",
+                "最低回数・最大回数・ちょうど回数・配置禁止を入力できます。",
             ),
             _rule_row(
                 "スタッフ別", "すずらん不在時の補填",
@@ -4909,11 +4960,11 @@ elif mode == "⚙️ 設定":
 
         # サブセクション: カスタムルール
         st.markdown("---")
-        st.markdown("#### ➕ カスタムルール")
+        st.markdown("#### ➕ 月次・個別ルール")
         st.info(
-            "💡 カスタムルールは2種類あります。"
-            "「メモのみ」は記録用、"
-            "「月別: スタッフを指定店舗へ回数配置」はシフト生成・検証に反映されます。"
+            "💡 スタッフ別・月別の追加ルールを入力できます。"
+            "最低回数・最大回数・ちょうど回数・配置禁止はシフト生成と検証に反映されます。"
+            "メモのみは記録用です。"
         )
 
         added_rule_objs = [
@@ -4932,17 +4983,35 @@ elif mode == "⚙️ 設定":
                 rule_col1, rule_col2, rule_col3 = st.columns([5, 1, 1])
                 with rule_col1:
                     badge = "仮追加" if rule.id in added_ids else "本設定"
-                    type_label = "月別配置" if rule.rule_type == "employee_store_count" else "メモ"
+                    comparison = getattr(rule, "comparison", "min")
+                    comparison_labels = {
+                        "min": "最低回数",
+                        "max": "最大回数",
+                        "exact": "ちょうど回数",
+                        "forbid": "配置禁止",
+                    }
+                    type_label = (
+                        f"月別配置/{comparison_labels.get(comparison, '最低回数')}"
+                        if rule.rule_type == "employee_store_count" else "メモ"
+                    )
                     monthly_detail = ""
                     if rule.rule_type == "employee_store_count":
                         store_text = "・".join(rule.stores) if rule.stores else "店舗未指定"
                         month_text = (
                             f"{rule.target_year or '-'}年{rule.target_month or '-'}月"
                         )
+                        if comparison == "max":
+                            count_text = f"{rule.count}回以下"
+                        elif comparison == "exact":
+                            count_text = f"{rule.count}回ちょうど"
+                        elif comparison == "forbid":
+                            count_text = "配置禁止"
+                        else:
+                            count_text = f"{rule.count}回以上"
                         monthly_detail = (
                             f'<br><span style="font-size:12px; color:#4b5563;">'
                             f'対象: {month_text} / {rule.employee or "スタッフ未指定"} / '
-                            f'{store_text} / {rule.count}回以上</span><br>'
+                            f'{store_text} / {count_text}</span><br>'
                         )
                     st.markdown(
                         f'<div style="padding:8px; border-left:3px solid #6366f1; '
@@ -4996,6 +5065,7 @@ elif mode == "⚙️ 設定":
                 rule_employee = ""
                 rule_stores = []
                 rule_count = 0
+                rule_comparison = "min"
                 if rule_kind == "月別: スタッフを指定店舗へ回数配置":
                     st.caption("例: 2026年6月、牧野さんを大宮西口店へ3回以上配置。東口1名体制は当面対象外。")
                     ym_col1, ym_col2 = st.columns(2)
@@ -5024,11 +5094,26 @@ elif mode == "⚙️ 設定":
                         options=store_options,
                         format_func=lambda name: store_labels.get(name, name),
                     )
+                    rule_comparison_label = st.selectbox(
+                        "条件",
+                        options=["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
+                        help=(
+                            "最低回数: 3回以上入れる / 最大回数: 2回以下に抑える / "
+                            "ちょうど回数: 2回にする / 配置禁止: その店舗へ入れない"
+                        ),
+                    )
+                    rule_comparison = {
+                        "最低回数": "min",
+                        "最大回数": "max",
+                        "ちょうど回数": "exact",
+                        "配置禁止": "forbid",
+                    }[rule_comparison_label]
                     rule_count = int(st.number_input(
-                        "月内の最低回数",
-                        min_value=1,
+                        "月内回数",
+                        min_value=0 if rule_comparison == "forbid" else 1,
                         max_value=31,
-                        value=3,
+                        value=0 if rule_comparison == "forbid" else 3,
+                        disabled=rule_comparison == "forbid",
                     ))
                 rule_severity = st.selectbox(
                     "重要度",
@@ -5038,7 +5123,15 @@ elif mode == "⚙️ 設定":
                 rule_actor = st.text_input("追加者", value="代表取締役")
                 if st.form_submit_button("追加", type="primary"):
                     is_monthly_count = rule_kind == "月別: スタッフを指定店舗へ回数配置"
-                    if is_monthly_count and (not rule_employee or not rule_stores or not rule_count):
+                    monthly_rule_missing = (
+                        is_monthly_count
+                        and (
+                            not rule_employee
+                            or not rule_stores
+                            or (rule_comparison != "forbid" and not rule_count)
+                        )
+                    )
+                    if monthly_rule_missing:
                         st.error("月別配置ルールは、スタッフ・対象店舗・回数を入力してください。")
                     elif rule_name and rule_desc:
                         new_rule = CustomRule(
@@ -5052,7 +5145,8 @@ elif mode == "⚙️ 設定":
                             rule_type="employee_store_count" if is_monthly_count else "note",
                             employee=rule_employee,
                             stores=rule_stores,
-                            count=rule_count,
+                            count=0 if rule_comparison == "forbid" else rule_count,
+                            comparison=rule_comparison,
                         )
                         st.session_state["rule_added_custom_rules"] = (
                             st.session_state.get("rule_added_custom_rules", [])
@@ -5070,6 +5164,7 @@ elif mode == "⚙️ 設定":
                                 "employee": new_rule.employee,
                                 "stores": new_rule.stores,
                                 "count": new_rule.count,
+                                "comparison": new_rule.comparison,
                             }]
                         )
                         st.session_state["rule_apply_confirm"] = False
