@@ -80,6 +80,7 @@ class CustomRule:
     employee: str = ""
     stores: list[str] = field(default_factory=list)
     count: int = 0
+    comparison: str = "min"  # min / max / exact / forbid
 
 
 @dataclass

@@ -582,6 +582,7 @@ def generate_shift(
     preferred_consecutive_off_indicators = []
     preferred_work_terms = []
     monthly_rule_terms = []
+    monthly_rule_penalty_terms = []
     historical_actual_terms = []
 
     # 自由記載の「出勤希望」「○日は赤羽希望」などは、解なしを避けるためソフト制約で強く優先。
@@ -617,8 +618,8 @@ def generate_shift(
             model.Add(off_sum <= block_len - 1).OnlyEnforceIf(block.Not())
             preferred_consecutive_off_indicators.append(block)
 
-    # 月別ルール: 特定スタッフを、その月だけ指定店舗へ一定回数入れる。
-    # 例: 6月は牧野さんを研修のため西口または東口に3回。
+    # 月別ルール: 特定スタッフを、その月だけ指定店舗へ一定回数入れる/抑える/禁止する。
+    # 例: 6月は牧野さんを研修のため西口に3回。
     for rule in monthly_store_count_rules:
         if not rule or not rule.get("employee"):
             continue
@@ -643,20 +644,41 @@ def generate_shift(
         stores = sorted(set(stores), key=lambda s: s.name)
         if not stores:
             continue
+        comparison = str(rule.get("comparison") or "min").lower()
         try:
             required_count = int(rule.get("count") or 0)
         except (TypeError, ValueError):
             required_count = 0
-        if required_count <= 0:
+        if comparison == "forbid":
+            required_count = 0
+        if comparison != "forbid" and required_count <= 0:
             continue
         actual_count = sum(x[name][d][s] for d in days for s in stores)
         severity = str(rule.get("severity", "WARNING")).upper()
-        if severity == "ERROR":
-            model.Add(actual_count >= required_count)
+        if comparison in ("max", "forbid"):
+            if severity == "ERROR":
+                model.Add(actual_count <= required_count)
+            else:
+                over = model.NewIntVar(0, days_in_month, f"monthly_rule_over_{name}_{len(monthly_rule_penalty_terms)}")
+                model.Add(over >= actual_count - required_count)
+                model.Add(over >= 0)
+                monthly_rule_penalty_terms.append(over)
+        elif comparison == "exact":
+            if severity == "ERROR":
+                model.Add(actual_count == required_count)
+            else:
+                diff = model.NewIntVar(-days_in_month, days_in_month, f"monthly_rule_diff_{name}_{len(monthly_rule_penalty_terms)}")
+                abs_diff = model.NewIntVar(0, days_in_month, f"monthly_rule_abs_{name}_{len(monthly_rule_penalty_terms)}")
+                model.Add(diff == actual_count - required_count)
+                model.AddAbsEquality(abs_diff, diff)
+                monthly_rule_penalty_terms.append(abs_diff)
         else:
-            capped = model.NewIntVar(0, required_count, f"monthly_rule_{name}_{len(monthly_rule_terms)}")
-            model.AddMinEquality(capped, [actual_count, model.NewConstant(required_count)])
-            monthly_rule_terms.append(capped)
+            if severity == "ERROR":
+                model.Add(actual_count >= required_count)
+            else:
+                capped = model.NewIntVar(0, required_count, f"monthly_rule_{name}_{len(monthly_rule_terms)}")
+                model.AddMinEquality(capped, [actual_count, model.NewConstant(required_count)])
+                monthly_rule_terms.append(capped)
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
@@ -707,6 +729,8 @@ def generate_shift(
         obj = obj + sum(preferred_work_terms)
     if monthly_rule_terms:
         obj = obj + 160 * sum(monthly_rule_terms)
+    if monthly_rule_penalty_terms:
+        obj = obj - 220 * sum(monthly_rule_penalty_terms)
     if historical_actual_terms:
         obj = obj + sum(historical_actual_terms)
     if affinity_none_assignments:

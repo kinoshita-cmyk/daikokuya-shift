@@ -668,17 +668,29 @@ def _check_monthly_store_count_rules(
         ]
         if not stores:
             continue
+        comparison = str(rule.get("comparison") or "min").lower()
         try:
             required_count = int(rule.get("count") or 0)
         except (TypeError, ValueError):
             required_count = 0
-        if required_count <= 0:
+        if comparison == "forbid":
+            required_count = 0
+        if comparison != "forbid" and required_count <= 0:
             continue
         actual_count = sum(
             1 for a in shift.assignments
             if a.employee == emp_name and a.store in stores
         )
-        if actual_count >= required_count:
+        if comparison in ("max", "forbid"):
+            ok = actual_count <= required_count
+            condition_text = "配置禁止" if comparison == "forbid" else f"{required_count}日以下"
+        elif comparison == "exact":
+            ok = actual_count == required_count
+            condition_text = f"{required_count}日ちょうど"
+        else:
+            ok = actual_count >= required_count
+            condition_text = f"{required_count}日以上"
+        if ok:
             continue
         severity = str(rule.get("severity") or "WARNING").upper()
         store_names = "・".join(s.display_name for s in stores)
@@ -690,7 +702,7 @@ def _check_monthly_store_count_rules(
             message=(
                 f"{rule.get('name') or '月別追加ルール'}: "
                 f"{store_names}への勤務が{actual_count}日です。"
-                f"{required_count}日以上必要です。"
+                f"条件は{condition_text}です。"
             ),
         ))
 
