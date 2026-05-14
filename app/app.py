@@ -44,7 +44,7 @@ except Exception:
     HAS_AGGRID = False
 
 from prototype.paths import (
-    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
+    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, MAY_2026_SHIFT_XLSX,
 )
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
@@ -80,6 +80,143 @@ def get_anthropic_api_key() -> Optional[str]:
     if source == "session":
         return st.session_state.get("api_key")
     return None
+
+
+ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
+
+
+def load_admin_paid_leave_data() -> dict:
+    """管理者が後から付けた有給調整を読み込む。"""
+    if not ADMIN_PAID_LEAVE_FILE.exists():
+        return {"version": 1, "adjustments": []}
+    try:
+        with open(ADMIN_PAID_LEAVE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"version": 1, "adjustments": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "adjustments": []}
+    adjustments = data.get("adjustments", [])
+    if not isinstance(adjustments, list):
+        adjustments = []
+    data["version"] = int(data.get("version", 1) or 1)
+    data["adjustments"] = adjustments
+    return data
+
+
+def save_admin_paid_leave_data(data: dict, actor: str = "管理者") -> Path:
+    """管理者有給調整を保存する。"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now().isoformat(),
+        "updated_by": actor,
+        "adjustments": data.get("adjustments", []),
+    }
+    with open(ADMIN_PAID_LEAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return ADMIN_PAID_LEAVE_FILE
+
+
+def push_admin_paid_leave_to_github() -> None:
+    """設定済みなら管理者有給調整をGitHubへ保存する。"""
+    try:
+        from prototype.github_backup import push_local_file_to_github
+
+        push_local_file_to_github(
+            ADMIN_PAID_LEAVE_FILE,
+            "config/admin_paid_leave_adjustments.json",
+            "Update admin paid leave adjustments",
+        )
+    except Exception:
+        pass
+
+
+def parse_day_list_text(text: str, days_in_month: int) -> list[int]:
+    """「26」や「5, 26」から月内の日付を取り出す。"""
+    days = []
+    for raw in str(text or "").replace("、", ",").replace("・", ",").split(","):
+        raw = raw.strip().replace("日", "")
+        if not raw.isdigit():
+            continue
+        day = int(raw)
+        if 1 <= day <= days_in_month:
+            days.append(day)
+    return sorted(set(days))
+
+
+def admin_paid_leave_adjustments_for_month(year: int, month: int) -> list[dict]:
+    """指定年月の管理者有給調整だけを返す。"""
+    data = load_admin_paid_leave_data()
+    return [
+        adj for adj in data.get("adjustments", [])
+        if int(adj.get("year", 0) or 0) == int(year)
+        and int(adj.get("month", 0) or 0) == int(month)
+    ]
+
+
+def admin_paid_leave_days_for_month(year: int, month: int) -> dict[str, int]:
+    """管理者調整分の有給日数を従業員別に合算する。"""
+    totals: dict[str, int] = {}
+    for adj in admin_paid_leave_adjustments_for_month(year, month):
+        employee = str(adj.get("employee", "")).strip()
+        if not employee:
+            continue
+        totals[employee] = totals.get(employee, 0) + int(adj.get("days", 0) or 0)
+    return totals
+
+
+def admin_paid_leave_dates_for_month(year: int, month: int) -> dict[str, set[int]]:
+    """管理者調整分の有給日付を従業員別に返す。"""
+    dates_by_employee: dict[str, set[int]] = {}
+    for adj in admin_paid_leave_adjustments_for_month(year, month):
+        employee = str(adj.get("employee", "")).strip()
+        if not employee:
+            continue
+        dates_by_employee.setdefault(employee, set()).update(
+            int(d) for d in adj.get("dates", []) if str(d).isdigit()
+        )
+    return dates_by_employee
+
+
+def combined_paid_leave_days(
+    submitted_paid_leave_days: dict[str, int],
+    year: int,
+    month: int,
+) -> dict[str, int]:
+    """本人申請分と管理者調整分を合算する。"""
+    combined = {
+        emp: int(days or 0)
+        for emp, days in (submitted_paid_leave_days or {}).items()
+    }
+    for emp, days in admin_paid_leave_days_for_month(year, month).items():
+        combined[emp] = int(combined.get(emp, 0) or 0) + int(days or 0)
+    return {emp: days for emp, days in combined.items() if days > 0}
+
+
+def add_admin_paid_leave_adjustment(
+    year: int,
+    month: int,
+    employee: str,
+    days: int,
+    dates: Optional[list[int]] = None,
+    reason: str = "",
+    actor: str = "管理者",
+) -> None:
+    """管理者側の有給調整を1件追加する。"""
+    data = load_admin_paid_leave_data()
+    data.setdefault("adjustments", []).append({
+        "year": int(year),
+        "month": int(month),
+        "employee": str(employee),
+        "days": int(days),
+        "dates": sorted(set(int(d) for d in (dates or []) if int(d) > 0)),
+        "reason": reason,
+        "created_at": datetime.now().isoformat(),
+        "created_by": actor,
+    })
+    save_admin_paid_leave_data(data, actor=actor)
+    push_admin_paid_leave_to_github()
 from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
 from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
 from prototype.generator import generate_shift, determine_operation_modes
@@ -580,9 +717,33 @@ def get_session_shift() -> Optional[MonthlyShift]:
     return st.session_state.get("current_shift")
 
 
+def shift_session_key(year: int, month: int) -> str:
+    """年月ごとのシフト保存キー。"""
+    return f"{int(year):04d}-{int(month):02d}"
+
+
+def get_session_shift_for_month(year: int, month: int) -> Optional[MonthlyShift]:
+    """指定年月のシフトをセッションから取得する。"""
+    shifts_by_month = st.session_state.get("shifts_by_month", {})
+    shift = shifts_by_month.get(shift_session_key(year, month))
+    if shift is not None:
+        return shift
+    current_shift = get_session_shift()
+    if (
+        current_shift is not None
+        and int(current_shift.year) == int(year)
+        and int(current_shift.month) == int(month)
+    ):
+        return current_shift
+    return None
+
+
 def save_session_shift(shift: MonthlyShift) -> None:
     """シフトをセッションに保存"""
     st.session_state["current_shift"] = shift
+    shifts_by_month = dict(st.session_state.get("shifts_by_month", {}))
+    shifts_by_month[shift_session_key(shift.year, shift.month)] = shift
+    st.session_state["shifts_by_month"] = shifts_by_month
 
 
 STORE_SYMBOL_OPTIONS = ["", "×", "○", "□", "△", "☆", "◆"]
@@ -903,8 +1064,10 @@ def get_editor_changed_cells(base_shift: MonthlyShift, rows: list[dict]) -> set[
 
 def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
     """生成時に使った希望データを、対象シフトに合う場合だけ返す。"""
-    inputs = st.session_state.get("last_validation_inputs", {})
-    if inputs.get("ym") != f"{int(shift.year):04d}-{int(shift.month):02d}":
+    ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+    inputs_by_month = st.session_state.get("validation_inputs_by_month", {})
+    inputs = inputs_by_month.get(ym) or st.session_state.get("last_validation_inputs", {})
+    if inputs.get("ym") != ym:
         return {
             "work_requests": [],
             "off_requests": {},
@@ -914,11 +1077,105 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         }
     return {
         "work_requests": inputs.get("work_requests", []),
+        "preferred_work_requests": inputs.get("preferred_work_requests", []),
+        "preferred_work_groups": inputs.get("preferred_work_groups", []),
         "off_requests": inputs.get("off_requests", {}),
         "prev_month": inputs.get("prev_month", []),
         "holiday_overrides": inputs.get("holiday_overrides", {}),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
     }
+
+
+def save_validation_context(inputs: dict) -> None:
+    """生成時に使った希望データを年月ごとに保存する。"""
+    st.session_state["last_validation_inputs"] = dict(inputs)
+    ym = inputs.get("ym")
+    if not ym:
+        return
+    inputs_by_month = dict(st.session_state.get("validation_inputs_by_month", {}))
+    inputs_by_month[str(ym)] = dict(inputs)
+    st.session_state["validation_inputs_by_month"] = inputs_by_month
+
+
+def build_part_time_paid_leave_suggestions(
+    shift: MonthlyShift,
+    validation_context: dict,
+) -> list[dict]:
+    """パートの出勤希望が休みになった日を、有給調整候補として返す。"""
+    off_requests = validation_context.get("off_requests", {}) or {}
+    work_preferences = []
+    work_preferences.extend(validation_context.get("work_requests", []) or [])
+    work_preferences.extend(validation_context.get("preferred_work_requests", []) or [])
+    existing_admin_dates = admin_paid_leave_dates_for_month(shift.year, shift.month)
+    suggestions: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for employee, day, requested_store in work_preferences:
+        try:
+            day = int(day)
+            emp = get_employee(str(employee))
+        except Exception:
+            continue
+        if emp.employment_status != EmploymentStatus.PART_TIME:
+            continue
+        if day in set(int(d) for d in off_requests.get(employee, [])):
+            continue
+        if day in existing_admin_dates.get(employee, set()):
+            continue
+        key = (str(employee), day)
+        if key in seen:
+            continue
+        seen.add(key)
+        assignment = shift.get_assignment(str(employee), day)
+        if assignment is not None and assignment.store != Store.OFF:
+            continue
+        suggestions.append({
+            "employee": str(employee),
+            "day": day,
+            "requested_store": requested_store,
+            "reason": "出勤希望日が調整上休みになっています",
+        })
+    return sorted(suggestions, key=lambda x: (x["day"], x["employee"]))
+
+
+def render_part_time_paid_leave_suggestions(
+    shift: MonthlyShift,
+    validation_context: dict,
+    key_prefix: str,
+) -> None:
+    """パート・アルバイトの有給調整候補を画面に出す。"""
+    suggestions = build_part_time_paid_leave_suggestions(shift, validation_context)
+    if not suggestions:
+        return
+    st.info(
+        "パート・アルバイトの出勤希望が休みになっている日があります。"
+        "必要に応じて、管理者調整として有給を付けられます。"
+    )
+    rows = []
+    for item in suggestions:
+        store = item.get("requested_store")
+        rows.append({
+            "氏名": item["employee"],
+            "日付": f"{int(shift.month)}/{int(item['day'])}",
+            "希望店舗": store.display_name if isinstance(store, Store) else "指定なし",
+            "状態": "休み",
+            "候補": "有給調整",
+        })
+    st.dataframe(rows, width="stretch", hide_index=True)
+    with st.expander("有給調整をこの画面で追加", expanded=False):
+        for item in suggestions:
+            label = f"{item['employee']} {int(shift.month)}/{int(item['day'])} を有給1日として記録"
+            if st.button(label, key=f"{key_prefix}_paid_leave_{item['employee']}_{item['day']}"):
+                add_admin_paid_leave_adjustment(
+                    shift.year,
+                    shift.month,
+                    item["employee"],
+                    1,
+                    dates=[int(item["day"])],
+                    reason="出勤希望日を調整上休みにしたため",
+                    actor="管理者",
+                )
+                st.success("管理者有給調整を追加しました。")
+                st.rerun()
 
 
 def run_shift_validation(**kwargs):
@@ -1896,10 +2153,18 @@ if mode == "📊 経営者ビュー":
         submitted_by_name = {
             s["employee"]: s for s in submission_status["submitted"]
         }
+        admin_leave_by_employee = admin_paid_leave_days_for_month(
+            int(target_year), int(target_month),
+        )
         request_rows = []
         for emp_name in expected_employees:
             s = submitted_by_name.get(emp_name)
             if s:
+                submitted_leave = int(s.get("paid_leave_days", 0) or 0)
+                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
+                leave_label = f"{submitted_leave + admin_leave}日"
+                if admin_leave:
+                    leave_label += f"（管理者+{admin_leave}日）"
                 note_applied = []
                 if s.get("requested_holiday_days"):
                     note_applied.append(f"休み計{s['requested_holiday_days']}日")
@@ -1912,18 +2177,19 @@ if mode == "📊 経営者ビュー":
                     "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
                     "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
                     "出勤希望": format_day_list(s.get("work_request_days", [])),
-                    "有給": f"{s.get('paid_leave_days', 0)}日",
+                    "有給": leave_label,
                     "自由記載から反映": " / ".join(note_applied),
                     "備考": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             else:
+                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
                 request_rows.append({
                     "氏名": emp_name,
                     "状態": "未提出",
                     "× 休み希望（絶対）": "",
                     "△ できれば休み": "",
                     "出勤希望": "",
-                    "有給": "",
+                    "有給": f"管理者+{admin_leave}日" if admin_leave else "",
                     "自由記載から反映": "",
                     "備考": "",
                 })
@@ -2129,8 +2395,13 @@ if mode == "📊 経営者ビュー":
                         use_preferred_consecutive_off = list(
                             getattr(sub_data, "preferred_consecutive_off", [])
                         )
+                        effective_paid_leave_days = combined_paid_leave_days(
+                            sub_data.paid_leave_days,
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
                         # 有給日数を holiday_overrides に反映（基準＋有給日数）
-                        for emp_name, paid_days in sub_data.paid_leave_days.items():
+                        for emp_name, paid_days in effective_paid_leave_days.items():
                             try:
                                 from prototype.employees import get_employee
                                 emp = get_employee(emp_name)
@@ -2165,7 +2436,14 @@ if mode == "📊 経営者ビュー":
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
                                 f"{', '.join(sub_data.pending_employees[:5])}"
                                 f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
-                                "は希望未指定として自由配置）"
+                                    "は希望未指定として自由配置）"
+                                )
+                        admin_leave_days = admin_paid_leave_days_for_month(
+                            _saved_target_year, _saved_target_month,
+                        )
+                        if admin_leave_days:
+                            data_source_msg += (
+                                "\n管理者が追加した有給調整も集計に含めました。"
                             )
                         try:
                             from prototype.reconciliation import (
@@ -2319,7 +2597,20 @@ if mode == "📊 経営者ビュー":
                     "preferred_work_groups_count": len(use_preferred_work_groups),
                     "flexible_off_count": len(use_flexible_off),
                     "holiday_overrides": dict(use_holiday_overrides),
-                    "paid_leave_days": dict(sub_data.paid_leave_days),
+                    "paid_leave_days": dict(
+                        combined_paid_leave_days(
+                            sub_data.paid_leave_days,
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
+                    ),
+                    "submitted_paid_leave_days": dict(sub_data.paid_leave_days),
+                    "admin_paid_leave_days": dict(
+                        admin_paid_leave_days_for_month(
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
+                    ),
                     "requested_holiday_days": dict(
                         getattr(sub_data, "requested_holiday_days", {})
                     ),
@@ -2351,7 +2642,7 @@ if mode == "📊 経営者ビュー":
                     except Exception:
                         pass
                     # 検証で使うために、実際に使った制約も保存
-                    st.session_state["last_validation_inputs"] = {
+                    save_validation_context({
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "off_requests": dict(use_off_requests),
                         "work_requests": list(use_work_requests),
@@ -2361,7 +2652,7 @@ if mode == "📊 経営者ビュー":
                         "holiday_overrides": dict(use_holiday_overrides),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
                         "historical_actual_preferences": list(use_historical_actual_preferences),
-                    }
+                    })
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                     st.session_state[_gen_result_key] = {
@@ -2604,7 +2895,7 @@ if mode == "📊 経営者ビュー":
     st.markdown("---")
 
     # シフト表示
-    shift = get_session_shift()
+    shift = get_session_shift_for_month(int(target_year), int(target_month))
     if shift is None:
         st.info("👆 上のボタンを押してシフトを生成してください")
         try:
@@ -2621,22 +2912,6 @@ if mode == "📊 経営者ビュー":
                 save_session_shift(latest_draft)
                 st.success("自動保存の下書きを復元しました")
                 st.rerun()
-    elif int(shift.year) != int(target_year) or int(shift.month) != int(target_month):
-        # 表示中の月と保持しているシフトの月が違う場合は隠す（混乱防止）
-        st.warning(
-            f"⚠ **{target_year}年{target_month}月** を表示しようとしていますが、"
-            f"前回生成したシフトは **{shift.year}年{shift.month}月** のものです。"
-            f"\n\n上の「シフトを自動生成」ボタンで作り直すか、"
-            "下書き・過去シフトから読み込んでください。"
-        )
-        if st.button(
-            f"🗑 前回生成した {shift.year}/{shift.month} のシフトを破棄",
-            key="discard_stale_shift",
-        ):
-            st.session_state.pop("current_shift", None)
-            st.session_state.pop("last_validation_inputs", None)
-            st.rerun()
-        shift = None
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
         shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力"]
@@ -2830,6 +3105,11 @@ if mode == "📊 経営者ビュー":
                 state_col2.metric("エラー", inline_result.error_count, delta_color="inverse")
                 state_col3.metric("警告", inline_result.warning_count, delta_color="inverse")
                 state_col4.metric("人員不足日", len(short_staff_by_store), delta_color="inverse")
+                render_part_time_paid_leave_suggestions(
+                    inline_display_shift,
+                    _table_validation_context,
+                    key_prefix=f"inline_{edit_ym}",
+                )
 
                 if fixed_off_violations:
                     st.error(
@@ -4280,13 +4560,90 @@ elif mode == "⚙️ 設定":
     with setting_tab_leave:
         st.markdown("### 🏖 有給使用状況（経営者のみ閲覧可能）")
         st.caption(
-            "従業員から提出された希望有給日数の集計です。"
-            "提出データの `paid_leave_days` フィールドから自動集計しています。"
+            "本人が提出した希望有給と、管理者が後から付けた有給調整を合算して確認できます。"
         )
+
+        with st.container(border=True):
+            st.markdown("#### 管理者側で有給調整を追加")
+            st.caption(
+                "出勤希望だったパート・アルバイトを調整上休みにした場合などに使います。"
+                "本人の提出内容は上書きせず、管理者調整として別に記録します。"
+            )
+            adj_col1, adj_col2, adj_col3, adj_col4 = st.columns([1, 1, 1.4, 1])
+            with adj_col1:
+                adj_year = st.number_input(
+                    "年",
+                    min_value=2020,
+                    max_value=2100,
+                    value=int(st.session_state.get("target_year", date.today().year)),
+                    step=1,
+                    key="admin_leave_year",
+                )
+            with adj_col2:
+                adj_month = st.number_input(
+                    "月",
+                    min_value=1,
+                    max_value=12,
+                    value=int(st.session_state.get("target_month", date.today().month)),
+                    step=1,
+                    key="admin_leave_month",
+                )
+            part_time_names = [
+                e.name for e in get_all_employees_including_retired()
+                if e.employment_status == EmploymentStatus.PART_TIME
+            ]
+            employee_options = part_time_names + [
+                e.name for e in get_all_employees_including_retired()
+                if e.name not in part_time_names
+                and e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
+            ]
+            with adj_col3:
+                adj_employee = st.selectbox(
+                    "従業員",
+                    options=employee_options,
+                    key="admin_leave_employee",
+                )
+            with adj_col4:
+                adj_days = st.number_input(
+                    "有給日数",
+                    min_value=1,
+                    max_value=31,
+                    value=1,
+                    step=1,
+                    key="admin_leave_days",
+                )
+            adj_col5, adj_col6 = st.columns([1, 2])
+            with adj_col5:
+                adj_dates_text = st.text_input(
+                    "対象日（任意）",
+                    placeholder="例: 26",
+                    key="admin_leave_dates",
+                )
+            with adj_col6:
+                adj_reason = st.text_input(
+                    "理由",
+                    placeholder="例: 出勤希望だったが調整上休み。有給消化で合意",
+                    key="admin_leave_reason",
+                )
+            if st.button("管理者有給調整を追加", type="primary", key="admin_leave_add"):
+                days_in_selected_month = monthrange(int(adj_year), int(adj_month))[1]
+                dates = parse_day_list_text(adj_dates_text, days_in_selected_month)
+                add_admin_paid_leave_adjustment(
+                    int(adj_year),
+                    int(adj_month),
+                    str(adj_employee),
+                    int(adj_days),
+                    dates=dates,
+                    reason=adj_reason or "管理者による有給調整",
+                    actor="管理者",
+                )
+                st.success("管理者有給調整を追加しました。")
+                st.rerun()
 
         import json as _json
         from collections import defaultdict
         backup_dir = BACKUP_DIR
+        admin_leave_data = load_admin_paid_leave_data()
 
         # 月別・従業員別の有給集計
         # data[ym][employee] = {paid_leave_days, submitted_at, base_holidays, ...}
@@ -4308,14 +4665,49 @@ elif mode == "⚙️ 設定":
                         # 最新のもののみ採用
                         if (author not in leave_data[ym]
                                 or saved_at > leave_data[ym][author].get("saved_at", "")):
+                            submitted_paid_leave_days = int(d.get("paid_leave_days", 0))
                             leave_data[ym][author] = {
-                                "paid_leave_days": int(d.get("paid_leave_days", 0)),
+                                "submitted_paid_leave_days": submitted_paid_leave_days,
+                                "admin_paid_leave_days": 0,
+                                "admin_paid_leave_dates": [],
+                                "admin_paid_leave_reasons": [],
+                                "paid_leave_days": submitted_paid_leave_days,
                                 "monthly_target_workdays": d.get("monthly_target_workdays"),
                                 "base_holidays": d.get("base_holidays"),
                                 "saved_at": saved_at,
                             }
                     except Exception:
                         continue
+
+        for adj in admin_leave_data.get("adjustments", []):
+            try:
+                adj_year = int(adj.get("year"))
+                adj_month = int(adj.get("month"))
+                emp = str(adj.get("employee", "")).strip()
+                days = int(adj.get("days", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if not emp or days <= 0:
+                continue
+            ym = f"{adj_year:04d}-{adj_month:02d}"
+            info = leave_data[ym].setdefault(emp, {
+                "submitted_paid_leave_days": 0,
+                "admin_paid_leave_days": 0,
+                "admin_paid_leave_dates": [],
+                "admin_paid_leave_reasons": [],
+                "paid_leave_days": 0,
+                "monthly_target_workdays": None,
+                "base_holidays": None,
+                "saved_at": "",
+            })
+            info["admin_paid_leave_days"] = int(info.get("admin_paid_leave_days", 0) or 0) + days
+            info["paid_leave_days"] = (
+                int(info.get("submitted_paid_leave_days", 0) or 0)
+                + int(info.get("admin_paid_leave_days", 0) or 0)
+            )
+            info.setdefault("admin_paid_leave_dates", []).extend(adj.get("dates", []) or [])
+            if adj.get("reason"):
+                info.setdefault("admin_paid_leave_reasons", []).append(str(adj.get("reason")))
 
         if not leave_data:
             st.info("まだ提出データがありません。従業員が希望を提出すると集計が表示されます。")
@@ -4350,39 +4742,48 @@ elif mode == "⚙️ 設定":
                 with lc3:
                     st.metric("月間有給合計", f"{total_paid_leave} 日")
 
-                # 従業員別テーブル
-                table_data = []
-                for emp, info in sorted(month_data.items()):
-                    table_data.append({
-                        "氏名": emp,
-                        "希望有給日数": info["paid_leave_days"],
-                        "基準勤務日数": info.get("monthly_target_workdays") or "-",
-                        "基準休日数": info.get("base_holidays") or "-",
-                        "希望休日合計": (
-                            (info.get("base_holidays") or 0) + info["paid_leave_days"]
-                            if info.get("base_holidays") is not None else "-"
-                        ),
-                        "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
-                    })
-                st.dataframe(table_data, width="stretch", hide_index=True)
+                    # 従業員別テーブル
+                    table_data = []
+                    for emp, info in sorted(month_data.items()):
+                        table_data.append({
+                            "氏名": emp,
+                            "本人希望": info.get("submitted_paid_leave_days", 0),
+                            "管理者調整": info.get("admin_paid_leave_days", 0),
+                            "有給合計": info["paid_leave_days"],
+                            "調整日": format_day_list(info.get("admin_paid_leave_dates", [])),
+                            "基準勤務日数": info.get("monthly_target_workdays") or "-",
+                            "基準休日数": info.get("base_holidays") or "-",
+                            "希望休日合計": (
+                                (info.get("base_holidays") or 0) + info["paid_leave_days"]
+                                if info.get("base_holidays") is not None else "-"
+                            ),
+                            "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
+                        })
+                    st.dataframe(table_data, width="stretch", hide_index=True)
 
-                # 有給を申請している人だけ強調表示
-                applicants = [
-                    (emp, info) for emp, info in month_data.items()
-                    if info["paid_leave_days"] > 0
-                ]
-                if applicants:
-                    st.markdown("**🏖 有給申請者の詳細**")
-                    for emp, info in applicants:
-                        st.markdown(
-                            f'<div style="background:#fef3c7; padding:8px 12px; '
-                            f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
-                            f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日 '
-                            f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
-                            f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
+                    # 有給を申請している人だけ強調表示
+                    applicants = [
+                        (emp, info) for emp, info in month_data.items()
+                        if info["paid_leave_days"] > 0
+                    ]
+                    if applicants:
+                        st.markdown("**🏖 有給申請者の詳細**")
+                        for emp, info in applicants:
+                            admin_note = ""
+                            if info.get("admin_paid_leave_days", 0):
+                                date_label = format_day_list(info.get("admin_paid_leave_dates", []))
+                                admin_note = f" / 管理者調整 {info['admin_paid_leave_days']}日"
+                                if date_label:
+                                    admin_note += f"（{date_label}）"
+                            st.markdown(
+                                f'<div style="background:#fef3c7; padding:8px 12px; '
+                                f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
+                                f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日{admin_note} '
+                                f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
+                                f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
+                                f'</div>',
+                                unsafe_allow_html=True,
+                            )
 
                 st.markdown("---")
 
