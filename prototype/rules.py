@@ -117,6 +117,15 @@ HIGASHIGUCHI_ALLOWED_STAFF: tuple[str, ...] = (
     *HIGASHIGUCHI_SUBSTITUTE_STAFF,
 )
 
+# 牧野さんの研修ルール。
+# 赤羽東口店・大宮西口店の単独勤務は当面NG。
+# 大宮西口店は月別ルールで研修を明示した月に限り、楯君の同時配置で許可。
+MAKINO_SOLO_NG_STORES: tuple[Store, ...] = (
+    Store.HIGASHIGUCHI,
+    Store.NISHIGUCHI,
+)
+MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
+
 # メイン店舗以外への月内勤務必須回数。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 OFF_MAIN_STORE_MINIMUMS: dict[str, tuple[Store, int]] = {
@@ -127,6 +136,17 @@ OFF_MAIN_STORE_MINIMUMS: dict[str, tuple[Store, int]] = {
 
 # すずらん不在時の補填要員（野澤がいない日のチケット担当）
 SUZURAN_BACKUP_TICKET: tuple[str, ...] = ("岩野", "大類")
+
+# 店舗の鍵を開け閉めできるメンバー。
+# 現時点では生成のハード条件にはせず、検証・画面表示の警告として扱う。
+STORE_KEYHOLDERS: dict[Store, tuple[str, ...]] = {
+    Store.AKABANE: ("山本", "板倉", "今津", "鈴木", "春山", "長尾", "楯"),
+    Store.HIGASHIGUCHI: ("土井", "春山", "長尾", "楯", "今津"),
+    Store.OMIYA: ("下地", "春山"),
+    Store.SUZURAN: ("長尾", "野澤", "春山", "今津"),
+    Store.NISHIGUCHI: ("楯", "春山", "長尾", "今津"),
+}
+SUZURAN_KEY_SUPPORT_FROM_OMIYA: tuple[str, ...] = ("下地", "春山")
 
 
 # ============================================================

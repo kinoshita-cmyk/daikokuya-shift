@@ -37,6 +37,7 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
+    MAKINO_NISHIGUCHI_TRAINING_PARTNER,
 )
 
 
@@ -86,6 +87,48 @@ ALL_STORES = [
     Store.AKABANE, Store.HIGASHIGUCHI, Store.OMIYA,
     Store.NISHIGUCHI, Store.SUZURAN, Store.OFF,
 ]
+
+
+def _store_from_rule_value(value) -> Optional[Store]:
+    """月別ルールの店舗表記を Store に変換する。"""
+    if isinstance(value, Store):
+        return value
+    value_str = str(value)
+    try:
+        return Store[value_str]
+    except KeyError:
+        pass
+    for store in Store:
+        if store.display_name == value_str or store.value == value_str:
+            return store
+    return None
+
+
+def _monthly_rule_allows_employee_store(
+    rules: list[dict],
+    employee: str,
+    store: Store,
+) -> bool:
+    """月別ルールで特定スタッフの特定店舗勤務が明示されているか。"""
+    for rule in rules or []:
+        if str(rule.get("employee") or "") != employee:
+            continue
+        comparison = str(rule.get("comparison") or "min").lower()
+        if comparison == "forbid":
+            continue
+        try:
+            count = int(rule.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            continue
+        stores = [
+            s for s in (_store_from_rule_value(v) for v in (rule.get("stores") or []))
+            if s is not None
+        ]
+        if store in stores:
+            return True
+    return False
 
 # 実運用では「月間の基準勤務日数」から大きく外れると、
 # 警告ゼロでも使いにくいシフトになるため、店舗嗜好より強く寄せる。
@@ -334,6 +377,28 @@ def generate_shift(
                     model.Add(x[e.name][d][s] == 0)
             elif affinity_none:
                 affinity_none_assignments.extend(x[e.name][d][s] for d in days)
+
+    # 牧野さんは赤羽東口店・大宮西口店の単独勤務NG。
+    # 大宮西口店は、月別ルールで「牧野さんの西口研修」が明示された月だけ、
+    # 楯君と同じ日に同じ店舗へ入る形で許可する。
+    if "牧野" in main_employee_names:
+        makino_nishi_training_enabled = _monthly_rule_allows_employee_store(
+            monthly_store_count_rules,
+            "牧野",
+            Store.NISHIGUCHI,
+        )
+        for d in days:
+            model.Add(x["牧野"][d][Store.HIGASHIGUCHI] == 0)
+            if (
+                makino_nishi_training_enabled
+                and MAKINO_NISHIGUCHI_TRAINING_PARTNER in main_employee_names
+            ):
+                model.Add(
+                    x["牧野"][d][Store.NISHIGUCHI]
+                    <= x[MAKINO_NISHIGUCHI_TRAINING_PARTNER][d][Store.NISHIGUCHI]
+                )
+            else:
+                model.Add(x["牧野"][d][Store.NISHIGUCHI] == 0)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数

@@ -27,6 +27,8 @@ from .rules import (
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
     get_capacity, OFF_MAIN_STORE_MINIMUMS,
+    MAKINO_NISHIGUCHI_TRAINING_PARTNER,
+    STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
 )
 
 
@@ -167,7 +169,13 @@ def validate(
     # 11. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 12. 統計情報の集計
+    # 12. 牧野さんの東口・西口研修ルールチェック
+    _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
+
+    # 13. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    _check_store_keyholders(shift, result, days_in_month)
+
+    # 14. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -642,6 +650,14 @@ def _check_required_off_main_store_days(
             ))
 
 
+def _employee_names_at_store(shift: MonthlyShift, day: int, store: Store) -> list[str]:
+    """指定日の指定店舗に入っている従業員名を返す。"""
+    return [
+        a.employee for a in shift.get_day_assignments(day)
+        if a.store == store
+    ]
+
+
 def _store_from_rule_value(value) -> Optional[Store]:
     """月別ルールの店舗表記を Store に変換する。"""
     if isinstance(value, Store):
@@ -655,6 +671,136 @@ def _store_from_rule_value(value) -> Optional[Store]:
         if store.display_name == value_str or store.value == value_str:
             return store
     return None
+
+
+def _monthly_rule_allows_employee_store(
+    rules: list[dict],
+    employee: str,
+    store: Store,
+) -> bool:
+    """月別ルールで特定スタッフの特定店舗勤務が明示されているか。"""
+    for rule in rules or []:
+        if str(rule.get("employee") or "") != employee:
+            continue
+        comparison = str(rule.get("comparison") or "min").lower()
+        if comparison == "forbid":
+            continue
+        try:
+            count = int(rule.get("count") or 0)
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            continue
+        stores = [
+            s for s in (_store_from_rule_value(v) for v in (rule.get("stores") or []))
+            if s is not None and s != Store.OFF
+        ]
+        if store in stores:
+            return True
+    return False
+
+
+def _check_makino_training_rules(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    monthly_store_count_rules: list[dict],
+) -> None:
+    """牧野さんの赤羽東口・大宮西口研修ルールを検証する。"""
+    nishi_training_enabled = _monthly_rule_allows_employee_store(
+        monthly_store_count_rules,
+        "牧野",
+        Store.NISHIGUCHI,
+    )
+    for day in range(1, days + 1):
+        higashi_workers = _employee_names_at_store(shift, day, Store.HIGASHIGUCHI)
+        if "牧野" in higashi_workers:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="牧野研修ルール",
+                day=day,
+                employee="牧野",
+                message="牧野さんは赤羽東口店の単独勤務・配置は当面NGです。",
+            ))
+
+        nishi_workers = _employee_names_at_store(shift, day, Store.NISHIGUCHI)
+        if "牧野" not in nishi_workers:
+            continue
+        if not nishi_training_enabled:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="牧野研修ルール",
+                day=day,
+                employee="牧野",
+                message=(
+                    "牧野さんの大宮西口店勤務は、月別ルールで研修を明示した月だけ許可します"
+                    f"／配属: {', '.join(nishi_workers)}"
+                ),
+            ))
+        elif MAKINO_NISHIGUCHI_TRAINING_PARTNER not in nishi_workers:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="牧野研修ルール",
+                day=day,
+                employee="牧野",
+                message=(
+                    "牧野さんの大宮西口店勤務は楯君との研修時のみです。"
+                    f"楯君と同時配置してください／配属: {', '.join(nishi_workers)}"
+                ),
+            ))
+
+
+def _check_store_keyholders(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """各店舗に鍵担当がいるか確認する。"""
+    for day in range(1, days + 1):
+        mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+        if mode == OperationMode.CLOSED:
+            continue
+        capacity_map = get_capacity(mode)
+        weekday = date(shift.year, shift.month, day).weekday()
+        for store, keyholders in STORE_KEYHOLDERS.items():
+            cap = capacity_map.get(store)
+            if cap is not None and weekday in cap.closed_dow:
+                continue
+            workers = _employee_names_at_store(shift, day, store)
+            if not workers:
+                continue
+            if any(name in keyholders for name in workers):
+                continue
+            if store == Store.SUZURAN:
+                omiya_workers = _employee_names_at_store(shift, day, Store.OMIYA)
+                supporters = [
+                    name for name in omiya_workers
+                    if name in SUZURAN_KEY_SUPPORT_FROM_OMIYA
+                ]
+                if supporters:
+                    result.issues.append(Issue(
+                        severity="INFO",
+                        category="鍵応援",
+                        day=day,
+                        employee=None,
+                        message=(
+                            "大宮すずらん通り店に鍵担当がいません。"
+                            f"大宮駅前店の{', '.join(supporters)}が開け締め応援候補です"
+                            f"／すずらん配属: {', '.join(workers)}"
+                        ),
+                    ))
+                    continue
+            result.issues.append(Issue(
+                severity="WARNING",
+                category="鍵不足",
+                day=day,
+                employee=None,
+                message=(
+                    f"{store.display_name}に鍵担当がいません"
+                    f"／配属: {', '.join(workers)}"
+                    f"／鍵担当: {', '.join(keyholders)}"
+                ),
+            ))
 
 
 def _check_monthly_store_count_rules(
