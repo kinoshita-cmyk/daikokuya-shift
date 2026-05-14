@@ -2078,7 +2078,16 @@ def monthly_rule_display_text(rule: dict) -> str:
 
 def advisor_candidate_limit(year: int, month: int) -> int:
     """顧問を候補として試算する最大日数。自動確定はしない。"""
+    # 2026年5月はGWの希望休集中に加え、牧野さんの東口・西口単独NGを反映すると
+    # 2日候補では下書き自体が出ない。候補表示だけ3日まで広げ、最終確定は手動で行う。
+    if int(year) == 2026 and int(month) == 5:
+        return 3
     return 2
+
+
+def emergency_advisor_candidate_limit(year: int, month: int) -> int:
+    """通常候補でも解なしの時だけ使う、下書き作成用の緊急候補枠。"""
+    return max(advisor_candidate_limit(year, month), 10)
 
 
 def advisor_candidate_rows_from_shift(shift: Optional[MonthlyShift]) -> list[dict]:
@@ -2150,7 +2159,13 @@ def render_advisor_candidate_notice(input_summary: dict) -> None:
     trigger_issues = input_summary.get("advisor_candidate_triggers") or []
     if not candidates and not trigger_issues:
         return
-    if input_summary.get("advisor_candidate_base_used"):
+    if input_summary.get("emergency_draft_used"):
+        st.warning(
+            "通常条件では下書きも作れなかったため、緊急用に顧問候補枠を広げて"
+            "確認用下書きを作成しています。顧問は自動確定していません。"
+            "エラー・警告を見ながら手動で調整してください。"
+        )
+    elif input_summary.get("advisor_candidate_base_used"):
         st.warning(
             "専務/顧問なしではシフトを確定できないため、"
             "候補を外した確認用下書きを表示しています。"
@@ -3177,6 +3192,7 @@ if mode == "📊 経営者ビュー":
                     advisor_candidates = []
                     advisor_candidate_triggers = []
                     advisor_candidate_base_used = False
+                    emergency_draft_used = False
                     if shift is not None:
                         candidate_validation = run_shift_validation(
                             shift=shift,
@@ -3224,6 +3240,44 @@ if mode == "📊 経営者ビュー":
                                 "顧問候補を外した確認用下書きを表示します。"
                                 "候補を手動で入れるか、条件を調整してください。"
                             )
+
+                    if shift is None and "advisor_max_days" in generator_params:
+                        emergency_limit = emergency_advisor_candidate_limit(
+                            _saved_target_year, _saved_target_month,
+                        )
+                        if emergency_limit > advisor_candidate_limit(
+                            _saved_target_year, _saved_target_month,
+                        ):
+                            progress_area.info(
+                                "⏳ 通常の候補枠でも下書きが出ないため、"
+                                "緊急用の仮下書きを作成しています..."
+                            )
+                            emergency_probe_kwargs = dict(generation_kwargs)
+                            emergency_probe_kwargs["advisor_max_days"] = emergency_limit
+                            if "strict_warning_constraints" in emergency_probe_kwargs:
+                                emergency_probe_kwargs["strict_warning_constraints"] = False
+                            emergency_probe_shift = generate_shift(**emergency_probe_kwargs)
+                            if emergency_probe_shift is not None:
+                                shift = strip_advisor_assignments(emergency_probe_shift)
+                                advisor_candidates = advisor_candidate_rows_from_shift(
+                                    emergency_probe_shift
+                                )
+                                advisor_candidate_base_used = True
+                                emergency_draft_used = True
+                                if not advisor_candidate_triggers:
+                                    advisor_candidate_triggers = [{
+                                        "日付": "",
+                                        "区分": "緊急下書き",
+                                        "内容": (
+                                            "通常の候補枠では下書きが出ないため、"
+                                            "顧問候補枠を一時的に広げて仮案を作成しました。"
+                                        ),
+                                    }]
+                                data_source_msg += (
+                                    "\n通常の候補枠でも解が見つからなかったため、"
+                                    "緊急用に顧問候補枠を広げた確認用下書きを表示します。"
+                                    "顧問は自動確定していません。エラーを見ながら手動で調整してください。"
+                                )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
@@ -3273,6 +3327,7 @@ if mode == "📊 経営者ビュー":
                     "advisor_candidates": list(advisor_candidates),
                     "advisor_candidate_triggers": list(advisor_candidate_triggers),
                     "advisor_candidate_base_used": bool(advisor_candidate_base_used),
+                    "emergency_draft_used": bool(emergency_draft_used),
                     "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
