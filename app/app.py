@@ -4539,7 +4539,7 @@ if mode == "📊 経営者ビュー":
 # ============================================================
 
 elif mode == "👤 従業員ビュー":
-    st.title("👤 希望シフト提出")
+    st.title("👤 希望シフト")
 
     # マジックリンクでログインしている場合は、その従業員に固定
     from auth import get_logged_in_employee, is_employee, is_manager
@@ -4559,7 +4559,7 @@ elif mode == "👤 従業員ビュー":
             f'border-left:4px solid #16a34a; margin-bottom:12px;">'
             f'👋 こんにちは、<strong>{selected}さん</strong>。<br>'
             f'<span style="font-size:13px; color:#166534;">'
-            f'このページからシフト希望を提出してください。'
+            f'このページで希望提出と確定シフトの確認ができます。'
             f'</span></div>',
             unsafe_allow_html=True,
         )
@@ -4695,6 +4695,97 @@ elif mode == "👤 従業員ビュー":
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
     done_key = f"pref_done_{selected}_{target_year}_{target_month}"
 
+    if "user_prefs" not in st.session_state:
+        st.session_state.user_prefs = {}
+    user_key = f"{selected}_{target_year}_{target_month}"
+    existing_submission = None
+    edit_existing_key = f"pref_edit_existing_{selected}_{target_year}_{target_month}"
+    try:
+        _status = ShiftBackup().get_submission_status(
+            int(target_year), int(target_month), [selected],
+        )
+        existing_submission = next(
+            (s for s in _status.get("submitted", []) if s.get("employee") == selected),
+            None,
+        )
+    except Exception:
+        existing_submission = None
+
+    if (
+        existing_submission
+        and not st.session_state.get(done_key)
+        and not st.session_state.get(edit_existing_key)
+    ):
+        submitted_at = existing_submission.get("submitted_at", "")[:19].replace("T", " ")
+        x_days_submitted = existing_submission.get("off_request_days", [])
+        triangle_days_submitted = existing_submission.get("flexible_off_days", [])
+        ok_days_submitted = [
+            d for d in range(1, days_in_month + 1)
+            if d not in set(x_days_submitted) and d not in set(triangle_days_submitted)
+        ]
+        paid_leave_submitted = int(existing_submission.get("paid_leave_days", 0) or 0)
+        st.markdown("### 提出済み")
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** は提出済みです。\n\n"
+            f"提出日時: {submitted_at or '保存済み'}"
+        )
+        st.info(
+            "この画面が表示されていれば、希望は保存されています。"
+            "内容を変更したい場合だけ、下のボタンから修正して再提出してください。"
+        )
+        submitted_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_submitted), "日数": len(x_days_submitted)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_submitted), "日数": len(triangle_days_submitted)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_submitted), "日数": len(ok_days_submitted)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_submitted}日", "日数": paid_leave_submitted},
+            {"項目": "自由記述", "内容": existing_submission.get("note", "").strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(submitted_rows)
+        if st.button(
+            "内容を修正して再提出する",
+            key=f"edit_existing_submission_{selected}_{target_year}_{target_month}",
+            width="stretch",
+        ):
+            st.session_state[edit_existing_key] = True
+            st.rerun()
+        st.stop()
+
+    if st.session_state.get(done_key):
+        done_info = st.session_state.get(done_key) or {}
+        x_days_done = done_info.get("x_days", [])
+        triangle_days_done = done_info.get("triangle_days", [])
+        ok_days_done = done_info.get("ok_days", [])
+        paid_leave_done = int(done_info.get("paid_leave_days", 0) or 0)
+        submitted_at_done = done_info.get("submitted_at", datetime.now().isoformat())[:19].replace("T", " ")
+
+        st.markdown("### 提出完了")
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました。\n\n"
+            f"提出日時: {submitted_at_done}"
+        )
+        st.info(
+            "この画面が表示されていれば提出は完了しています。"
+            "内容を変えたい場合だけ、下のボタンから修正して再提出してください。"
+        )
+        completion_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_done), "日数": len(x_days_done)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_done), "日数": len(ok_days_done)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_done}日", "日数": paid_leave_done},
+            {"項目": "自由記述", "内容": done_info.get("free_text", "").strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(completion_rows)
+        if st.button(
+            "内容を修正して再提出する",
+            key=f"edit_after_done_{selected}_{target_year}_{target_month}",
+            width="stretch",
+        ):
+            st.session_state.pop(done_key, None)
+            st.session_state[review_key] = False
+            st.session_state[edit_existing_key] = True
+            st.rerun()
+        st.stop()
+
     # テスト月（過去・今月）の場合は注意表示
     is_test_month = (
         (target_year < today.year)
@@ -4706,7 +4797,7 @@ elif mode == "👤 従業員ビュー":
             "本番運用時は「📌 翌月」を選んでください。"
         )
 
-    st.markdown(f"### {target_year}年{target_month}月の希望")
+    st.markdown(f"### {target_year}年{target_month}月の希望を入力")
     st.write("各日の希望を **3つのボタンから1つ** 選んでください：")
     st.markdown(
         """
@@ -4802,21 +4893,6 @@ elif mode == "👤 従業員ビュー":
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
     days_per_row = 7
 
-    if "user_prefs" not in st.session_state:
-        st.session_state.user_prefs = {}
-    user_key = f"{selected}_{target_year}_{target_month}"
-    existing_submission = None
-    try:
-        _status = ShiftBackup().get_submission_status(
-            int(target_year), int(target_month), [selected],
-        )
-        existing_submission = next(
-            (s for s in _status.get("submitted", []) if s.get("employee") == selected),
-            None,
-        )
-    except Exception:
-        existing_submission = None
-
     paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
         initial_prefs = {d: "○" for d in range(1, days_in_month + 1)}
@@ -4901,37 +4977,6 @@ elif mode == "👤 従業員ビュー":
             pass
         return save_path
 
-    if st.session_state.get(done_key):
-        done_info = st.session_state.get(done_key) or {}
-        x_days_done = done_info.get("x_days", [d for d, m in prefs.items() if m == "×"])
-        triangle_days_done = done_info.get("triangle_days", [d for d, m in prefs.items() if m == "△"])
-        ok_days_done = done_info.get("ok_days", [d for d, m in prefs.items() if m == "○"])
-        paid_leave_done = int(done_info.get("paid_leave_days", 0) or 0)
-        submitted_at_done = done_info.get("submitted_at", datetime.now().isoformat())[:19].replace("T", " ")
-
-        st.markdown("### 提出完了")
-        st.success(
-            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました。\n\n"
-            f"提出日時: {submitted_at_done}"
-        )
-        st.info(
-            "この画面が表示されていれば提出は完了しています。"
-            "内容を変えたい場合だけ、下のボタンから修正して再提出してください。"
-        )
-        completion_rows = [
-            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_done), "日数": len(x_days_done)},
-            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
-            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_done), "日数": len(ok_days_done)},
-            {"項目": "希望有給日数", "内容": f"{paid_leave_done}日", "日数": paid_leave_done},
-            {"項目": "自由記述", "内容": done_info.get("free_text", "").strip() or "なし", "日数": ""},
-        ]
-        render_scrollable_review_table(completion_rows)
-        if st.button("内容を修正して再提出する", key=f"edit_after_done_{selected}_{target_year}_{target_month}", width="stretch"):
-            st.session_state.pop(done_key, None)
-            st.session_state[review_key] = False
-            st.rerun()
-        st.stop()
-
     if st.session_state.get(review_key):
         paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
         free_text_review = st.session_state.get(free_text_key, "")
@@ -4970,6 +5015,7 @@ elif mode == "👤 従業員ビュー":
                     "paid_leave_days": paid_leave_days_review,
                     "free_text": free_text_review,
                 }
+                st.session_state.pop(edit_existing_key, None)
                 st.rerun()
         st.stop()
 
