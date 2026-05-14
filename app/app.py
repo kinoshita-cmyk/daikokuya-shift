@@ -235,7 +235,11 @@ from prototype.models import EmploymentStatus, Skill, Role, Store, StationType, 
 from prototype.may_2026_data import (
     OFF_REQUESTS, WORK_REQUESTS, PREVIOUS_MONTH_CARRYOVER, FLEXIBLE_OFF_REQUESTS,
 )
-from prototype.rules import MAY_2026_HOLIDAY_OVERRIDES
+from prototype.rules import (
+    MAY_2026_HOLIDAY_OVERRIDES,
+    STORE_KEYHOLDERS,
+    SUZURAN_KEY_SUPPORT_FROM_OMIYA,
+)
 
 
 # ============================================================
@@ -433,6 +437,77 @@ def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
     return set(detect_short_staff_by_store(shift).keys())
 
 
+def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, str]]:
+    """鍵担当がいない店舗を日付・店舗別に検出する。"""
+    from prototype.rules import get_capacity
+
+    warnings_by_store: dict[int, dict[Store, str]] = {}
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    for d in range(1, days_in_month + 1):
+        mode = shift.operation_modes.get(d, OperationMode.NORMAL)
+        if mode == OperationMode.CLOSED:
+            continue
+        capacity_map = get_capacity(mode)
+        weekday = date(shift.year, shift.month, d).weekday()
+        day_assignments = shift.get_day_assignments(d)
+        for store, keyholders in STORE_KEYHOLDERS.items():
+            cap = capacity_map.get(store)
+            if cap is None:
+                continue
+            if weekday in cap.closed_dow:
+                continue
+            workers = [
+                a.employee for a in day_assignments
+                if a.store == store
+            ]
+            if not workers:
+                continue
+            if any(name in keyholders for name in workers):
+                continue
+            status = "missing"
+            if store == Store.SUZURAN:
+                omiya_workers = [
+                    a.employee for a in day_assignments
+                    if a.store == Store.OMIYA
+                ]
+                if any(name in SUZURAN_KEY_SUPPORT_FROM_OMIYA for name in omiya_workers):
+                    status = "support"
+            warnings_by_store.setdefault(d, {})[store] = status
+    return warnings_by_store
+
+
+def format_key_warning_summary_for_day(statuses: dict[Store, str]) -> str:
+    """編集グリッド内の鍵欄に入れる短いテキスト。"""
+    if not statuses:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    labels = []
+    for store in sorted(
+        statuses,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        prefix = "応援" if statuses[store] == "support" else "鍵"
+        labels.append(f"{prefix}{mark}{name}")
+    return "・".join(labels)
+
+
+def format_key_warning_summary(
+    shift: MonthlyShift,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
+) -> str:
+    """鍵確認日を短く表示する。"""
+    key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
+    parts = []
+    for day in sorted(key_warnings_by_store):
+        day_text = format_key_warning_summary_for_day(key_warnings_by_store[day])
+        if day_text:
+            parts.append(f"{shift.month}/{day}（{day_text}）")
+    return ", ".join(parts)
+
+
 def format_short_staff_summary(
     shift: MonthlyShift,
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
@@ -474,6 +549,33 @@ def render_short_staff_marks(stores: set[Store]) -> str:
             f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
             f'background:{bg}; color:{color}; border:1px solid {color}; '
             f'font-size:12px; font-weight:700; white-space:nowrap;">{mark}{name}</span>'
+        )
+    return "".join(chips)
+
+
+def render_key_warning_marks(statuses: dict[Store, str]) -> str:
+    """鍵欄に表示する店舗別マークHTML。"""
+    if not statuses:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    chips = []
+    for store in sorted(
+        statuses,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        is_support = statuses[store] == "support"
+        prefix = "応援" if is_support else "鍵"
+        color = "#2563eb" if is_support else "#b45309"
+        bg = "#eff6ff" if is_support else "#fff7ed"
+        chips.append(
+            f'<span style="display:inline-flex; align-items:center; gap:2px; '
+            f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
+            f'background:{bg}; color:{color}; border:1px solid {color}; '
+            f'font-size:12px; font-weight:700; white-space:nowrap;">'
+            f'{prefix}{mark}{name}</span>'
         )
     return "".join(chips)
 
@@ -542,6 +644,7 @@ def render_shift_table(
     shift: MonthlyShift,
     short_staff_days: Optional[set[int]] = None,
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
     sticky: bool = False,
     changed_cells: Optional[set[tuple[str, int]]] = None,
     off_request_cells: Optional[set[tuple[str, int]]] = None,
@@ -560,12 +663,14 @@ def render_shift_table(
         short_staff_days = set(short_staff_by_store.keys())
     else:
         short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
+    if key_warnings_by_store is None:
+        key_warnings_by_store = detect_key_warnings_by_store(shift)
     changed_cells = changed_cells or set()
     off_request_cells = off_request_cells or set()
     selected_cell = selected_cell or ("", 0)
 
     # ヘッダー
-    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
+    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 2
     wrapper_style = (
         "max-height:400px; overflow:auto; border:1px solid #cbd5e1; "
         "border-radius:6px; background:white;"
@@ -595,6 +700,7 @@ def render_shift_table(
     )
     employee_header_style = "min-width:62px; line-height:1.15;"
     short_header_style = "min-width:190px; width:190px;"
+    key_header_style = "min-width:150px; width:150px;"
     html = (
         f'<div style="{wrapper_style}">'
         f'<table style="{table_style}">'
@@ -625,6 +731,10 @@ def render_shift_table(
     html += (
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
         f'{header_style} {short_header_style}">人員少</th>'
+    )
+    html += (
+        f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+        f'{header_style} {key_header_style}">鍵</th>'
     )
     html += '</tr></thead><tbody>'
 
@@ -705,6 +815,13 @@ def render_shift_table(
             f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:190px; '
             f'text-align:center; background:{short_bg}; '
             f'font-weight:bold; color:#92400e;">{short_mark}</td>'
+        )
+        key_mark = render_key_warning_marks(key_warnings_by_store.get(d, {}))
+        key_bg = "#fff7ed" if key_mark else "white"
+        html += (
+            f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:150px; '
+            f'text-align:center; background:{key_bg}; '
+            f'font-weight:bold; color:#b45309;">{key_mark}</td>'
         )
         html += '</tr>'
 
@@ -806,6 +923,7 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
     days_in_month = monthrange(shift.year, shift.month)[1]
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
     short_staff_by_store = detect_short_staff_by_store(shift)
+    key_warnings_by_store = detect_key_warnings_by_store(shift)
     rows = []
     for day in range(1, days_in_month + 1):
         row = {
@@ -815,6 +933,7 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
         for name in EXPORT_COLUMN_ORDER:
             row[name] = assignment_to_symbol(shift.get_assignment(name, day))
         row["人数少"] = format_short_staff_summary_for_day(short_staff_by_store.get(day, set()))
+        row["鍵"] = format_key_warning_summary_for_day(key_warnings_by_store.get(day, {}))
         rows.append(row)
     return rows
 
@@ -834,6 +953,7 @@ def normalize_editor_records(rows: list[dict]) -> list[dict]:
         for name in EXPORT_COLUMN_ORDER:
             normalized_row[name] = normalize_store_symbol(row.get(name, ""))
         normalized_row["人数少"] = str(row.get("人数少") or "")
+        normalized_row["鍵"] = str(row.get("鍵") or "")
         normalized.append(normalized_row)
     return normalized
 
@@ -857,9 +977,13 @@ def refresh_editor_short_staff_column(
     normalized = normalize_editor_records(rows)
     preview_shift = editor_rows_to_shift(base_shift, normalized)
     short_staff_by_store = detect_short_staff_by_store(preview_shift)
+    key_warnings_by_store = detect_key_warnings_by_store(preview_shift)
     for row in normalized:
         row["人数少"] = format_short_staff_summary_for_day(
             short_staff_by_store.get(int(row["日"]), set())
+        )
+        row["鍵"] = format_key_warning_summary_for_day(
+            key_warnings_by_store.get(int(row["日"]), {})
         )
     return normalized
 
@@ -1000,6 +1124,19 @@ def render_colored_shift_editor(
             "fontWeight": "800",
             "backgroundColor": "#fff3cd",
             "color": "#92400e",
+            "borderLeft": "1px solid #cbd5e1",
+        },
+    })
+    column_defs.append({
+        "field": "鍵",
+        "editable": False,
+        "pinned": "right",
+        "width": 150,
+        "cellStyle": {
+            "textAlign": "center",
+            "fontWeight": "800",
+            "backgroundColor": "#fff7ed",
+            "color": "#b45309",
             "borderLeft": "1px solid #cbd5e1",
         },
     })
@@ -3526,7 +3663,7 @@ if mode == "📊 経営者ビュー":
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
-                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少"]
+                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
                 base_editor_rows = shift_to_editor_rows(shift)
                 base_signature = editor_symbol_signature(base_editor_rows)
                 if st.session_state.get(inline_base_signature_key) != base_signature:
@@ -3548,7 +3685,7 @@ if mode == "📊 経営者ビュー":
                         width="small",
                         help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                     )
-                disabled_columns = ["日", "曜"]
+                disabled_columns = ["日", "曜", "人数少", "鍵"]
                 if lock_info is not None:
                     disabled_columns = editor_columns
 
@@ -3619,6 +3756,13 @@ if mode == "📊 経営者ビュー":
                         f"⚠ 人員不足の日: {short_day_text}"
                         "（黄色でハイライト・人員少欄に店舗別マーク表示）"
                     )
+                key_warnings_by_store = detect_key_warnings_by_store(inline_display_shift)
+                if key_warnings_by_store:
+                    st.warning(
+                        "鍵確認: "
+                        + format_key_warning_summary(inline_display_shift, key_warnings_by_store)
+                        + "（鍵欄にも表示）"
+                    )
 
                 inline_result = run_shift_validation(
                     shift=inline_display_shift,
@@ -3657,11 +3801,12 @@ if mode == "📊 経営者ビュー":
                         except Exception:
                             pass
 
-                state_col1, state_col2, state_col3, state_col4 = st.columns(4)
+                state_col1, state_col2, state_col3, state_col4, state_col5 = st.columns(5)
                 state_col1.metric("編集中の変更", len(inline_changed_cells))
                 state_col2.metric("エラー", inline_result.error_count, delta_color="inverse")
                 state_col3.metric("警告", inline_result.warning_count, delta_color="inverse")
                 state_col4.metric("人員不足日", len(short_staff_by_store), delta_color="inverse")
+                state_col5.metric("鍵確認", len(key_warnings_by_store), delta_color="inverse")
                 render_part_time_paid_leave_suggestions(
                     inline_display_shift,
                     _table_validation_context,
@@ -3880,7 +4025,7 @@ if mode == "📊 経営者ビュー":
             if st.session_state.get(status_key):
                 st.success(st.session_state.pop(status_key))
 
-            editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER
+            editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
             editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
             column_config = {
                 "日": st.column_config.NumberColumn("日", width="small"),
@@ -3893,7 +4038,7 @@ if mode == "📊 経営者ビュー":
                     width="small",
                     help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                 )
-            disabled_columns = ["日", "曜"]
+            disabled_columns = ["日", "曜", "人数少", "鍵"]
             if lock_info is not None:
                 disabled_columns = editor_columns
 
@@ -3910,6 +4055,7 @@ if mode == "📊 経営者ビュー":
             edited_records = editor_rows_to_records(edited_value)
             if not edited_records:
                 edited_records = shift_to_editor_rows(shift)
+            edited_records = refresh_editor_short_staff_column(shift, edited_records)
 
             changed_cells = get_editor_changed_cells(shift, edited_records)
             edited_shift = editor_rows_to_shift(shift, edited_records)
@@ -3927,13 +4073,15 @@ if mode == "📊 経営者ビュー":
                 monthly_store_count_rules=validation_context.get("monthly_store_count_rules", []),
             )
             edit_short_staff_by_store = detect_short_staff_by_store(edited_shift)
+            edit_key_warnings_by_store = detect_key_warnings_by_store(edited_shift)
 
             st.markdown("##### 編集中の状態")
-            state_col1, state_col2, state_col3, state_col4 = st.columns(4)
+            state_col1, state_col2, state_col3, state_col4, state_col5 = st.columns(5)
             state_col1.metric("変更セル", len(changed_cells))
             state_col2.metric("エラー", edit_result.error_count, delta_color="inverse")
             state_col3.metric("警告", edit_result.warning_count, delta_color="inverse")
             state_col4.metric("人員不足日", len(edit_short_staff_by_store), delta_color="inverse")
+            state_col5.metric("鍵確認", len(edit_key_warnings_by_store), delta_color="inverse")
 
             if fixed_off_violations:
                 st.error(
@@ -4057,6 +4205,7 @@ if mode == "📊 経営者ビュー":
             render_shift_table(
                 edited_shift,
                 short_staff_by_store=edit_short_staff_by_store,
+                key_warnings_by_store=edit_key_warnings_by_store,
                 sticky=True,
                 changed_cells=changed_cells,
                 changed_cell_color="#16a34a",
