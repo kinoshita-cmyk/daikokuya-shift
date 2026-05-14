@@ -41,7 +41,7 @@ DEFAULT_ENABLED_CHECKS = {
     "consec_off_3": True,           # 3連休禁止
     "two_off_per_month": True,      # 2連休回数チェック
     "off_request": True,            # 休み希望厳守
-    "work_request": True,           # 出勤希望厳守
+    "work_request": True,           # 出勤希望・希望店舗の考慮
     "omiya_anchor": True,           # 大宮アンカー（春山 or 下地）
     "higashi_monday": True,         # 東口月曜休店
     "omiya_short_warning": True,    # 大宮人数少警告

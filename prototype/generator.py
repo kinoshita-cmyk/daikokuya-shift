@@ -97,6 +97,7 @@ def generate_shift(
     flexible_off: Optional[list[tuple[str, list[int], int]]] = None,
     holiday_overrides: Optional[dict[str, int]] = None,
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
+    preferred_work_groups: Optional[list[tuple[str, list[int], int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
     historical_actual_preferences: Optional[list[tuple[str, int, Store]]] = None,
@@ -124,6 +125,7 @@ def generate_shift(
     flexible_off = flexible_off or []
     holiday_overrides = holiday_overrides or {}
     preferred_work_requests = preferred_work_requests or []
+    preferred_work_groups = preferred_work_groups or []
     preferred_consecutive_off = preferred_consecutive_off or []
     monthly_store_count_rules = monthly_store_count_rules or []
     historical_actual_preferences = historical_actual_preferences or []
@@ -182,6 +184,27 @@ def generate_shift(
             continue
         normalized_preferred_work_requests.append((name, day, store))
     preferred_work_requests = normalized_preferred_work_requests
+
+    normalized_preferred_work_groups = []
+    for name, candidate_days, required_count, store in (preferred_work_groups or []):
+        safe_candidates = sorted({
+            int(d) for d in candidate_days
+            if str(d).isdigit()
+            and 1 <= int(d) <= days_in_month
+            and int(d) not in set(off_requests.get(name, []))
+        })
+        try:
+            required = int(required_count)
+        except (TypeError, ValueError):
+            required = 1
+        if safe_candidates and required > 0:
+            normalized_preferred_work_groups.append((
+                name,
+                safe_candidates,
+                min(required, len(safe_candidates)),
+                store,
+            ))
+    preferred_work_groups = normalized_preferred_work_groups
 
     normalized_historical_actual_preferences = []
     for name, d, store in (historical_actual_preferences or []):
@@ -251,23 +274,16 @@ def generate_shift(
         for d in off_days:
             model.Add(off[emp_name][d] == 1)
 
-    # ============================================================
-    # 制約 3: 出勤希望厳守（指定店舗があればその店舗）
-    # ============================================================
-    for name, d, store in work_requests:
-        if name not in main_employee_names:
-            continue
-        model.Add(off[name][d] == 0)  # その日は必ず出勤
-        if store is not None:
-            model.Add(x[name][d][store] == 1)
-
+    # 出勤希望・店舗希望は「できる限り反映する」希望扱い。
+    # 本人の × 休み希望だけをハード制約にし、出勤希望は目的関数で強く優先する。
     # 出勤希望日のみ稼働する人（例: 南さん）は、希望日以外には配置しない。
-    # preferred_work_requests は「必要なら可」の日として、配置候補には含める。
     request_allowed_days_by_employee: dict[str, set[int]] = {}
     for name, d, _store in work_requests:
         request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
     for name, d, _store in preferred_work_requests:
         request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
+    for name, candidate_days, _required, _store in preferred_work_groups:
+        request_allowed_days_by_employee.setdefault(name, set()).update(int(d) for d in candidate_days)
     for e in main_employees:
         if not getattr(e, "only_on_request_days", False):
             continue
@@ -585,15 +601,41 @@ def generate_shift(
     monthly_rule_penalty_terms = []
     historical_actual_terms = []
 
-    # 自由記載の「出勤希望」「○日は赤羽希望」などは、解なしを避けるためソフト制約で強く優先。
-    for name, d, store in preferred_work_requests:
+    # 提出フォームの「○」や自由記載の「出勤希望」「○日は赤羽希望」などはソフト制約。
+    # まず出勤できるなら出勤、出勤になった場合は希望店舗へ、という2段階で優先する。
+    combined_work_preferences = list(work_requests) + list(preferred_work_requests)
+    seen_work_preferences: set[tuple[str, int, Optional[Store]]] = set()
+    for name, d, store in combined_work_preferences:
+        key = (name, int(d), store)
+        if key in seen_work_preferences:
+            continue
+        seen_work_preferences.add(key)
         if name not in main_employee_names:
             continue
+        any_work = sum(x[name][d][s] for s in main_stores)
         if store is not None and store in main_stores:
-            preferred_work_terms.append(140 * x[name][d][store])
+            preferred_work_terms.append(70 * any_work)
+            preferred_work_terms.append(130 * x[name][d][store])
         else:
-            preferred_work_terms.append(
-                80 * sum(x[name][d][s] for s in main_stores)
+            preferred_work_terms.append(90 * any_work)
+
+    # 「3日か29日のいずれか1日は出勤したい」のような自由記載は、
+    # 候補のうち指定回数分だけ満たせるように優先する。
+    for idx, (name, candidate_days, required_count, store) in enumerate(preferred_work_groups):
+        if name not in main_employee_names:
+            continue
+        work_count = sum(
+            x[name][d][s]
+            for d in candidate_days
+            for s in main_stores
+        )
+        capped = model.NewIntVar(0, int(required_count), f"preferred_work_group_{name}_{idx}")
+        model.AddMinEquality(capped, [work_count, model.NewConstant(int(required_count))])
+        preferred_work_terms.append(180 * capped)
+        if store is not None and store in main_stores:
+            preferred_work_terms.extend(
+                80 * x[name][d][store]
+                for d in candidate_days
             )
 
     # 過去月のすり合わせでは、実績シフトにできるだけ近い解を優先する。

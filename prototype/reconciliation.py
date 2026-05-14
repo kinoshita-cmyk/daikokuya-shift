@@ -49,6 +49,14 @@ IGNORED_HISTORICAL_ASSIGNMENTS = {
     ("牧野", Store.HIGASHIGUCHI),
 }
 
+NEGOTIATED_HISTORICAL_WORK_OVERRIDES = {
+    # 2026年5月は実運用上の口頭調整が確認済み。
+    # 「休み希望」は原則絶対だが、過去月のすり合わせでは
+    # 初回提出ではなく後出し変更・個別交渉だったものだけを明示的に扱う。
+    (2026, 5, "岩野", 1): (Store.AKABANE, "後出し変更後、人員不足のため個別交渉で赤羽勤務"),
+    (2026, 5, "下地", 15): (Store.OMIYA, "本人の強い希望による超イレギュラー出勤"),
+}
+
 
 @dataclass
 class ReconciliationIssue:
@@ -79,6 +87,7 @@ class ReconciledGenerationInputs:
     off_requests: dict[str, list[int]]
     work_requests: list[tuple[str, int, Optional[Store]]]
     preferred_work_requests: list[tuple[str, int, Optional[Store]]]
+    preferred_work_groups: list[tuple[str, list[int], int, Optional[Store]]] = None
     applied_notes: list[str] = None
 
     @property
@@ -200,7 +209,7 @@ def compare_submissions_to_actual(
                     issue_type="休み希望なのに勤務",
                     requested="× 休み希望",
                     actual=actual_symbol,
-                    note="口頭変更・実績側修正の有無を確認",
+                    note="初回休み希望なら要確認。後出し変更・口頭調整なら個別例外として扱う",
                 ))
 
     work_requests = list(submissions.work_requests)
@@ -223,7 +232,7 @@ def compare_submissions_to_actual(
                 issue_type="出勤希望なのに休み/空白",
                 requested=requested_label,
                 actual=actual_symbol,
-                note="口頭変更・実績側修正の有無を確認",
+                note="出勤希望は希望扱い。調整で休みになることがあります",
             ))
             continue
         if requested_store and actual_symbol != STORE_TO_SYMBOL.get(requested_store):
@@ -233,7 +242,7 @@ def compare_submissions_to_actual(
                 issue_type="希望店舗と実績店舗が違う",
                 requested=requested_label,
                 actual=actual_symbol,
-                note="店舗変更が合意済みか確認",
+                note="出勤になった場合の希望店舗。調整・合意で別店舗になることがあります",
             ))
 
     issues.sort(key=lambda x: (x.day, x.employee, x.issue_type))
@@ -284,15 +293,15 @@ def reconcile_generation_inputs_with_actual(
     off_requests: dict[str, list[int]],
     work_requests: list[tuple[str, int, Optional[Store]]],
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
+    preferred_work_groups: Optional[list[tuple[str, list[int], int, Optional[Store]]]] = None,
     workbook_path: Path = DEFAULT_HISTORICAL_WORKBOOK,
 ) -> ReconciledGenerationInputs:
     """
-    提出希望と実績シフトの差異を、過去月用の口頭調整済みデータとして補正する。
+    提出希望と実績シフトの差異のうち、明示された口頭調整だけを過去月用に補正する。
 
-    例:
-    - ×休み希望だったが実績で勤務している日は、×を外して実績店舗の出勤希望にする。
-    - 出勤希望だったが実績で×休みなら、出勤希望を外して×休みとして扱う。
-    - 希望店舗と実績店舗が違う場合は、実績店舗の出勤希望として扱う。
+    最新運用では、本人の初回「×休み希望」は絶対条件。
+    出勤希望・希望店舗は希望扱いなので、実績と違っても自動で休み希望へ変換しない。
+    過去月のすり合わせでは、後出し変更や個別交渉が確認済みのものだけを明示補正する。
 
     将来月では使わず、4月・5月など確定実績とのすり合わせに限定する想定。
     """
@@ -302,6 +311,7 @@ def reconcile_generation_inputs_with_actual(
             off_requests={emp: sorted(set(days)) for emp, days in off_requests.items()},
             work_requests=list(work_requests or []),
             preferred_work_requests=list(preferred_work_requests or []),
+            preferred_work_groups=list(preferred_work_groups or []),
             applied_notes=[],
         )
 
@@ -311,6 +321,7 @@ def reconcile_generation_inputs_with_actual(
     }
     adjusted_work = list(work_requests or [])
     adjusted_preferred = list(preferred_work_requests or [])
+    adjusted_groups = list(preferred_work_groups or [])
     notes: list[str] = []
 
     def remove_work_for(employee: str, day: int) -> None:
@@ -324,50 +335,24 @@ def reconcile_generation_inputs_with_actual(
             if not (item[0] == employee and int(item[1]) == int(day))
         ]
 
-    def add_work(employee: str, day: int, store: Store) -> None:
+    def add_preferred_work(employee: str, day: int, store: Store) -> None:
         remove_work_for(employee, day)
-        adjusted_work.append((employee, int(day), store))
+        adjusted_preferred.append((employee, int(day), store))
 
-    # ×休み希望と実績勤務の差異を、口頭変更済みとして実績勤務へ補正する。
-    for employee, days in list(adjusted_off.items()):
-        for day in sorted(set(days)):
-            actual_store = _store_from_symbol(actual.get(employee, {}).get(day, ""))
-            if _ignore_historical_assignment(employee, actual_store):
-                continue
-            if actual_store is None or actual_store == Store.OFF:
-                continue
-            adjusted_off[employee].discard(day)
-            add_work(employee, day, actual_store)
-            notes.append(
-                f"{employee} {month}/{day}: ×休み希望を実績 {STORE_TO_SYMBOL[actual_store]} に補正"
-            )
-
-    # 出勤希望と実績休み/店舗違いの差異を、実績側に寄せる。
-    for employee, day, requested_store in list(adjusted_work) + list(adjusted_preferred):
-        day = int(day)
-        if employee not in actual or day not in actual[employee]:
+    # 確認済みの個別交渉だけ、休み希望を外して実績店舗へ寄せる。
+    # それ以外の実績差分は、休み希望絶対の原則を壊さないため自動補正しない。
+    for key, (store, reason) in NEGOTIATED_HISTORICAL_WORK_OVERRIDES.items():
+        override_year, override_month, employee, day = key
+        if override_year != year or override_month != month:
             continue
-        actual_symbol = actual.get(employee, {}).get(day, "")
-        actual_store = _store_from_symbol(actual_symbol)
-        if _ignore_historical_assignment(employee, actual_store):
+        actual_store = _store_from_symbol(actual.get(employee, {}).get(day, ""))
+        if actual_store != store:
             continue
-        if not actual_symbol:
-            remove_work_for(employee, day)
-            adjusted_off.setdefault(employee, set()).add(day)
-            notes.append(f"{employee} {month}/{day}: 出勤希望を実績 空白 に補正")
-            continue
-        if actual_store is None:
-            continue
-        if actual_store == Store.OFF:
-            remove_work_for(employee, day)
-            adjusted_off.setdefault(employee, set()).add(day)
-            notes.append(f"{employee} {month}/{day}: 出勤希望を実績 × に補正")
-            continue
-        if requested_store != actual_store:
-            add_work(employee, day, actual_store)
-            notes.append(
-                f"{employee} {month}/{day}: 出勤希望を実績 {STORE_TO_SYMBOL[actual_store]} に補正"
-            )
+        adjusted_off.setdefault(employee, set()).discard(day)
+        add_preferred_work(employee, day, store)
+        notes.append(
+            f"{employee} {month}/{day}: 個別調整済みとして {STORE_TO_SYMBOL[store]} を優先（{reason}）"
+        )
 
     return ReconciledGenerationInputs(
         off_requests={
@@ -383,5 +368,6 @@ def reconcile_generation_inputs_with_actual(
             set(adjusted_preferred),
             key=lambda item: (item[0], int(item[1]), item[2].name if item[2] else ""),
         ),
+        preferred_work_groups=adjusted_groups,
         applied_notes=list(dict.fromkeys(notes)),
     )

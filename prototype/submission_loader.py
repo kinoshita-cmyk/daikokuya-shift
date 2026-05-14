@@ -28,6 +28,7 @@ class SubmissionData:
     off_requests: dict[str, list[int]] = field(default_factory=dict)
     work_requests: list[tuple] = field(default_factory=list)
     preferred_work_requests: list[tuple] = field(default_factory=list)
+    preferred_work_groups: list[tuple[str, list[int], int, Optional[Store]]] = field(default_factory=list)
     flexible_off: list[tuple] = field(default_factory=list)
     natural_language_notes: dict[str, str] = field(default_factory=dict)
     paid_leave_days: dict[str, int] = field(default_factory=dict)
@@ -72,6 +73,7 @@ class ParsedNaturalLanguageNote:
 
     off_requests: list[int] = field(default_factory=list)
     work_requests: list[tuple[int, Optional[Store]]] = field(default_factory=list)
+    work_groups: list[tuple[list[int], int, Optional[Store]]] = field(default_factory=list)
     flexible_off: list[tuple[list[int], int]] = field(default_factory=list)
     paid_leave_days: Optional[int] = None
     requested_holiday_days: Optional[int] = None
@@ -83,6 +85,7 @@ class ParsedNaturalLanguageNote:
         return bool(
             self.off_requests
             or self.work_requests
+            or self.work_groups
             or self.flexible_off
             or self.paid_leave_days
             or self.requested_holiday_days
@@ -176,6 +179,23 @@ def _extract_work_days_from_sentence(
     return sorted(set(days))
 
 
+def _extract_choice_days_from_sentence(sentence: str, days_in_month: int) -> list[int]:
+    """「3か29どちらか」「3日か29日のいずれか」の候補日だけを拾う。"""
+    normalized = _normalize_note_text(sentence)
+    pattern = (
+        r"(?P<candidates>\d{1,2}\s*日?"
+        r"(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*\d{1,2}\s*日?)+)"
+        r"\s*(?:の)?(?:いずれか|どちらか|どれか)"
+    )
+    days: list[int] = []
+    for match in re.finditer(pattern, normalized, flags=re.IGNORECASE):
+        for day_str in re.findall(r"\d{1,2}", match.group("candidates")):
+            day = _safe_day(day_str, days_in_month)
+            if day is not None:
+                days.append(day)
+    return sorted(set(days))
+
+
 def _extract_number(patterns: list[str], text: str) -> Optional[int]:
     normalized = _normalize_note_text(text)
     for pattern in patterns:
@@ -216,8 +236,9 @@ def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> li
         return []
 
     pattern = (
-        r"(?P<candidates>\d{1,2}(?:\s*[,\.・と]\s*\d{1,2})+)"
-        r"\s*日?の?(?:いずれか|どちらか|どれか)"
+        r"(?P<candidates>\d{1,2}\s*日?"
+        r"(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*\d{1,2}\s*日?)+)"
+        r"\s*(?:の)?(?:いずれか|どちらか|どれか)"
         r".*?(?P<count>\d{1,2})\s*日"
     )
     results: list[tuple[list[int], int]] = []
@@ -231,6 +252,30 @@ def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> li
         if candidates and required > 0:
             results.append((sorted(set(candidates)), required))
     return results
+
+
+def _extract_work_group_from_sentence(
+    sentence: str,
+    days_in_month: int,
+) -> list[tuple[list[int], int, Optional[Store]]]:
+    """「3か29のいずれか1日は出勤したい」のような選択式の出勤希望を拾う。"""
+    normalized = _normalize_note_text(sentence)
+    if not any(word in normalized for word in ("いずれか", "どちらか", "どれか")):
+        return []
+    if not any(
+        word in normalized
+        for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "勤務したい")
+    ):
+        return []
+    candidates = _extract_choice_days_from_sentence(normalized, days_in_month)
+    if not candidates:
+        return []
+    required = _extract_number(
+        [r"(?:いずれか|どちらか|どれか)\D{0,4}(\d{1,2})\s*日"],
+        normalized,
+    ) or 1
+    required = max(1, min(int(required), len(candidates)))
+    return [(candidates, required, _extract_store_from_text(normalized))]
 
 
 def parse_natural_language_note(
@@ -290,7 +335,8 @@ def parse_natural_language_note(
         word in normalized
         for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "出勤確定")
     )
-    if whole_note_work_request:
+    is_choice_note = any(word in normalized for word in ("いずれか", "どちらか", "どれか"))
+    if whole_note_work_request and not is_choice_note:
         optional = any(word in normalized for word in ("不要であれば", "必要であれば", "可能なら", "できれば"))
         work_days = _extract_work_days_from_sentence(normalized, target_month, days_in_month)
         store = _extract_store_from_text(normalized)
@@ -303,6 +349,9 @@ def parse_natural_language_note(
     for sentence in sentences:
         for flex in _extract_flexible_off_from_sentence(sentence, days_in_month):
             result.flexible_off.append(flex)
+
+        for work_group in _extract_work_group_from_sentence(sentence, days_in_month):
+            result.work_groups.append(work_group)
 
         if any(word in sentence for word in ("どちらか", "いずれか", "どれか")):
             continue
@@ -343,6 +392,15 @@ def parse_natural_language_note(
 
     result.off_requests = sorted(set(result.off_requests))
     result.ignored_optional_work_days = sorted(set(result.ignored_optional_work_days))
+    seen_work_groups: set[tuple[tuple[int, ...], int, Optional[Store]]] = set()
+    deduped_work_groups: list[tuple[list[int], int, Optional[Store]]] = []
+    for candidate_days, required_count, store in result.work_groups:
+        key = (tuple(sorted(set(candidate_days))), int(required_count), store)
+        if key in seen_work_groups:
+            continue
+        seen_work_groups.add(key)
+        deduped_work_groups.append((list(key[0]), key[1], store))
+    result.work_groups = deduped_work_groups
     # 同じ日の出勤希望は重複排除。店舗指定ありを優先する。
     by_day: dict[int, Optional[Store]] = {}
     for day, store in result.work_requests:
@@ -447,6 +505,14 @@ def load_submissions_for_month(
                     {"day": day, "store": store.name if store else None}
                     for day, store in parsed_note.work_requests
                 ],
+                "work_groups": [
+                    {
+                        "candidate_days": list(candidate_days),
+                        "required_count": required_count,
+                        "store": store.name if store else None,
+                    }
+                    for candidate_days, required_count, store in parsed_note.work_groups
+                ],
                 "flexible_off": [
                     {"candidate_days": days, "n_required": n}
                     for days, n in parsed_note.flexible_off
@@ -478,6 +544,27 @@ def load_submissions_for_month(
             if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
                 data.preferred_work_requests.append(item)
                 existing_preferred_work_days.add(item)
+        existing_work_groups = {
+            (emp, tuple(candidate_days), required_count, store)
+            for emp, candidate_days, required_count, store in data.preferred_work_groups
+        }
+        for candidate_days, required_count, store in parsed_note.work_groups:
+            filtered_candidates = [
+                day for day in candidate_days
+                if day not in set(data.off_requests.get(author, []))
+            ]
+            if not filtered_candidates:
+                continue
+            item = (
+                author,
+                sorted(set(filtered_candidates)),
+                min(int(required_count), len(set(filtered_candidates))),
+                store,
+            )
+            key = (item[0], tuple(item[1]), item[2], item[3])
+            if key not in existing_work_groups:
+                data.preferred_work_groups.append(item)
+                existing_work_groups.add(key)
 
         for candidate_days, n_required in parsed_note.flexible_off:
             data.flexible_off.append((author, candidate_days, n_required))

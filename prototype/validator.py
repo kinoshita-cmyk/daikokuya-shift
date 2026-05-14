@@ -37,7 +37,7 @@ from .rules import (
 @dataclass
 class Issue:
     """検出された問題1件"""
-    severity: str        # "ERROR"=ハード制約違反, "WARNING"=ソフト制約違反
+    severity: str        # "ERROR"=ハード制約違反, "WARNING"=ソフト制約違反, "INFO"=参考情報
     category: str        # "店舗人数", "連勤", "休日数", "東口", etc.
     day: Optional[int]   # 該当日（全体問題の場合None）
     employee: Optional[str]  # 該当従業員（全体問題の場合None）
@@ -548,7 +548,7 @@ def _check_work_requests(
     work_requests: list,
     off_requests: dict[str, list[int]],
 ) -> None:
-    """出勤希望日が出勤になっているか（指定店舗があればそこに配置）"""
+    """出勤希望・希望店舗がどの程度反映されたかを確認する。"""
     for name, day, requested_store in work_requests:
         # 山本さんは赤羽不足時の補助・手動入力枠なので、通常スタッフと同じ
         # 「出勤希望未充足」警告には含めない。×休み希望は別チェックで厳守する。
@@ -560,17 +560,20 @@ def _check_work_requests(
         a = shift.get_assignment(name, day)
         if a is None or a.store == Store.OFF:
             result.issues.append(Issue(
-                severity="ERROR",
-                category="出勤希望未充足",
+                severity="INFO",
+                category="出勤希望未反映",
                 day=day, employee=name,
-                message="出勤希望なのに休みに配置",
+                message="出勤希望は希望扱いです。調整上、休みに配置されています",
             ))
         elif requested_store and a.store != requested_store:
             result.issues.append(Issue(
-                severity="WARNING",
+                severity="INFO",
                 category="希望店舗不一致",
                 day=day, employee=name,
-                message=f"希望{requested_store.display_name}, 実配置{a.store.display_name}",
+                message=(
+                    f"出勤時の希望店舗は{requested_store.display_name}、"
+                    f"実配置は{a.store.display_name}"
+                ),
             ))
 
 
