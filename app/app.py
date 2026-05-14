@@ -755,6 +755,17 @@ STORE_SYMBOL_TO_STORE = {
     "☆": Store.NISHIGUCHI,
     "◆": Store.SUZURAN,
 }
+NO_HOME_STORE_LABEL = "（なし）"
+
+
+def store_select_label(option: str) -> str:
+    """店舗選択の内部値を、日本語の店舗名で表示する。"""
+    if option == NO_HOME_STORE_LABEL:
+        return option
+    try:
+        return Store[option].display_name
+    except Exception:
+        return str(option)
 
 
 def clone_monthly_shift(shift: MonthlyShift) -> MonthlyShift:
@@ -4096,12 +4107,13 @@ if mode == "📊 経営者ビュー":
                         )
 
             with col_p:
-                st.write("**📄 PDF 形式（印刷用・A4横1枚）**")
+                st.write("**📄 PDF 形式（印刷用・A4縦1枚）**")
                 if st.button("PDF を生成", key="gen_pdf"):
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
                     export_shift_to_pdf(
                         shift, file_path,
-                        header_notes=[c for c in header_comments if c.strip()] or ["AI 自動生成版"],
+                        header_notes=header_comments,
+                        footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
@@ -5806,7 +5818,6 @@ elif mode == "⚙️ 設定":
             with (ck_col1 if i < len(keys) // 2 + 1 else ck_col2):
                 new_enabled[key] = st.toggle(
                     check_labels[key],
-                    value=st.session_state.get(f"chk_{key}", cfg.enabled_checks.get(key, True)),
                     key=f"chk_{key}",
                 )
 
@@ -5844,7 +5855,6 @@ elif mode == "⚙️ 設定":
                 new_params[key] = int(st.number_input(
                     spec["label"],
                     min_value=spec["min"], max_value=spec["max"],
-                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
                     help=spec["help"],
                     key=f"param_{key}",
                 ))
@@ -5855,7 +5865,6 @@ elif mode == "⚙️ 設定":
                 new_params[key] = int(st.number_input(
                     spec["label"],
                     min_value=spec["min"], max_value=spec["max"],
-                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
                     help=spec["help"],
                     key=f"param_{key}",
                 ))
@@ -5888,7 +5897,6 @@ elif mode == "⚙️ 設定":
             new_params["solver_seed"] = int(st.number_input(
                 spec["label"],
                 min_value=spec["min"], max_value=spec["max"],
-                value=int(st.session_state.get("param_solver_seed", cfg.parameters.get("solver_seed", spec["default"]))),
                 help=spec["help"],
                 key="param_solver_seed",
             ))
@@ -5897,226 +5905,20 @@ elif mode == "⚙️ 設定":
             new_params["solver_time_limit_seconds"] = int(st.number_input(
                 spec["label"],
                 min_value=spec["min"], max_value=spec["max"],
-                value=int(st.session_state.get(
-                    "param_solver_time_limit_seconds",
-                    cfg.parameters.get("solver_time_limit_seconds", spec["default"]),
-                )),
                 help=spec["help"],
                 key="param_solver_time_limit_seconds",
             ))
 
-        # サブセクション: カスタムルール
+        # 月ごとの特別ルールは、実際に対象月を見ながら判断できる
+        # シフト生成画面側へ一本化する。
         st.markdown("---")
-        st.markdown("#### ➕ 月次・個別ルール")
+        st.markdown("#### 📌 月ごとの特別ルール")
         st.info(
-            "💡 スタッフ別・月別の追加ルールを入力できます。"
-            "最低回数・最大回数・ちょうど回数・配置禁止はシフト生成と検証に反映されます。"
-            "メモのみは記録用です。"
+            "月ごとの研修・例外配置などは、各月のシフト生成画面にある"
+            "「今月だけの特別ルール」で追加します。"
+            "この画面では全体ルールと数値設定だけを扱います。"
         )
-
-        added_rule_objs = [
-            CustomRule(**r) for r in st.session_state.get("rule_added_custom_rules", [])
-        ]
-        deleted_ids = set(st.session_state.get("rule_deleted_ids", []))
-        added_ids = {r.id for r in added_rule_objs}
-        new_custom_rules = [
-            _clone_custom_rule(r) for r in cfg.custom_rules if r.id not in deleted_ids
-        ] + added_rule_objs
-
-        # 既存ルールの一覧と削除
-        if new_custom_rules:
-            st.markdown("**カスタムルール:**")
-            for idx, rule in enumerate(new_custom_rules):
-                rule_col1, rule_col2, rule_col3 = st.columns([5, 1, 1])
-                with rule_col1:
-                    badge = "仮追加" if rule.id in added_ids else "本設定"
-                    comparison = getattr(rule, "comparison", "min")
-                    comparison_labels = {
-                        "min": "最低回数",
-                        "max": "最大回数",
-                        "exact": "ちょうど回数",
-                        "forbid": "配置禁止",
-                    }
-                    type_label = (
-                        f"月別配置/{comparison_labels.get(comparison, '最低回数')}"
-                        if rule.rule_type == "employee_store_count" else "メモ"
-                    )
-                    monthly_detail = ""
-                    if rule.rule_type == "employee_store_count":
-                        store_text = "・".join(rule.stores) if rule.stores else "店舗未指定"
-                        month_text = (
-                            f"{rule.target_year or '-'}年{rule.target_month or '-'}月"
-                        )
-                        if comparison == "max":
-                            count_text = f"{rule.count}回以下"
-                        elif comparison == "exact":
-                            count_text = f"{rule.count}回ちょうど"
-                        elif comparison == "forbid":
-                            count_text = "配置禁止"
-                        else:
-                            count_text = f"{rule.count}回以上"
-                        monthly_detail = (
-                            f'<br><span style="font-size:12px; color:#4b5563;">'
-                            f'対象: {month_text} / {rule.employee or "スタッフ未指定"} / '
-                            f'{store_text} / {count_text}</span><br>'
-                        )
-                    st.markdown(
-                        f'<div style="padding:8px; border-left:3px solid #6366f1; '
-                        f'background:#f5f3ff; border-radius:4px;">'
-                        f'<strong>{rule.name}</strong> '
-                        f'<span style="font-size:11px; color:#6b7280;">'
-                        f'({type_label} / {rule.severity} / {badge})</span><br>'
-                        f'<span style="font-size:13px;">{rule.description}</span><br>'
-                        f'{monthly_detail}'
-                        f'<span style="font-size:11px; color:#9ca3af;">'
-                        f'追加: {rule.created_at[:10]} by {rule.created_by}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                with rule_col2:
-                    new_custom_rules[idx].enabled = st.toggle(
-                        "有効",
-                        value=st.session_state.get(f"rule_en_{rule.id}", rule.enabled),
-                        key=f"rule_en_{rule.id}",
-                    )
-                with rule_col3:
-                    if st.button("🗑", key=f"del_{rule.id}"):
-                        if rule.id in added_ids:
-                            st.session_state["rule_added_custom_rules"] = [
-                                r for r in st.session_state.get("rule_added_custom_rules", [])
-                                if r.get("id") != rule.id
-                            ]
-                        else:
-                            next_deleted = set(st.session_state.get("rule_deleted_ids", []))
-                            next_deleted.add(rule.id)
-                            st.session_state["rule_deleted_ids"] = list(next_deleted)
-                        st.session_state["rule_apply_confirm"] = False
-                        st.rerun()
-
-        # 新規ルールの追加フォーム
-        with st.expander("➕ 新しいカスタムルールを追加", expanded=False):
-            with st.form("add_rule_form", clear_on_submit=True):
-                rule_kind = st.selectbox(
-                    "種類",
-                    options=["メモのみ", "月別: スタッフを指定店舗へ回数配置"],
-                    help="月別配置ルールは、対象年月のシフト生成・検証に反映されます。",
-                )
-                rule_name = st.text_input("ルール名", placeholder="例: 楯さんは日曜休み優先")
-                rule_desc = st.text_area(
-                    "詳細",
-                    placeholder="例: 楯さんは家族の事情で日曜休み優先で組む",
-                    height=80,
-                )
-                rule_target_year = None
-                rule_target_month = None
-                rule_employee = ""
-                rule_stores = []
-                rule_count = 0
-                rule_comparison = "min"
-                if rule_kind == "月別: スタッフを指定店舗へ回数配置":
-                    st.caption("例: 2026年6月、牧野さんを大宮西口店へ3回以上配置。東口1名体制は当面対象外。")
-                    ym_col1, ym_col2 = st.columns(2)
-                    with ym_col1:
-                        rule_target_year = int(st.number_input(
-                            "対象年",
-                            min_value=2026,
-                            max_value=2035,
-                            value=int(st.session_state.get("target_year", date.today().year)),
-                        ))
-                    with ym_col2:
-                        rule_target_month = int(st.number_input(
-                            "対象月",
-                            min_value=1,
-                            max_value=12,
-                            value=int(st.session_state.get("target_month", date.today().month)),
-                        ))
-                    store_options = [s.name for s in Store if s != Store.OFF]
-                    store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
-                    rule_employee = st.selectbox(
-                        "対象スタッフ",
-                        options=shift_submission_employee_names(),
-                    )
-                    rule_stores = st.multiselect(
-                        "対象店舗",
-                        options=store_options,
-                        format_func=lambda name: store_labels.get(name, name),
-                    )
-                    rule_comparison_label = st.selectbox(
-                        "条件",
-                        options=["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
-                        help=(
-                            "最低回数: 3回以上入れる / 最大回数: 2回以下に抑える / "
-                            "ちょうど回数: 2回にする / 配置禁止: その店舗へ入れない"
-                        ),
-                    )
-                    rule_comparison = {
-                        "最低回数": "min",
-                        "最大回数": "max",
-                        "ちょうど回数": "exact",
-                        "配置禁止": "forbid",
-                    }[rule_comparison_label]
-                    rule_count = int(st.number_input(
-                        "月内回数",
-                        min_value=0 if rule_comparison == "forbid" else 1,
-                        max_value=31,
-                        value=0 if rule_comparison == "forbid" else 3,
-                        disabled=rule_comparison == "forbid",
-                    ))
-                rule_severity = st.selectbox(
-                    "重要度",
-                    options=["WARNING", "ERROR"],
-                    help="ERROR: 必ず守る／WARNING: できれば守る",
-                )
-                rule_actor = st.text_input("追加者", value="代表取締役")
-                if st.form_submit_button("追加", type="primary"):
-                    is_monthly_count = rule_kind == "月別: スタッフを指定店舗へ回数配置"
-                    monthly_rule_missing = (
-                        is_monthly_count
-                        and (
-                            not rule_employee
-                            or not rule_stores
-                            or (rule_comparison != "forbid" and not rule_count)
-                        )
-                    )
-                    if monthly_rule_missing:
-                        st.error("月別配置ルールは、スタッフ・対象店舗・回数を入力してください。")
-                    elif rule_name and rule_desc:
-                        new_rule = CustomRule(
-                            id=f"custom_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                            name=rule_name, description=rule_desc,
-                            severity=rule_severity, enabled=True,
-                            created_at=datetime.now().isoformat(),
-                            created_by=rule_actor,
-                            target_year=rule_target_year,
-                            target_month=rule_target_month,
-                            rule_type="employee_store_count" if is_monthly_count else "note",
-                            employee=rule_employee,
-                            stores=rule_stores,
-                            count=0 if rule_comparison == "forbid" else rule_count,
-                            comparison=rule_comparison,
-                        )
-                        st.session_state["rule_added_custom_rules"] = (
-                            st.session_state.get("rule_added_custom_rules", [])
-                            + [{
-                                "id": new_rule.id,
-                                "name": new_rule.name,
-                                "description": new_rule.description,
-                                "enabled": new_rule.enabled,
-                                "severity": new_rule.severity,
-                                "created_at": new_rule.created_at,
-                                "created_by": new_rule.created_by,
-                                "target_year": new_rule.target_year,
-                                "target_month": new_rule.target_month,
-                                "rule_type": new_rule.rule_type,
-                                "employee": new_rule.employee,
-                                "stores": new_rule.stores,
-                                "count": new_rule.count,
-                                "comparison": new_rule.comparison,
-                            }]
-                        )
-                        st.session_state["rule_apply_confirm"] = False
-                        st.success(f"ルール「{rule_name}」を仮追加しました。本設定にするには下の反映操作が必要です。")
-                        st.rerun()
+        new_custom_rules = [_clone_custom_rule(r) for r in cfg.custom_rules]
 
         # 保存・リセットボタン
         st.markdown("---")
@@ -6392,12 +6194,13 @@ elif mode == "⚙️ 設定":
                             help="退職を選ぶと自動的に退職日が記録されます",
                         )
                     with f_col2:
-                        store_options = ["（なし）"] + [s.name for s in Store if s != Store.OFF]
-                        current_home = target.home_store.name if target.home_store else "（なし）"
+                        store_options = [NO_HOME_STORE_LABEL] + [s.name for s in Store if s != Store.OFF]
+                        current_home = target.home_store.name if target.home_store else NO_HOME_STORE_LABEL
                         new_home_store = st.selectbox(
                             "ホーム店舗",
                             options=store_options,
                             index=store_options.index(current_home) if current_home in store_options else 0,
+                            format_func=store_select_label,
                         )
                         new_target_days = st.number_input(
                             "年間目標出勤日数（パートは0でOK）",
@@ -6423,7 +6226,7 @@ elif mode == "⚙️ 設定":
                             "skill": new_skill,
                             "employment_status": new_status,
                             "home_store": (
-                                None if new_home_store == "（なし）"
+                                None if new_home_store == NO_HOME_STORE_LABEL
                                 else new_home_store
                             ),
                             "annual_target_days": new_target_days if new_target_days > 0 else None,
@@ -6521,10 +6324,11 @@ elif mode == "⚙️ 設定":
                             EmploymentStatus.PART_TIME.value,
                         ],
                     )
-                    home_store_options = ["（なし）"] + [s.name for s in Store if s != Store.OFF]
+                    home_store_options = [NO_HOME_STORE_LABEL] + [s.name for s in Store if s != Store.OFF]
                     new_emp_home = st.selectbox(
                         "ホーム店舗（固定配置の場合のみ）",
                         options=home_store_options,
+                        format_func=store_select_label,
                     )
                     new_hired_date = st.date_input(
                         "入社日", value=date.today(),
@@ -6555,11 +6359,11 @@ elif mode == "⚙️ 設定":
                             role=Role(new_emp_role),
                             skill=Skill(new_emp_skill),
                             home_store=(
-                                None if new_emp_home == "（なし）"
+                                None if new_emp_home == NO_HOME_STORE_LABEL
                                 else Store[new_emp_home]
                             ),
                             station_type=(
-                                StationType.FIXED if new_emp_home != "（なし）"
+                                StationType.FIXED if new_emp_home != NO_HOME_STORE_LABEL
                                 else StationType.FLEXIBLE
                             ),
                             employment_status=EmploymentStatus(new_emp_status),
