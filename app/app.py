@@ -2195,35 +2195,6 @@ if mode == "📊 経営者ビュー":
                 })
         render_scrollable_request_table(request_rows)
 
-    if int(target_year) == 2026 and int(target_month) in (4, 5):
-        with st.expander("🔎 過去実績との照合（4月・5月のすり合わせ用）", expanded=False):
-            st.caption(
-                "過去の手作業シフトと本人提出希望を照合します。"
-                "ここに出た日は、口頭変更などがあった可能性があるため、"
-                "ルール調整の比較対象から一旦分けて確認します。"
-            )
-            try:
-                from prototype.reconciliation import compare_submissions_to_actual_rows
-                reconcile_rows = compare_submissions_to_actual_rows(
-                    int(target_year), int(target_month), expected_employees,
-                )
-            except Exception as exc:
-                reconcile_rows = []
-                st.warning(f"照合データを読み込めませんでした: {type(exc).__name__}")
-            render_scrollable_dict_table(
-                reconcile_rows,
-                columns=["氏名", "日付", "種別", "提出希望", "実績シフト", "確認メモ"],
-                widths={
-                    "氏名": 100,
-                    "日付": 90,
-                    "種別": 210,
-                    "提出希望": 180,
-                    "実績シフト": 120,
-                    "確認メモ": 360,
-                },
-                empty_message="提出希望と実績シフトの食い違いは見つかりませんでした。",
-            )
-
     st.markdown("---")
 
     with st.expander("📌 今月の適用ルール", expanded=False):
@@ -2344,8 +2315,6 @@ if mode == "📊 経営者ビュー":
                         _saved_target_year == 2026 and _saved_target_month == 5
                         and sub_data.submission_count == 0
                     )
-                    use_historical_actual_preferences = []
-
                     # 提出があればそれを使い、なければテストデータにフォールバック
                     if sub_data.submission_count > 0:
                         # 実データで生成（任意の月で動く）
@@ -2445,39 +2414,6 @@ if mode == "📊 経営者ビュー":
                             data_source_msg += (
                                 "\n管理者が追加した有給調整も集計に含めました。"
                             )
-                        try:
-                            from prototype.reconciliation import (
-                                build_actual_shift_preferences,
-                                reconcile_generation_inputs_with_actual,
-                            )
-                            reconciled_inputs = reconcile_generation_inputs_with_actual(
-                                _saved_target_year, _saved_target_month,
-                                use_off_requests, use_work_requests,
-                                use_preferred_work_requests,
-                                use_preferred_work_groups,
-                            )
-                            use_off_requests = reconciled_inputs.off_requests
-                            use_work_requests = reconciled_inputs.work_requests
-                            use_preferred_work_requests = reconciled_inputs.preferred_work_requests
-                            use_preferred_work_groups = getattr(
-                                reconciled_inputs, "preferred_work_groups", use_preferred_work_groups
-                            )
-                            use_historical_actual_preferences = build_actual_shift_preferences(
-                                _saved_target_year, _saved_target_month,
-                            )
-                            if reconciled_inputs.applied_count:
-                                data_source_msg += (
-                                    f"\n過去実績との食い違い "
-                                    f"{reconciled_inputs.applied_count}件は、"
-                                    "確認済みの個別調整として反映しました。"
-                                )
-                            if use_historical_actual_preferences:
-                                data_source_msg += (
-                                    "\n過去月のすり合わせとして、確定実績シフトに"
-                                    "できるだけ近づくよう優先度を付けています。"
-                                )
-                        except Exception:
-                            use_historical_actual_preferences = []
                     elif is_test_may_2026:
                         # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                         use_off_requests = OFF_REQUESTS
@@ -2487,7 +2423,6 @@ if mode == "📊 経営者ビュー":
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
                         use_preferred_consecutive_off = []
-                        use_historical_actual_preferences = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
                         data_source_msg = (
@@ -2502,7 +2437,6 @@ if mode == "📊 経営者ビュー":
                         use_flexible_off = []
                         use_holiday_overrides = {}
                         use_preferred_consecutive_off = []
-                        use_historical_actual_preferences = []
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -2548,17 +2482,20 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
                     if "monthly_store_count_rules" in generator_params:
                         generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
-                    if "historical_actual_preferences" in generator_params:
-                        generation_kwargs["historical_actual_preferences"] = use_historical_actual_preferences
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
                     if "advisor_max_days" in generator_params:
-                        advisor_limit = sum(
-                            1
-                            for emp, _day, store in use_historical_actual_preferences
-                            if emp == "顧問" and store is not None and store != Store.OFF
-                        )
-                        generation_kwargs["advisor_max_days"] = advisor_limit
+                        advisor_max_days = 0
+                        if _saved_target_year == 2026 and _saved_target_month == 5:
+                            # 2026年5月は大型連休の個別事情により、顧問を最終手段として2日まで許容。
+                            # 過去実績への自動寄せではなく、この月だけの明示的な月別例外として扱う。
+                            advisor_max_days = 2
+                        generation_kwargs["advisor_max_days"] = advisor_max_days
+                        if advisor_max_days:
+                            data_source_msg += (
+                                f"\n{_saved_target_year}年{_saved_target_month}月の月別例外として、"
+                                f"顧問を最大{advisor_max_days}日まで最終手段で許容します。"
+                            )
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
@@ -2616,7 +2553,6 @@ if mode == "📊 経営者ビュー":
                     ),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
-                    "historical_actual_preferences_count": len(use_historical_actual_preferences),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
                     "relaxed_advisor_limit": bool(relaxed_advisor_limit),
                     "solver_limit_seconds": int(solver_limit_seconds),
@@ -2651,7 +2587,6 @@ if mode == "📊 経営者ビュー":
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
-                        "historical_actual_preferences": list(use_historical_actual_preferences),
                     })
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
