@@ -53,7 +53,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
             Store.OMIYA: Affinity.NONE,
         },
-        annual_target_days=268,
+        annual_target_days=267,
         notes="赤羽中、すずらん弱、東口・西口不可",
     ),
     Employee(
@@ -121,7 +121,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
-        annual_target_days=266,
+        annual_target_days=265,
         notes="大宮駅前店店長。大宮専属",
     ),
     Employee(
@@ -229,7 +229,7 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=265,
+        annual_target_days=264,
         notes="すずらん中、大宮中、赤羽弱。野澤不在時はすずらんで補填",
     ),
     Employee(
@@ -245,7 +245,7 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=264,
+        annual_target_days=260,
         notes="大宮強、すずらん弱",
     ),
     Employee(
@@ -262,7 +262,7 @@ TICKET_STAFF: list[Employee] = [
             Store.OMIYA: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=267,
+        annual_target_days=266,
         notes="すずらん専属。不在時は岩野または大類で補填",
     ),
     Employee(
@@ -292,9 +292,10 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
+        employment_status=EmploymentStatus.PART_TIME,
         only_on_request_days=True,
         constraint_check_excluded=True,
-        notes="出勤希望日のみ稼働。制約チェック除外",
+        notes="パート。出勤希望日のみ稼働。制約チェック除外",
     ),
     Employee(
         name="大塚",
