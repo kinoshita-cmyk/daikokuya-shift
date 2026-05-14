@@ -9,7 +9,7 @@
       "employee_id": "076",
       "role": "店長",
       "skill": "エコ",
-      "home_store": null,
+      "home_store": "AKABANE",
       "station_type": "流動",
       "affinities": {
         "AKABANE": "強",
