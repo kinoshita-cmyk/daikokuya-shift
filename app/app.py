@@ -1361,6 +1361,209 @@ def run_shift_validation(**kwargs):
     return validate(**safe_kwargs)
 
 
+def summarize_validation_issues_for_ai(validation_result, limit: int = 20) -> str:
+    """AI相談用に検証結果を短くまとめる。"""
+    issues = list(getattr(validation_result, "issues", []) or [])
+    if not issues:
+        return "エラー・警告はありません。"
+    lines = []
+    for issue in issues[:limit]:
+        severity = "エラー" if getattr(issue, "severity", "") == "ERROR" else "警告"
+        day_text = (
+            f"{getattr(issue, 'month', None) or ''}/{issue.day}"
+            if getattr(issue, "day", None) else "月全体"
+        )
+        employee = getattr(issue, "employee", None) or "対象者なし"
+        lines.append(
+            f"- {severity}: {getattr(issue, 'category', '')} / "
+            f"{day_text} / {employee} / {getattr(issue, 'message', '')}"
+        )
+    if len(issues) > limit:
+        lines.append(f"- ほか {len(issues) - limit} 件")
+    return "\n".join(lines)
+
+
+def summarize_short_staff_for_ai(
+    shift: MonthlyShift,
+    short_staff_by_store: dict[int, set[Store]],
+) -> str:
+    """AI相談用に人員少の日をまとめる。"""
+    if not short_staff_by_store:
+        return "人員不足日はありません。"
+    lines = []
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    for day in sorted(short_staff_by_store)[:20]:
+        labels = []
+        for store in sorted(
+            short_staff_by_store.get(day, set()),
+            key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+        ):
+            mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+                store, (getattr(store, "value", ""), getattr(store, "display_name", str(store)), "", "")
+            )
+            labels.append(f"{mark}{name}")
+        lines.append(f"- {shift.month}/{day}: {'、'.join(labels) if labels else '店舗不明'}")
+    if len(short_staff_by_store) > 20:
+        lines.append(f"- ほか {len(short_staff_by_store) - 20} 日")
+    return "\n".join(lines)
+
+
+def summarize_shift_days_for_ai(shift: MonthlyShift, days: set[int], limit: int = 12) -> str:
+    """AI相談用に該当日の配属だけ抜き出す。"""
+    safe_days = sorted({int(day) for day in days if 1 <= int(day) <= monthrange(shift.year, shift.month)[1]})
+    if not safe_days:
+        return "該当日の配属情報はありません。"
+    lines = []
+    for day in safe_days[:limit]:
+        assignments = []
+        for name in EXPORT_COLUMN_ORDER:
+            assignment = shift.get_assignment(name, day)
+            if assignment is None or assignment.store == Store.OFF:
+                continue
+            store = assignment.store
+            store_label = getattr(store, "display_name", str(store))
+            assignments.append(f"{name}={assignment_to_symbol(assignment)}{store_label}")
+        lines.append(f"- {shift.month}/{day}: {'、'.join(assignments) if assignments else '勤務者なし'}")
+    if len(safe_days) > limit:
+        lines.append(f"- ほか {len(safe_days) - limit} 日")
+    return "\n".join(lines)
+
+
+def build_shift_ai_consult_prompt(
+    shift: MonthlyShift,
+    validation_result,
+    short_staff_by_store: dict[int, set[Store]],
+    question: str,
+    validation_context: dict,
+    changed_cells: set[tuple[str, int]],
+) -> str:
+    """Claudeへ渡す相談文を、現在の画面状態から組み立てる。"""
+    issue_days = {
+        int(issue.day)
+        for issue in getattr(validation_result, "issues", []) or []
+        if getattr(issue, "day", None)
+    }
+    issue_days.update(int(day) for day in (short_staff_by_store or {}))
+    issue_days.update(int(day) for _, day in changed_cells or set())
+    off_summary = []
+    for employee, days in sorted((validation_context.get("off_requests") or {}).items()):
+        if days:
+            off_summary.append(f"{employee}: {format_day_list(days)}")
+    changed_summary = "なし"
+    if changed_cells:
+        changed_summary = "、".join(
+            f"{employee}{day}日"
+            for employee, day in sorted(changed_cells, key=lambda item: (item[1], item[0]))[:30]
+        )
+        if len(changed_cells) > 30:
+            changed_summary += f"、ほか{len(changed_cells) - 30}件"
+
+    return f"""
+対象: {shift.year}年{shift.month}月シフト
+
+相談内容:
+{question.strip() or 'エラー・警告を減らすための手動調整候補を教えてください。'}
+
+現在の検証結果:
+エラー {getattr(validation_result, 'error_count', 0)}件 / 警告 {getattr(validation_result, 'warning_count', 0)}件
+{summarize_validation_issues_for_ai(validation_result)}
+
+人員不足:
+{summarize_short_staff_for_ai(shift, short_staff_by_store)}
+
+該当日前後の配属:
+{summarize_shift_days_for_ai(shift, issue_days)}
+
+本人の絶対休み希望:
+{chr(10).join(off_summary[:30]) if off_summary else 'なし'}
+
+編集中のセル:
+{changed_summary}
+""".strip()
+
+
+def request_shift_ai_consult_advice(prompt: str, api_key: str) -> str:
+    """Claude Opus 4.7 に、編集しない助言だけを依頼する。"""
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=api_key)
+    message = client.messages.create(
+        model="claude-opus-4-7",
+        max_tokens=1024,
+        system=(
+            "あなたは大黒屋のシフト調整を補助する相談役です。"
+            "シフトを直接変更せず、管理者が手動で試せる候補だけを日本語で簡潔に提案してください。"
+            "本人の×休み希望は絶対に勤務へ変えないでください。"
+            "出勤希望や希望店舗は希望扱いで、必要なら休みにする可能性があります。"
+            "顧問は最終手段であり、自動投入ではなく候補として扱ってください。"
+            "回答は、原因、試す候補、注意点の順で短くまとめてください。"
+        ),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    parts = []
+    for block in getattr(message, "content", []) or []:
+        text = getattr(block, "text", "")
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip() or "回答を取得できませんでした。"
+
+
+def render_inline_ai_consult(
+    shift: MonthlyShift,
+    validation_result,
+    short_staff_by_store: dict[int, set[Store]],
+    validation_context: dict,
+    changed_cells: set[tuple[str, int]],
+    key_prefix: str,
+) -> None:
+    """シフト表内の軽量AI相談欄を表示する。"""
+    with st.expander("💬 AIに相談（補助）", expanded=False):
+        st.caption(
+            "AIはシフトを変更しません。現在のエラー・警告・人員不足を見て、手動調整の候補だけを出します。"
+        )
+        if not HAS_ANTHROPIC:
+            st.warning("Claude連携ライブラリが入っていないため、AI相談は利用できません。")
+            return
+
+        api_key = get_anthropic_api_key()
+        if not api_key:
+            st.warning(
+                "Claude APIキーが未設定です。Streamlit Cloud の Secrets に "
+                "`ANTHROPIC_API_KEY` を登録すると使えます。"
+            )
+            return
+
+        question = st.text_area(
+            "相談内容",
+            value=(
+                "このエラー・警告を減らすには、どの日の誰をどこへ動かす候補がありますか？"
+                "本人の×休み希望は絶対に崩さない前提で、候補を3つ以内で教えてください。"
+            ),
+            height=90,
+            key=f"{key_prefix}_ai_consult_question",
+        )
+        answer_key = f"{key_prefix}_ai_consult_answer"
+        if st.button("AIに相談", key=f"{key_prefix}_ai_consult_button"):
+            prompt = build_shift_ai_consult_prompt(
+                shift=shift,
+                validation_result=validation_result,
+                short_staff_by_store=short_staff_by_store,
+                question=question,
+                validation_context=validation_context,
+                changed_cells=changed_cells,
+            )
+            try:
+                with st.spinner("Claudeに相談しています..."):
+                    st.session_state[answer_key] = request_shift_ai_consult_advice(
+                        prompt, api_key,
+                    )
+            except Exception as exc:
+                st.error(f"AI相談でエラーが発生しました: {exc}")
+
+        if st.session_state.get(answer_key):
+            st.markdown(st.session_state[answer_key])
+
+
 def get_fixed_off_edit_violations(
     rows: list[dict],
     off_request_cells: set[tuple[str, int]],
@@ -3769,6 +3972,15 @@ if mode == "📊 経営者ビュー":
                         for issue in inline_result.issues:
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
+
+                render_inline_ai_consult(
+                    shift=inline_display_shift,
+                    validation_result=inline_result,
+                    short_staff_by_store=short_staff_by_store,
+                    validation_context=_table_validation_context,
+                    changed_cells=inline_changed_cells,
+                    key_prefix=f"inline_{edit_ym}",
+                )
 
             if not HAS_AGGRID:
                 st.markdown("##### 色付きプレビュー")
