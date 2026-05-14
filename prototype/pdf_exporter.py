@@ -54,24 +54,28 @@ FONT_SIZES = {
 }
 
 JAPANESE_TTF_PATHS = [
+    "/mnt/c/Windows/Fonts/msgothic.ttc",
+    "/mnt/c/Windows/Fonts/msgothic.ttf",
+    "C:/Windows/Fonts/msgothic.ttc",
+    "C:/Windows/Fonts/msgothic.ttf",
+    "/Library/Fonts/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
     "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
     "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
     "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/ipafont-gothic/ipag.ttf",
+    "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf",
+    "/usr/share/fonts/truetype/takao-gothic/TakaoGothic.ttf",
     "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/Library/Fonts/Arial Unicode.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 ]
 
 
 def _register_japanese_font() -> str:
     """日本語が文字化けしないPDFフォント名を返す。"""
-    try:
-        pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
-        return "HeiseiKakuGo-W5"
-    except Exception:
-        pass
-
+    # Excelに近い数字幅に寄せるため、CIDフォントより先に実フォントを使う。
     for path in JAPANESE_TTF_PATHS:
         if not Path(path).exists():
             continue
@@ -80,6 +84,12 @@ def _register_japanese_font() -> str:
             return "DaikokuyaJP"
         except Exception:
             continue
+
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+        return "HeiseiKakuGo-W5"
+    except Exception:
+        pass
 
     # 最後の保険。日本語表示は弱いが、PDF生成自体は止めない。
     return "Helvetica"
@@ -131,8 +141,10 @@ def _draw_text(
     text = "" if text is None else str(text)
     if not text:
         return
-    size = _fit_font_size(text, font_name, font_size, w, h)
-    c.setFont(font_name, size)
+    numeric_text = text.strip().replace(",", "").replace(".", "")
+    text_font_name = "Helvetica" if numeric_text.isdigit() else font_name
+    size = _fit_font_size(text, text_font_name, font_size, w, h)
+    c.setFont(text_font_name, size)
     text_y = y + (h - size) / 2 + size * 0.18
     if align == "left":
         c.drawString(x + max(2.0, size * 0.35), text_y, text)
@@ -240,6 +252,23 @@ def export_shift_to_pdf(
         )
         current_y = y
 
+    def draw_plain_merged_row(text: str, height: float, font_key: str, align: str = "left") -> None:
+        nonlocal current_y
+        h = height
+        y = current_y - h
+        _draw_text(
+            pdf,
+            text,
+            start_x,
+            y,
+            table_width,
+            h,
+            font_name=font_name,
+            font_size=FONT_SIZES[font_key] * scale,
+            align=align,
+        )
+        current_y = y
+
     draw_merged_row(title, row_heights[0], "title")
     draw_merged_row(header_notes[0], row_heights[1], "comment")
     draw_merged_row(header_notes[1], row_heights[2], "comment")
@@ -332,7 +361,7 @@ def export_shift_to_pdf(
     current_y -= ROW_HEIGHTS["spacer"] * scale
 
     for note in footer_notes:
-        draw_merged_row(note, ROW_HEIGHTS["footer"] * scale, "footer", align="left")
+        draw_plain_merged_row(note, ROW_HEIGHTS["footer"] * scale, "footer", align="left")
 
     pdf.showPage()
     pdf.save()

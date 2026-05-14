@@ -291,7 +291,6 @@ def export_shift_to_excel(
         c = ws.cell(row=row, column=2, value=note)
         c.font = note_font
         c.alignment = left_center
-        _style_range_border(row)
 
     # ============================================================
     # 列幅（テンプレート完全準拠）
