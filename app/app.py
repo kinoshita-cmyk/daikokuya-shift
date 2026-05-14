@@ -3868,27 +3868,48 @@ if mode == "📊 経営者ビュー":
                     key_prefix=f"inline_{edit_ym}",
                 )
 
+                needs_exception_save = bool(fixed_off_violations) or inline_result.error_count > 0
+                allow_exception_save = False
+
                 if fixed_off_violations:
                     st.error(
                         "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
                         + "、".join(fixed_off_violations)
-                        + "。確定するには×へ戻してください。"
+                        + "。通常運用では×へ戻してください。"
                     )
                 elif inline_result.error_count == 0:
                     st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
                 else:
                     st.error("エラーが残っています。下の詳細を確認して修正してください。")
 
+                if needs_exception_save and inline_changed_cells and lock_info is None:
+                    allow_exception_save = st.checkbox(
+                        "管理者例外として、エラーが残っていても下書きに反映する",
+                        key=f"inline_allow_exception_save_{edit_ym}",
+                        help=(
+                            "過去月のすり合わせや本人と後日合意済みの変更だけで使ってください。"
+                            "エラー表示は残るため、確定前に必ず内容を確認してください。"
+                        ),
+                    )
+                    if allow_exception_save:
+                        st.warning(
+                            "管理者例外として下書きに反映できます。"
+                            "本人×休み希望やその他エラーは、検証詳細に残ります。"
+                        )
+
                 btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 1, 1, 2])
                 with btn_col1:
                     apply_disabled = (
                         lock_info is not None
                         or not inline_changed_cells
-                        or bool(fixed_off_violations)
-                        or inline_result.error_count > 0
+                        or (needs_exception_save and not allow_exception_save)
                     )
                     if st.button(
-                        "変更を確定",
+                        (
+                            "下書きに反映"
+                            if needs_exception_save and allow_exception_save
+                            else "変更を確定"
+                        ),
                         key=f"inline_edit_apply_{edit_ym}",
                         type="primary",
                         width="stretch",
@@ -3906,14 +3927,25 @@ if mode == "📊 経営者ビュー":
                             after_shift=inline_display_shift,
                             changed_cells=inline_changed_cells,
                             actor="手動修正",
-                            reason="シフト表直接編集",
+                            reason=(
+                                "シフト表直接編集（管理者例外）"
+                                if needs_exception_save and allow_exception_save
+                                else "シフト表直接編集"
+                            ),
                         )
                         save_shift_snapshot_with_github(
                             backup_mgr,
                             inline_display_shift,
                             kind="draft",
                             author="手動修正",
-                            note=f"シフト表直接編集で{len(inline_changed_cells)}件変更",
+                            note=(
+                                f"シフト表直接編集で{len(inline_changed_cells)}件変更"
+                                + (
+                                    "（エラーあり・管理者例外として下書き反映）"
+                                    if needs_exception_save and allow_exception_save
+                                    else ""
+                                )
+                            ),
                         )
                         st.session_state[inline_version_key] += 1
                         st.session_state.pop(inline_autosave_key, None)
@@ -3921,7 +3953,11 @@ if mode == "📊 経営者ビュー":
                         st.session_state.pop(inline_base_signature_key, None)
                         st.session_state.pop("chat_engine", None)
                         st.session_state.pop("chat_shift_id", None)
-                        st.session_state[inline_status_key] = f"{len(inline_changed_cells)}件の変更を確定しました。"
+                        st.session_state[inline_status_key] = (
+                            f"{len(inline_changed_cells)}件の変更を下書きに反映しました。"
+                            if needs_exception_save and allow_exception_save
+                            else f"{len(inline_changed_cells)}件の変更を確定しました。"
+                        )
                         st.rerun()
                 with btn_col2:
                     if st.button(
@@ -4062,7 +4098,10 @@ if mode == "📊 経営者ビュー":
                 validation_context.get("off_requests", {})
             )
             if off_request_cells:
-                st.info("赤枠の×は、本人が提出した「絶対休み」です。ここは勤務へ変更できません。")
+                st.info(
+                    "赤枠の×は、本人が提出した「絶対休み」です。通常は勤務へ変更しません。"
+                    "過去月のすり合わせなど、本人と後日合意済みの例外だけ管理者例外として下書き反映できます。"
+                )
             if lock_info is not None:
                 st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
@@ -4138,32 +4177,53 @@ if mode == "📊 経営者ビュー":
             state_col4.metric("人員不足日", len(edit_short_staff_by_store), delta_color="inverse")
             state_col5.metric("鍵確認", len(edit_key_warnings_by_store), delta_color="inverse")
 
+            needs_exception_save = bool(fixed_off_violations) or edit_result.error_count > 0
+            allow_exception_save = False
+
             if fixed_off_violations:
                 st.error(
                     "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
                     + "、".join(fixed_off_violations)
-                    + "。確定するには×へ戻してください。"
+                    + "。通常運用では×へ戻してください。"
                 )
             elif edit_result.error_count == 0:
                 st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
             else:
                 st.error("エラーが残っています。下の詳細を確認して修正してください。")
 
+            if needs_exception_save and changed_cells and lock_info is None:
+                allow_exception_save = st.checkbox(
+                    "管理者例外として、エラーが残っていても下書きに反映する",
+                    key=f"manual_allow_exception_save_{edit_ym}",
+                    help=(
+                        "過去月のすり合わせや本人と後日合意済みの変更だけで使ってください。"
+                        "エラー表示は残るため、確定前に必ず内容を確認してください。"
+                    ),
+                )
+                if allow_exception_save:
+                    st.warning(
+                        "管理者例外として下書きに反映できます。"
+                        "本人×休み希望やその他エラーは、検証詳細に残ります。"
+                    )
+
             action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns([1, 1, 1, 1, 2])
             with action_col1:
                 confirm_disabled = (
                     lock_info is not None
                     or not changed_cells
-                    or bool(fixed_off_violations)
-                    or edit_result.error_count > 0
+                    or (needs_exception_save and not allow_exception_save)
                 )
                 if st.button(
-                    "変更を確定",
+                    (
+                        "下書きに反映"
+                        if needs_exception_save and allow_exception_save
+                        else "変更を確定"
+                    ),
                     key="manual_edit_apply",
                     type="primary",
                     width="stretch",
                     disabled=confirm_disabled,
-                    help="エラーが0件の時だけ現在の編集内容を本シフトに反映します",
+                    help="通常はエラー0件で反映します。管理者例外チェック時だけエラーありの下書き反映ができます",
                 ):
                     before_shift = clone_monthly_shift(shift)
                     st.session_state[undo_key].append(before_shift)
@@ -4178,7 +4238,11 @@ if mode == "📊 経営者ビュー":
                         after_shift=edited_shift,
                         changed_cells=changed_cells,
                         actor="手動修正",
-                        reason="クリック編集",
+                        reason=(
+                            "クリック編集（管理者例外）"
+                            if needs_exception_save and allow_exception_save
+                            else "クリック編集"
+                        ),
                     )
                     try:
                         save_shift_snapshot_with_github(
@@ -4186,14 +4250,25 @@ if mode == "📊 経営者ビュー":
                             edited_shift,
                             kind="draft",
                             author="手動修正",
-                            note=f"クリック編集で{len(changed_cells)}件変更",
+                            note=(
+                                f"クリック編集で{len(changed_cells)}件変更"
+                                + (
+                                    "（エラーあり・管理者例外として下書き反映）"
+                                    if needs_exception_save and allow_exception_save
+                                    else ""
+                                )
+                            ),
                         )
                     except Exception:
                         pass
                     st.session_state[version_key] += 1
                     st.session_state.pop("chat_engine", None)
                     st.session_state.pop("chat_shift_id", None)
-                    st.session_state[status_key] = f"{len(changed_cells)}件の変更を確定しました。"
+                    st.session_state[status_key] = (
+                        f"{len(changed_cells)}件の変更を下書きに反映しました。"
+                        if needs_exception_save and allow_exception_save
+                        else f"{len(changed_cells)}件の変更を確定しました。"
+                    )
                     st.rerun()
             with action_col2:
                 if st.button(
@@ -4334,6 +4409,7 @@ if mode == "📊 経営者ビュー":
             footer_text = st.session_state.get("excel_footer", "")
             footer_notes = [line for line in footer_text.split("\n") if line.strip()]
             short_staff_for_export = detect_short_staff_by_store(shift)
+            key_warnings_for_export = detect_key_warnings_by_store(shift)
 
             st.info(
                 "📝 「📋 シフト表」タブで入力したコメントと注意書きが反映されます。"
@@ -4350,6 +4426,7 @@ if mode == "📊 経営者ビュー":
                         header_comments=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
+                        key_warnings_by_store=key_warnings_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 xlsx_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
@@ -4372,6 +4449,7 @@ if mode == "📊 経営者ビュー":
                         header_notes=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
+                        key_warnings_by_store=key_warnings_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 pdf_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
