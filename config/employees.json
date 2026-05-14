@@ -43,7 +43,7 @@
         "NISHIGUCHI": "不可",
         "OMIYA": "不可"
       },
-      "annual_target_days": 268,
+      "annual_target_days": 267,
       "notes": "赤羽中、すずらん弱、東口・西口不可",
       "employment_status": "正社員",
       "hired_at": null,
@@ -143,7 +143,7 @@
         "NISHIGUCHI": "不可",
         "SUZURAN": "不可"
       },
-      "annual_target_days": 266,
+      "annual_target_days": 265,
       "notes": "大宮駅前店店長。大宮専属",
       "employment_status": "正社員",
       "hired_at": null,
@@ -293,7 +293,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 265,
+      "annual_target_days": 264,
       "notes": "すずらん中、大宮中、赤羽弱。野澤不在時はすずらんで補填",
       "employment_status": "正社員",
       "hired_at": null,
@@ -318,7 +318,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 264,
+      "annual_target_days": 260,
       "notes": "大宮強、すずらん弱",
       "employment_status": "正社員",
       "hired_at": null,
@@ -343,7 +343,7 @@
         "OMIYA": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 267,
+      "annual_target_days": 266,
       "notes": "すずらん専属。不在時は岩野または大類で補填",
       "employment_status": "正社員",
       "hired_at": null,
@@ -394,8 +394,8 @@
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": null,
-      "notes": "出勤希望日のみ稼働。制約チェック除外",
-      "employment_status": "正社員",
+      "notes": "パート。出勤希望日のみ稼働。制約チェック除外",
+      "employment_status": "パート",
       "hired_at": null,
       "retired_at": null,
       "status_changed_at": null,
