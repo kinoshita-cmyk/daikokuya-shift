@@ -1361,209 +1361,6 @@ def run_shift_validation(**kwargs):
     return validate(**safe_kwargs)
 
 
-def summarize_validation_issues_for_ai(validation_result, limit: int = 20) -> str:
-    """AI相談用に検証結果を短くまとめる。"""
-    issues = list(getattr(validation_result, "issues", []) or [])
-    if not issues:
-        return "エラー・警告はありません。"
-    lines = []
-    for issue in issues[:limit]:
-        severity = "エラー" if getattr(issue, "severity", "") == "ERROR" else "警告"
-        day_text = (
-            f"{getattr(issue, 'month', None) or ''}/{issue.day}"
-            if getattr(issue, "day", None) else "月全体"
-        )
-        employee = getattr(issue, "employee", None) or "対象者なし"
-        lines.append(
-            f"- {severity}: {getattr(issue, 'category', '')} / "
-            f"{day_text} / {employee} / {getattr(issue, 'message', '')}"
-        )
-    if len(issues) > limit:
-        lines.append(f"- ほか {len(issues) - limit} 件")
-    return "\n".join(lines)
-
-
-def summarize_short_staff_for_ai(
-    shift: MonthlyShift,
-    short_staff_by_store: dict[int, set[Store]],
-) -> str:
-    """AI相談用に人員少の日をまとめる。"""
-    if not short_staff_by_store:
-        return "人員不足日はありません。"
-    lines = []
-    store_order = list(SHORT_STAFF_STORE_LABELS)
-    for day in sorted(short_staff_by_store)[:20]:
-        labels = []
-        for store in sorted(
-            short_staff_by_store.get(day, set()),
-            key=lambda s: store_order.index(s) if s in store_order else len(store_order),
-        ):
-            mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
-                store, (getattr(store, "value", ""), getattr(store, "display_name", str(store)), "", "")
-            )
-            labels.append(f"{mark}{name}")
-        lines.append(f"- {shift.month}/{day}: {'、'.join(labels) if labels else '店舗不明'}")
-    if len(short_staff_by_store) > 20:
-        lines.append(f"- ほか {len(short_staff_by_store) - 20} 日")
-    return "\n".join(lines)
-
-
-def summarize_shift_days_for_ai(shift: MonthlyShift, days: set[int], limit: int = 12) -> str:
-    """AI相談用に該当日の配属だけ抜き出す。"""
-    safe_days = sorted({int(day) for day in days if 1 <= int(day) <= monthrange(shift.year, shift.month)[1]})
-    if not safe_days:
-        return "該当日の配属情報はありません。"
-    lines = []
-    for day in safe_days[:limit]:
-        assignments = []
-        for name in EXPORT_COLUMN_ORDER:
-            assignment = shift.get_assignment(name, day)
-            if assignment is None or assignment.store == Store.OFF:
-                continue
-            store = assignment.store
-            store_label = getattr(store, "display_name", str(store))
-            assignments.append(f"{name}={assignment_to_symbol(assignment)}{store_label}")
-        lines.append(f"- {shift.month}/{day}: {'、'.join(assignments) if assignments else '勤務者なし'}")
-    if len(safe_days) > limit:
-        lines.append(f"- ほか {len(safe_days) - limit} 日")
-    return "\n".join(lines)
-
-
-def build_shift_ai_consult_prompt(
-    shift: MonthlyShift,
-    validation_result,
-    short_staff_by_store: dict[int, set[Store]],
-    question: str,
-    validation_context: dict,
-    changed_cells: set[tuple[str, int]],
-) -> str:
-    """Claudeへ渡す相談文を、現在の画面状態から組み立てる。"""
-    issue_days = {
-        int(issue.day)
-        for issue in getattr(validation_result, "issues", []) or []
-        if getattr(issue, "day", None)
-    }
-    issue_days.update(int(day) for day in (short_staff_by_store or {}))
-    issue_days.update(int(day) for _, day in changed_cells or set())
-    off_summary = []
-    for employee, days in sorted((validation_context.get("off_requests") or {}).items()):
-        if days:
-            off_summary.append(f"{employee}: {format_day_list(days)}")
-    changed_summary = "なし"
-    if changed_cells:
-        changed_summary = "、".join(
-            f"{employee}{day}日"
-            for employee, day in sorted(changed_cells, key=lambda item: (item[1], item[0]))[:30]
-        )
-        if len(changed_cells) > 30:
-            changed_summary += f"、ほか{len(changed_cells) - 30}件"
-
-    return f"""
-対象: {shift.year}年{shift.month}月シフト
-
-相談内容:
-{question.strip() or 'エラー・警告を減らすための手動調整候補を教えてください。'}
-
-現在の検証結果:
-エラー {getattr(validation_result, 'error_count', 0)}件 / 警告 {getattr(validation_result, 'warning_count', 0)}件
-{summarize_validation_issues_for_ai(validation_result)}
-
-人員不足:
-{summarize_short_staff_for_ai(shift, short_staff_by_store)}
-
-該当日前後の配属:
-{summarize_shift_days_for_ai(shift, issue_days)}
-
-本人の絶対休み希望:
-{chr(10).join(off_summary[:30]) if off_summary else 'なし'}
-
-編集中のセル:
-{changed_summary}
-""".strip()
-
-
-def request_shift_ai_consult_advice(prompt: str, api_key: str) -> str:
-    """Claude Opus 4.7 に、編集しない助言だけを依頼する。"""
-    from anthropic import Anthropic
-
-    client = Anthropic(api_key=api_key)
-    message = client.messages.create(
-        model="claude-opus-4-7",
-        max_tokens=1024,
-        system=(
-            "あなたは大黒屋のシフト調整を補助する相談役です。"
-            "シフトを直接変更せず、管理者が手動で試せる候補だけを日本語で簡潔に提案してください。"
-            "本人の×休み希望は絶対に勤務へ変えないでください。"
-            "出勤希望や希望店舗は希望扱いで、必要なら休みにする可能性があります。"
-            "顧問は最終手段であり、自動投入ではなく候補として扱ってください。"
-            "回答は、原因、試す候補、注意点の順で短くまとめてください。"
-        ),
-        messages=[{"role": "user", "content": prompt}],
-    )
-    parts = []
-    for block in getattr(message, "content", []) or []:
-        text = getattr(block, "text", "")
-        if text:
-            parts.append(text)
-    return "\n".join(parts).strip() or "回答を取得できませんでした。"
-
-
-def render_inline_ai_consult(
-    shift: MonthlyShift,
-    validation_result,
-    short_staff_by_store: dict[int, set[Store]],
-    validation_context: dict,
-    changed_cells: set[tuple[str, int]],
-    key_prefix: str,
-) -> None:
-    """シフト表内の軽量AI相談欄を表示する。"""
-    with st.expander("💬 AIに相談（補助）", expanded=False):
-        st.caption(
-            "AIはシフトを変更しません。現在のエラー・警告・人員不足を見て、手動調整の候補だけを出します。"
-        )
-        if not HAS_ANTHROPIC:
-            st.warning("Claude連携ライブラリが入っていないため、AI相談は利用できません。")
-            return
-
-        api_key = get_anthropic_api_key()
-        if not api_key:
-            st.warning(
-                "Claude APIキーが未設定です。Streamlit Cloud の Secrets に "
-                "`ANTHROPIC_API_KEY` を登録すると使えます。"
-            )
-            return
-
-        question = st.text_area(
-            "相談内容",
-            value=(
-                "このエラー・警告を減らすには、どの日の誰をどこへ動かす候補がありますか？"
-                "本人の×休み希望は絶対に崩さない前提で、候補を3つ以内で教えてください。"
-            ),
-            height=90,
-            key=f"{key_prefix}_ai_consult_question",
-        )
-        answer_key = f"{key_prefix}_ai_consult_answer"
-        if st.button("AIに相談", key=f"{key_prefix}_ai_consult_button"):
-            prompt = build_shift_ai_consult_prompt(
-                shift=shift,
-                validation_result=validation_result,
-                short_staff_by_store=short_staff_by_store,
-                question=question,
-                validation_context=validation_context,
-                changed_cells=changed_cells,
-            )
-            try:
-                with st.spinner("Claudeに相談しています..."):
-                    st.session_state[answer_key] = request_shift_ai_consult_advice(
-                        prompt, api_key,
-                    )
-            except Exception as exc:
-                st.error(f"AI相談でエラーが発生しました: {exc}")
-
-        if st.session_state.get(answer_key):
-            st.markdown(st.session_state[answer_key])
-
-
 def get_fixed_off_edit_violations(
     rows: list[dict],
     off_request_cells: set[tuple[str, int]],
@@ -1711,6 +1508,59 @@ def render_scrollable_dict_table(
         html_parts.append('</tr>')
     html_parts.append('</tbody></table></div>')
     st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def load_public_shift_for_employee_view(
+    year: int,
+    month: int,
+) -> tuple[Optional[MonthlyShift], str]:
+    """従業員向けに公開できる確定シフトを読み込む。"""
+    lock_mgr = ShiftLockManager()
+    backup = ShiftBackup()
+    lock_info = lock_mgr.get_lock_info(int(year), int(month))
+    if lock_info:
+        snapshot_path = (
+            backup.backup_dir
+            / f"{int(year):04d}-{int(month):02d}"
+            / lock_info.snapshot_file
+        )
+        if snapshot_path.exists():
+            return backup.load_shift(snapshot_path), "ロック済み確定版"
+
+    latest_finalized = backup.get_latest_shift(int(year), int(month), kind="finalized")
+    if latest_finalized is not None:
+        return latest_finalized, "最新の確定保存版"
+    return None, ""
+
+
+def render_employee_confirmed_shift(
+    shift: MonthlyShift,
+    employee_name: str,
+) -> None:
+    """従業員本人向けに、自分の確定シフトだけを表示する。"""
+    rows = []
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    for day in range(1, monthrange(int(shift.year), int(shift.month))[1] + 1):
+        assignment = shift.get_assignment(employee_name, day)
+        if assignment is None or assignment.store == Store.OFF:
+            work_text = "有給" if assignment is not None and assignment.is_paid_leave else "休み"
+        else:
+            work_text = f"{assignment.store.value} {assignment.store.display_name}"
+            if assignment.is_paid_leave:
+                work_text += "（有給）"
+        rows.append({
+            "日付": f"{int(shift.month)}/{day}",
+            "曜": weekday_jp[date(int(shift.year), int(shift.month), day).weekday()],
+            "勤務": work_text,
+        })
+
+    render_scrollable_dict_table(
+        rows,
+        columns=["日付", "曜", "勤務"],
+        widths={"日付": 90, "曜": 70, "勤務": 260},
+        empty_message="表示できる確定シフトがありません",
+        max_height=560,
+    )
 
 
 def _safe_preference_days(values) -> list[int]:
@@ -3973,15 +3823,6 @@ if mode == "📊 経営者ビュー":
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
 
-                render_inline_ai_consult(
-                    shift=inline_display_shift,
-                    validation_result=inline_result,
-                    short_staff_by_store=short_staff_by_store,
-                    validation_context=_table_validation_context,
-                    changed_cells=inline_changed_cells,
-                    key_prefix=f"inline_{edit_ym}",
-                )
-
             if not HAS_AGGRID:
                 st.markdown("##### 色付きプレビュー")
                 render_shift_table(
@@ -4741,7 +4582,9 @@ elif mode == "👤 従業員ビュー":
         st.stop()
 
     # ============================================================
-    # 対象月の選択（テスト目的でも本番でも使える月選択）
+    # 従業員側の表示範囲
+    # - 従業員リンクでは、原則「翌月の希望提出」と「今月の確定シフト確認」だけ。
+    # - 過去月・翌々月などのテスト操作は、管理者プレビュー時だけ折りたたみ内に残す。
     # ============================================================
     today = date.today()
     # 翌月計算
@@ -4765,64 +4608,92 @@ elif mode == "👤 従業員ビュー":
     else:
         pp_year, pp_month = prev_year, prev_month - 1
 
-    # セッションに対象月を保存
-    if "emp_target_year" not in st.session_state:
-        st.session_state["emp_target_year"] = next_year
-    if "emp_target_month" not in st.session_state:
-        st.session_state["emp_target_month"] = next_month
+    employee_view_mode = "翌月の希望を提出"
+    if is_employee():
+        employee_view_mode = st.radio(
+            "表示",
+            ["翌月の希望を提出", "今月の確定シフトを見る"],
+            horizontal=True,
+            key="employee_magic_link_view_mode",
+            label_visibility="collapsed",
+        )
 
-    st.markdown("##### 📅 提出する対象月を選んでください")
+        if employee_view_mode == "今月の確定シフトを見る":
+            st.markdown(f"### {today.year}年{today.month}月の確定シフト")
+            public_shift, public_shift_source = load_public_shift_for_employee_view(
+                today.year, today.month,
+            )
+            if public_shift is None:
+                st.warning(
+                    "今月の確定シフトはまだ公開されていません。"
+                    "確定後にこの画面で確認できます。"
+                )
+            else:
+                st.success(f"公開中の確定シフトを表示しています（{public_shift_source}）。")
+                render_employee_confirmed_shift(public_shift, selected)
+            st.info(
+                "急な忌引き・体調不良などで変更が必要な場合は、"
+                "この画面で上書きせず、店長または管理者へ直接連絡してください。"
+                "管理者側でシフトを修正して再度確定します。"
+            )
+            st.stop()
 
-    # クイック選択ボタン（経営者ビューと同じ範囲：前月/今月/翌月/翌々月）
-    qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
-    with qb_col1:
-        if st.button(
-            f"前月\n({prev_year}/{prev_month})",
-            key="emp_qb_prev",
-            width="stretch",
-            help="テスト用：過去月でも提出可能",
-        ):
-            st.session_state["emp_target_year"] = prev_year
-            st.session_state["emp_target_month"] = prev_month
-            st.rerun()
-    with qb_col2:
-        if st.button(
-            f"今月\n({today.year}/{today.month})",
-            key="emp_qb_curr",
-            width="stretch",
-        ):
-            st.session_state["emp_target_year"] = today.year
-            st.session_state["emp_target_month"] = today.month
-            st.rerun()
-    with qb_col3:
-        # 翌月（デフォルト・本番運用想定）
-        if st.button(
-            f"📌 翌月\n({next_year}/{next_month})",
-            key="emp_qb_next",
-            type="primary",
-            width="stretch",
-            help="通常はこちら（本番運用）",
-        ):
+        target_year = next_year
+        target_month = next_month
+        st.markdown(
+            f'<div style="background:#eff6ff; padding:12px 16px; border-radius:8px; '
+            f'border-left:4px solid #2563eb; margin:8px 0 14px 0;">'
+            f'<strong>提出対象:</strong> {target_year}年{target_month}月分<br>'
+            f'<span style="font-size:13px; color:#1e40af;">'
+            f'月が替わると、この提出対象は自動で次の月に切り替わります。'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # 管理者プレビューでは、過去月テストや翌々月確認のために月変更を残す。
+        if "emp_target_year" not in st.session_state:
             st.session_state["emp_target_year"] = next_year
+        if "emp_target_month" not in st.session_state:
             st.session_state["emp_target_month"] = next_month
-            st.rerun()
-    with qb_col4:
-        if st.button(
-            f"翌々月\n({nn_year}/{nn_month})",
-            key="emp_qb_nn",
-            width="stretch",
-            help="早めに提出する場合",
-        ):
-            st.session_state["emp_target_year"] = nn_year
-            st.session_state["emp_target_month"] = nn_month
-            st.rerun()
 
-    target_year = st.session_state["emp_target_year"]
-    target_month = st.session_state["emp_target_month"]
+        target_year = st.session_state["emp_target_year"]
+        target_month = st.session_state["emp_target_month"]
+        st.markdown(
+            f"##### 📅 管理者プレビュー対象: {int(target_year)}年{int(target_month)}月"
+        )
+        with st.expander("管理者プレビュー用に対象月を変更", expanded=False):
+            qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
+            with qb_col1:
+                if st.button(f"前月\n({prev_year}/{prev_month})", key="emp_qb_prev", width="stretch"):
+                    st.session_state["emp_target_year"] = prev_year
+                    st.session_state["emp_target_month"] = prev_month
+                    st.rerun()
+            with qb_col2:
+                if st.button(f"今月\n({today.year}/{today.month})", key="emp_qb_curr", width="stretch"):
+                    st.session_state["emp_target_year"] = today.year
+                    st.session_state["emp_target_month"] = today.month
+                    st.rerun()
+            with qb_col3:
+                if st.button(
+                    f"📌 翌月\n({next_year}/{next_month})",
+                    key="emp_qb_next",
+                    type="primary",
+                    width="stretch",
+                ):
+                    st.session_state["emp_target_year"] = next_year
+                    st.session_state["emp_target_month"] = next_month
+                    st.rerun()
+            with qb_col4:
+                if st.button(f"翌々月\n({nn_year}/{nn_month})", key="emp_qb_nn", width="stretch"):
+                    st.session_state["emp_target_year"] = nn_year
+                    st.session_state["emp_target_month"] = nn_month
+                    st.rerun()
+
     days_in_month = monthrange(target_year, target_month)[1]
     free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
     paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
+    done_key = f"pref_done_{selected}_{target_year}_{target_month}"
 
     # テスト月（過去・今月）の場合は注意表示
     is_test_month = (
@@ -4934,10 +4805,43 @@ elif mode == "👤 従業員ビュー":
     if "user_prefs" not in st.session_state:
         st.session_state.user_prefs = {}
     user_key = f"{selected}_{target_year}_{target_month}"
+    existing_submission = None
+    try:
+        _status = ShiftBackup().get_submission_status(
+            int(target_year), int(target_month), [selected],
+        )
+        existing_submission = next(
+            (s for s in _status.get("submitted", []) if s.get("employee") == selected),
+            None,
+        )
+    except Exception:
+        existing_submission = None
+
+    paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
-        st.session_state.user_prefs[user_key] = {d: "○" for d in range(1, days_in_month + 1)}
+        initial_prefs = {d: "○" for d in range(1, days_in_month + 1)}
+        if existing_submission:
+            paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
+            for d in existing_submission.get("off_request_days", []):
+                if 1 <= int(d) <= days_in_month:
+                    initial_prefs[int(d)] = "×"
+            for d in existing_submission.get("flexible_off_days", []):
+                if 1 <= int(d) <= days_in_month and initial_prefs.get(int(d)) != "×":
+                    initial_prefs[int(d)] = "△"
+            st.session_state.setdefault(
+                free_text_key, existing_submission.get("note", "") or "",
+            )
+        st.session_state.user_prefs[user_key] = initial_prefs
+    elif existing_submission:
+        paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
 
     prefs = st.session_state.user_prefs[user_key]
+    if existing_submission and not st.session_state.get(done_key):
+        st.info(
+            f"この月はすでに提出済みです"
+            f"（{existing_submission.get('submitted_at', '')[:19].replace('T', ' ')}）。"
+            "内容を変更したい場合は、この画面で修正して再提出してください。"
+        )
 
     # 当該従業員の月間基準日数を取得
     _emp_obj = None
@@ -4997,6 +4901,37 @@ elif mode == "👤 従業員ビュー":
             pass
         return save_path
 
+    if st.session_state.get(done_key):
+        done_info = st.session_state.get(done_key) or {}
+        x_days_done = done_info.get("x_days", [d for d, m in prefs.items() if m == "×"])
+        triangle_days_done = done_info.get("triangle_days", [d for d, m in prefs.items() if m == "△"])
+        ok_days_done = done_info.get("ok_days", [d for d, m in prefs.items() if m == "○"])
+        paid_leave_done = int(done_info.get("paid_leave_days", 0) or 0)
+        submitted_at_done = done_info.get("submitted_at", datetime.now().isoformat())[:19].replace("T", " ")
+
+        st.markdown("### 提出完了")
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました。\n\n"
+            f"提出日時: {submitted_at_done}"
+        )
+        st.info(
+            "この画面が表示されていれば提出は完了しています。"
+            "内容を変えたい場合だけ、下のボタンから修正して再提出してください。"
+        )
+        completion_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_done), "日数": len(x_days_done)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_done), "日数": len(ok_days_done)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_done}日", "日数": paid_leave_done},
+            {"項目": "自由記述", "内容": done_info.get("free_text", "").strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(completion_rows)
+        if st.button("内容を修正して再提出する", key=f"edit_after_done_{selected}_{target_year}_{target_month}", width="stretch"):
+            st.session_state.pop(done_key, None)
+            st.session_state[review_key] = False
+            st.rerun()
+        st.stop()
+
     if st.session_state.get(review_key):
         paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
         free_text_review = st.session_state.get(free_text_key, "")
@@ -5027,14 +4962,15 @@ elif mode == "👤 従業員ビュー":
             if st.button("この内容で提出する", key="emp_review_submit", type="primary", width="stretch"):
                 _save_employee_preferences(paid_leave_days_review, free_text_review)
                 st.session_state[review_key] = False
-                st.success(
-                    f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました！\n\n"
-                    f"📊 入力内容: ○ 出勤可能 {len(ok_days)}日 / "
-                    f"× 休み希望 {len(x_days)}日 / "
-                    f"△ できれば休み {len(triangle_days)}日"
-                    f"{f' / 🏖 希望有給 {paid_leave_days_review}日' if paid_leave_days_review > 0 else ''}"
-                )
-                st.balloons()
+                st.session_state[done_key] = {
+                    "submitted_at": datetime.now().isoformat(),
+                    "x_days": x_days,
+                    "triangle_days": triangle_days,
+                    "ok_days": ok_days,
+                    "paid_leave_days": paid_leave_days_review,
+                    "free_text": free_text_review,
+                }
+                st.rerun()
         st.stop()
 
     # 従業員のインデックス（Japaneseキーを避けてASCII-safeなキーにする）
@@ -5115,7 +5051,7 @@ elif mode == "👤 従業員ビュー":
 
     paid_leave_days = st.number_input(
         "希望有給日数（任意）",
-        min_value=0, max_value=31, value=0, step=1,
+        min_value=0, max_value=31, value=paid_leave_default_value, step=1,
         help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
         key=paid_leave_key,
     )
