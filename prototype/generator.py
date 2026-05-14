@@ -37,7 +37,8 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
-    MAKINO_NISHIGUCHI_TRAINING_PARTNER,
+    MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
+    GLOBAL_DAILY_STAFFING_LIMIT,
 )
 
 
@@ -420,6 +421,8 @@ def generate_shift(
     # 大宮の「人数少」状態を表す変数（人員不足時はエコ1+チケット1で可）
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
     higashi_unexpected_assignments = []
+    over_standard_staffing_terms = []
+    over_daily_staffing_terms = []
 
     for d in days:
         mode = operation_modes.get(d, OperationMode.NORMAL)
@@ -438,6 +441,23 @@ def generate_shift(
                 for s in closed_stores:
                     model.Add(x[e.name][d][s] == 0)
 
+        daily_total = sum(1 - off[e.name][d] for e in main_employees)
+        model.Add(daily_total <= int(GLOBAL_DAILY_STAFFING_LIMIT.max_total))
+        over_daily_standard = model.NewIntVar(
+            0,
+            int(GLOBAL_DAILY_STAFFING_LIMIT.max_total),
+            f"over_daily_standard_{d}",
+        )
+        model.Add(
+            over_daily_standard
+            >= daily_total - int(GLOBAL_DAILY_STAFFING_LIMIT.standard_total)
+        )
+        model.Add(over_daily_standard >= 0)
+        over_daily_staffing_terms.append(
+            int(GLOBAL_DAILY_STAFFING_LIMIT.over_standard_penalty)
+            * over_daily_standard
+        )
+
         weekday = date(year, month, d).weekday()
 
         # 各店舗ごとに必要人数を制約
@@ -451,6 +471,19 @@ def generate_shift(
             eco_at_store = sum(x[e.name][d][s] for e in eco_employees)
             ticket_at_store = sum(x[e.name][d][s] for e in ticket_employees)
             total_at_store = eco_at_store + ticket_at_store
+            staffing_limit = STORE_STAFFING_LIMITS.get(s)
+            if staffing_limit is not None:
+                model.Add(total_at_store <= int(staffing_limit.max_total))
+                over_standard = model.NewIntVar(
+                    0,
+                    int(staffing_limit.max_total),
+                    f"over_standard_{s.name}_{d}",
+                )
+                model.Add(over_standard >= total_at_store - int(staffing_limit.standard_total))
+                model.Add(over_standard >= 0)
+                over_standard_staffing_terms.append(
+                    int(staffing_limit.over_standard_penalty) * over_standard
+                )
 
             # 赤羽東口店: エコ1名のみ。例外なし。
             if s == Store.HIGASHIGUCHI:
@@ -859,6 +892,13 @@ def generate_shift(
         obj = obj - TARGET_SHORTFALL_PENALTY * sum(target_penalty_terms)
     if target_overage_terms:
         obj = obj - TARGET_OVERAGE_PENALTY * sum(target_overage_terms)
+    if over_standard_staffing_terms:
+        # 月間目標日数を満たすために店舗人数が膨らみすぎないよう、
+        # 店舗ごとの標準人数超過を強く抑える。
+        obj = obj - sum(over_standard_staffing_terms)
+    if over_daily_staffing_terms:
+        # 全体人数も11名を標準にし、13名を超える解は作らない。
+        obj = obj - sum(over_daily_staffing_terms)
     if over_4_indicators:
         # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
         obj = obj - 50 * sum(over_4_indicators)

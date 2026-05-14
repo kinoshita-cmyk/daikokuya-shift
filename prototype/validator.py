@@ -29,6 +29,7 @@ from .rules import (
     get_capacity, OFF_MAIN_STORE_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER,
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
+    STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
 )
 
 
@@ -139,43 +140,46 @@ def validate(
     # 1. 店舗別の必要人数チェック
     _check_store_capacity(shift, result, days_in_month, allow_omiya_short=allow_omiya_short)
 
-    # 2. エコ配置チェック（東口・西口必須）
+    # 2. 1日全体の人数上限チェック
+    _check_daily_staffing_limit(shift, result, days_in_month)
+
+    # 3. エコ配置チェック（東口・西口必須）
     _check_eco_placement(shift, result, days_in_month)
 
-    # 3. 連勤チェック
+    # 4. 連勤チェック
     _check_consecutive_work(shift, result, days_in_month, prev_month, max_consec=max_consec)
 
-    # 4. 休日日数チェック
+    # 5. 休日日数チェック
     _check_holiday_days(shift, result, days_in_month, holiday_overrides, default_holidays)
 
-    # 5. 連休チェック（2連休回数、3連休確認）
+    # 6. 連休チェック（2連休回数、3連休確認）
     _check_consecutive_off(shift, result, days_in_month, off_requests)
 
-    # 6. 休み希望厳守チェック
+    # 7. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
 
-    # 7. 出勤希望チェック
+    # 8. 出勤希望チェック
     _check_work_requests(shift, result, work_requests, off_requests)
 
-    # 8. 大宮アンカースタッフ（春山・下地）チェック
+    # 9. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 9. 東口の月曜休店チェック
+    # 10. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 10. 楯・春山・長尾のメイン店舗外勤務チェック
+    # 11. 楯・春山・長尾のメイン店舗外勤務チェック
     _check_required_off_main_store_days(shift, result)
 
-    # 11. 月別の追加配置ルールチェック
+    # 12. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 12. 牧野さんの東口・西口研修ルールチェック
+    # 13. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 13. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 14. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 14. 統計情報の集計
+    # 15. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -189,6 +193,52 @@ def validate(
 # ============================================================
 # 個別チェック関数
 # ============================================================
+
+def _check_daily_staffing_limit(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """1日全体の人数が許容範囲に収まっているか確認する。"""
+    for day in range(1, days + 1):
+        mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+        if mode == OperationMode.CLOSED:
+            continue
+
+        workers = sorted({
+            a.employee
+            for a in shift.get_day_assignments(day)
+            if a.store != Store.OFF
+        })
+        total = len(workers)
+        worker_str = ", ".join(workers) if workers else "(誰もいない)"
+
+        if total > GLOBAL_DAILY_STAFFING_LIMIT.max_total:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="全体人数上限",
+                day=day,
+                employee=None,
+                message=(
+                    f"全体の出勤人数が{total}名です"
+                    f"（最大{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名）"
+                    f"／出勤者: {worker_str}"
+                ),
+            ))
+        elif total > GLOBAL_DAILY_STAFFING_LIMIT.standard_total:
+            result.issues.append(Issue(
+                severity="INFO",
+                category="全体人数多め",
+                day=day,
+                employee=None,
+                message=(
+                    f"全体の出勤人数が{total}名です"
+                    f"（標準{GLOBAL_DAILY_STAFFING_LIMIT.standard_total}名、"
+                    f"許容{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名まで）"
+                    f"／出勤者: {worker_str}"
+                ),
+            ))
+
 
 def _check_store_capacity(
     shift: MonthlyShift, result: ValidationResult, days: int,
@@ -236,6 +286,30 @@ def _check_store_capacity(
                 a.employee == YamamotoLogic.EMPLOYEE_NAME and a.store == store
                 for a in day_assignments
             )
+            staffing_limit = STORE_STAFFING_LIMITS.get(store)
+            if staffing_limit is not None:
+                if total > staffing_limit.max_total:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数上限",
+                        day=day, employee=None,
+                        message=(
+                            f"{store.display_name}が{total}名です"
+                            f"（最大{staffing_limit.max_total}名）"
+                            f"／配属: {worker_str}"
+                        ),
+                    ))
+                elif total > staffing_limit.standard_total:
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="店舗人数多め",
+                        day=day, employee=None,
+                        message=(
+                            f"{store.display_name}が{total}名です"
+                            f"（標準{staffing_limit.standard_total}名）"
+                            f"／配属: {worker_str}"
+                        ),
+                    ))
 
             # 赤羽東口店はエコ1名のみ。例外なし。
             if store == Store.HIGASHIGUCHI:

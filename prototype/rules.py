@@ -24,6 +24,22 @@ class StoreCapacity:
     closed_dow: tuple[int, ...] = ()  # 休店曜日（0=月）。tuple()=休店なし
 
 
+@dataclass(frozen=True)
+class StoreStaffingLimit:
+    """店舗ごとの標準人数と最大人数。"""
+    standard_total: int          # 通常時に目指す人数
+    max_total: int               # 生成で超えない最大人数
+    over_standard_penalty: int   # 標準人数を1人超えるごとの回避ペナルティ
+
+
+@dataclass(frozen=True)
+class DailyStaffingLimit:
+    """1日全体の標準人数と最大人数。"""
+    standard_total: int          # 通常時に目指す総人数
+    max_total: int               # 生成で超えない最大人数
+    over_standard_penalty: int   # 標準人数を1人超えるごとの回避ペナルティ
+
+
 # 通常モードの店舗別キャパシティ
 NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
     Store.AKABANE: StoreCapacity(
@@ -60,6 +76,30 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
         # エコ担当はチケット対応も可。合計3名以上を基本にする。
     ),
 }
+
+
+# 店舗ごとの標準人数・最大人数。
+# 月間目標勤務日数よりも、まず店舗ごとの上限を守る。
+STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
+    # 5名は原則NG。4名は例外的な増員として許容。
+    Store.AKABANE: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=900),
+    # 赤羽東口店は原則1名のみ。
+    Store.HIGASHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=1, over_standard_penalty=3000),
+    # 大宮駅前店は3名を標準にし、4名は強く抑制。5名はNG。
+    Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=2400),
+    # 大宮西口店は原則1名、研修などで2名まで。
+    Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=900),
+    # すずらんは3名標準、状況により4名まで。
+    Store.SUZURAN: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=900),
+}
+
+# 1日全体の人数上限。
+# 通常は11人体制、13人までは許容、14人以上はNG。
+GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
+    standard_total=11,
+    max_total=13,
+    over_standard_penalty=900,
+)
 
 # 省人員モード（GW・お盆・SW等）
 REDUCED_CAPACITY: dict[Store, StoreCapacity] = {
