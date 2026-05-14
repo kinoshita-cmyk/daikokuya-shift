@@ -9,6 +9,7 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 from calendar import monthrange
+import importlib.util
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -58,6 +59,9 @@ JAPANESE_TTF_PATHS = [
     "/mnt/c/Windows/Fonts/msgothic.ttf",
     "C:/Windows/Fonts/msgothic.ttc",
     "C:/Windows/Fonts/msgothic.ttf",
+    # Streamlit Cloud ではシステムに日本語フォントが無い場合があるため、
+    # requirements.txt の japanize-matplotlib に含まれる IPAexGothic も探す。
+    "PACKAGE:japanize_matplotlib/fonts/ipaexg.ttf",
     "/Library/Fonts/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
@@ -73,14 +77,35 @@ JAPANESE_TTF_PATHS = [
 ]
 
 
+def _resolve_font_path(candidate: str) -> Optional[Path]:
+    """通常パスまたは PACKAGE: 指定からPDF用フォントファイルを探す。"""
+    if not candidate.startswith("PACKAGE:"):
+        path = Path(candidate)
+        return path if path.exists() else None
+
+    package_path = candidate.removeprefix("PACKAGE:")
+    package_name, _, relative_path = package_path.partition("/")
+    if not package_name or not relative_path:
+        return None
+    try:
+        spec = importlib.util.find_spec(package_name)
+    except Exception:
+        spec = None
+    if spec is None or not spec.origin:
+        return None
+    path = Path(spec.origin).parent / relative_path
+    return path if path.exists() else None
+
+
 def _register_japanese_font() -> str:
     """日本語が文字化けしないPDFフォント名を返す。"""
     # Excelに近い数字幅に寄せるため、CIDフォントより先に実フォントを使う。
-    for path in JAPANESE_TTF_PATHS:
-        if not Path(path).exists():
+    for candidate in JAPANESE_TTF_PATHS:
+        path = _resolve_font_path(candidate)
+        if path is None:
             continue
         try:
-            pdfmetrics.registerFont(TTFont("DaikokuyaJP", path))
+            pdfmetrics.registerFont(TTFont("DaikokuyaJP", str(path)))
             return "DaikokuyaJP"
         except Exception:
             continue
@@ -141,8 +166,7 @@ def _draw_text(
     text = "" if text is None else str(text)
     if not text:
         return
-    numeric_text = text.strip().replace(",", "").replace(".", "")
-    text_font_name = "Helvetica" if numeric_text.isdigit() else font_name
+    text_font_name = font_name
     size = _fit_font_size(text, text_font_name, font_size, w, h)
     c.setFont(text_font_name, size)
     text_y = y + (h - size) / 2 + size * 0.18
