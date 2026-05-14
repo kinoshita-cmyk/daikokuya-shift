@@ -1226,6 +1226,15 @@ def enrich_submission_days_from_files(
             ]
             flexible_days = sorted(set(flexible_days) | set(flexible_extra_days))
             work_days = sorted(set(work_days) | {day for day, _ in parsed_note.work_requests})
+            if parsed_note.work_groups:
+                group_labels = []
+                for candidate_days, required_count, store in parsed_note.work_groups:
+                    day_label = "・".join(f"{int(day)}日" for day in candidate_days)
+                    store_label = f"（{store.display_name}希望）" if store else ""
+                    group_labels.append(
+                        f"{day_label}のうち{int(required_count)}日出勤希望{store_label}"
+                    )
+                submitted["work_request_group_labels"] = group_labels
             if parsed_note.paid_leave_days is not None:
                 submitted["paid_leave_days"] = max(
                     int(submitted.get("paid_leave_days", 0) or 0),
@@ -1691,10 +1700,14 @@ if mode == "📊 経営者ビュー":
                                 f"{rule.get('employee')} / {rule.get('stores')} / "
                                 f"{format_monthly_rule_condition(rule)} / {rule.get('severity')}"
                             )
-                    st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
+                    st.write(f"- 出勤希望（希望扱い）: {_isum.get('work_requests_count', 0)}件")
                     st.write(
                         f"- 自由記載の出勤希望（優先反映）: "
                         f"{_isum.get('preferred_work_requests_count', 0)}件"
+                    )
+                    st.write(
+                        f"- 自由記載の選択式出勤希望: "
+                        f"{_isum.get('preferred_work_groups_count', 0)}件"
                     )
                     st.write(f"- 柔軟休み: {_isum.get('flexible_off_count', 0)}件")
             if _last_gen.get("error_detail"):
@@ -1892,6 +1905,7 @@ if mode == "📊 経営者ビュー":
                     note_applied.append(f"休み計{s['requested_holiday_days']}日")
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
+                note_applied.extend(s.get("work_request_group_labels", []))
                 request_rows.append({
                     "氏名": emp_name,
                     "状態": "提出済み",
@@ -1953,6 +1967,7 @@ if mode == "📊 経営者ビュー":
         st.markdown(
             "\n".join([
                 "- 本人の `×` 休み希望は例外なく休みとして扱います。",
+                "- 出勤希望・希望店舗は希望扱いです。まず出勤可否を調整し、出勤になった場合は希望店舗を優先します。",
                 f"- 最大連勤は `{rule_cfg.parameters.get('max_consec_work', 5)}連勤`、"
                 f"2連休は最低 `{rule_cfg.parameters.get('min_2off_per_month', 1)}回` を目標にします。",
                 f"- 自動生成の探索時間は最大 `{max(180, int(rule_cfg.parameters.get('solver_time_limit_seconds', 180)))}秒` です。",
@@ -2087,6 +2102,22 @@ if mode == "📊 経営者ビュー":
                             if 1 <= d <= days_in_m
                             and d not in set(use_off_requests.get(emp, []))
                         ]
+                        use_preferred_work_groups = []
+                        for emp, candidate_days, required_count, store in getattr(
+                            sub_data, "preferred_work_groups", []
+                        ):
+                            filtered_candidates = [
+                                int(d) for d in candidate_days
+                                if 1 <= int(d) <= days_in_m
+                                and int(d) not in set(use_off_requests.get(emp, []))
+                            ]
+                            if filtered_candidates:
+                                use_preferred_work_groups.append((
+                                    emp,
+                                    sorted(set(filtered_candidates)),
+                                    min(int(required_count), len(set(filtered_candidates))),
+                                    store,
+                                ))
                         use_flexible_off = []
                         for fo in sub_data.flexible_off:
                             if isinstance(fo, tuple) and len(fo) >= 3:
@@ -2145,10 +2176,14 @@ if mode == "📊 経営者ビュー":
                                 _saved_target_year, _saved_target_month,
                                 use_off_requests, use_work_requests,
                                 use_preferred_work_requests,
+                                use_preferred_work_groups,
                             )
                             use_off_requests = reconciled_inputs.off_requests
                             use_work_requests = reconciled_inputs.work_requests
                             use_preferred_work_requests = reconciled_inputs.preferred_work_requests
+                            use_preferred_work_groups = getattr(
+                                reconciled_inputs, "preferred_work_groups", use_preferred_work_groups
+                            )
                             use_historical_actual_preferences = build_actual_shift_preferences(
                                 _saved_target_year, _saved_target_month,
                             )
@@ -2156,7 +2191,7 @@ if mode == "📊 経営者ビュー":
                                 data_source_msg += (
                                     f"\n過去実績との食い違い "
                                     f"{reconciled_inputs.applied_count}件は、"
-                                    "口頭調整済みとして実績側に補正しました。"
+                                    "確認済みの個別調整として反映しました。"
                                 )
                             if use_historical_actual_preferences:
                                 data_source_msg += (
@@ -2170,6 +2205,7 @@ if mode == "📊 経営者ビュー":
                         use_off_requests = OFF_REQUESTS
                         use_work_requests = WORK_REQUESTS
                         use_preferred_work_requests = []
+                        use_preferred_work_groups = []
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
                         use_preferred_consecutive_off = []
@@ -2184,6 +2220,7 @@ if mode == "📊 経営者ビュー":
                         use_off_requests = {}
                         use_work_requests = []
                         use_preferred_work_requests = []
+                        use_preferred_work_groups = []
                         use_flexible_off = []
                         use_holiday_overrides = {}
                         use_preferred_consecutive_off = []
@@ -2227,6 +2264,8 @@ if mode == "📊 経営者ビュー":
                     generator_params = inspect.signature(generate_shift).parameters
                     if "preferred_work_requests" in generator_params:
                         generation_kwargs["preferred_work_requests"] = use_preferred_work_requests
+                    if "preferred_work_groups" in generator_params:
+                        generation_kwargs["preferred_work_groups"] = use_preferred_work_groups
                     if "preferred_consecutive_off" in generator_params:
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
                     if "monthly_store_count_rules" in generator_params:
@@ -2277,6 +2316,7 @@ if mode == "📊 経営者ビュー":
                     },
                     "work_requests_count": len(use_work_requests),
                     "preferred_work_requests_count": len(use_preferred_work_requests),
+                    "preferred_work_groups_count": len(use_preferred_work_groups),
                     "flexible_off_count": len(use_flexible_off),
                     "holiday_overrides": dict(use_holiday_overrides),
                     "paid_leave_days": dict(sub_data.paid_leave_days),
@@ -2315,6 +2355,8 @@ if mode == "📊 経営者ビュー":
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "off_requests": dict(use_off_requests),
                         "work_requests": list(use_work_requests),
+                        "preferred_work_requests": list(use_preferred_work_requests),
+                        "preferred_work_groups": list(use_preferred_work_groups),
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
@@ -4151,6 +4193,7 @@ elif mode == "👤 従業員ビュー":
         "22日 出勤希望\n"
         "6日 赤羽出勤希望\n"
         "1日 すずらん出勤希望\n"
+        "3日か29日のいずれか1日は出勤したい\n"
         "16日・17日のどちらか1日休み希望\n"
         "23日・24日のどちらか1日休み希望\n"
         "有給2日利用で、合計9日休み希望\n"
@@ -4163,6 +4206,7 @@ elif mode == "👤 従業員ビュー":
         "月末あたり休みたいです\n"
         "どこかで連休ください\n"
         "なるべく赤羽がいいです\n"
+        "出られる日はあります\n"
         "いい感じにお願いします\n"
         "```"
     )
@@ -4171,6 +4215,7 @@ elif mode == "👤 従業員ビュー":
         placeholder=(
             "例:\n"
             "22日 出勤希望\n"
+            "3日か29日のいずれか1日は出勤したい\n"
             "16日・17日のどちらか1日休み希望\n"
             "有給2日利用で、合計9日休み希望"
         ),
@@ -4472,7 +4517,7 @@ elif mode == "⚙️ 設定":
             "consec_off_3": "3連休の確認",
             "two_off_per_month": "月内 2連休回数（最低1回・最大2回）",
             "off_request": "休み希望厳守",
-            "work_request": "出勤希望厳守",
+            "work_request": "出勤希望・希望店舗の考慮",
             "omiya_anchor": "大宮アンカー（春山 or 下地必須）",
             "higashi_monday": "東口の月曜休店",
             "omiya_short_warning": "大宮人数少（エコ1名運営）の警告表示",
@@ -4682,7 +4727,7 @@ elif mode == "⚙️ 設定":
             _rule_row(
                 "連勤・休日", "3連休の確認",
                 "原則避けるが、人員過多や本人希望がある場合は許容。",
-                "ソフト反映", "警告表示", "検証結果に表示",
+                "ソフト反映", "参考情報", "提出一覧・入力サマリに表示",
                 "コード固定", "一部反映",
             ),
             _rule_row(
@@ -4692,9 +4737,9 @@ elif mode == "⚙️ 設定":
                 "提出データ依存", "反映中",
             ),
             _rule_row(
-                "希望・提出", "出勤希望厳守",
-                "出勤希望日は出勤にし、店舗指定があれば優先する。",
-                "反映中", "反映中", "検証結果に表示",
+                "希望・提出", "出勤希望・希望店舗の考慮",
+                "出勤希望はできる限り出勤にし、出勤になった場合は希望店舗を優先する。調整で休み・別店舗になる場合あり。",
+                "ソフト反映", "警告表示", "検証結果に表示",
                 "提出データ依存", "反映中",
             ),
             _rule_row(
