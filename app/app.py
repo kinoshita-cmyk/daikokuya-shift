@@ -1498,6 +1498,13 @@ def run_shift_validation(**kwargs):
     return validate(**safe_kwargs)
 
 
+def call_with_supported_kwargs(func, *args, **kwargs):
+    """Cloud側で古い関数が混ざっても、受け取れる引数だけ渡す。"""
+    allowed = inspect.signature(func).parameters
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    return func(*args, **safe_kwargs)
+
+
 def get_fixed_off_edit_violations(
     rows: list[dict],
     off_request_cells: set[tuple[str, int]],
@@ -4421,7 +4428,8 @@ if mode == "📊 経営者ビュー":
                 st.write("**📁 Excel 形式（編集可）**")
                 if st.button("Excel を生成", key="gen_xlsx"):
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
-                    export_shift_to_excel(
+                    call_with_supported_kwargs(
+                        export_shift_to_excel,
                         shift, file_path,
                         header_comments=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
@@ -4444,7 +4452,8 @@ if mode == "📊 経営者ビュー":
                 st.write("**📄 PDF 形式（印刷用・A4縦1枚）**")
                 if st.button("PDF を生成", key="gen_pdf"):
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
-                    export_shift_to_pdf(
+                    call_with_supported_kwargs(
+                        export_shift_to_pdf,
                         shift, file_path,
                         header_notes=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
