@@ -1710,6 +1710,98 @@ def monthly_rule_display_text(rule: dict) -> str:
     )
 
 
+def advisor_candidate_limit(year: int, month: int) -> int:
+    """顧問を候補として試算する最大日数。自動確定はしない。"""
+    return 2
+
+
+def advisor_candidate_rows_from_shift(shift: Optional[MonthlyShift]) -> list[dict]:
+    """顧問を許可した試算シフトから、顧問投入候補だけ取り出す。"""
+    if shift is None:
+        return []
+    rows = []
+    for assignment in sorted(
+        shift.assignments, key=lambda a: (int(a.day), a.employee),
+    ):
+        if assignment.employee != "顧問" or assignment.store == Store.OFF:
+            continue
+        rows.append({
+            "日付": f"{int(shift.month)}/{int(assignment.day)}",
+            "候補店舗": assignment.store.display_name,
+            "扱い": "候補のみ",
+        })
+    return rows
+
+
+def strip_advisor_assignments(source: MonthlyShift) -> MonthlyShift:
+    """顧問候補入りの試算から、顧問だけ外した確認用下書きを作る。"""
+    shift = MonthlyShift(year=source.year, month=source.month)
+    shift.operation_modes = dict(getattr(source, "operation_modes", {}) or {})
+    shift.comments = list(getattr(source, "comments", []) or [])
+    advisor_days = set()
+    for assignment in source.assignments:
+        if assignment.employee == "顧問":
+            advisor_days.add(int(assignment.day))
+            continue
+        shift.assignments.append(assignment)
+    days_in_month = monthrange(int(source.year), int(source.month))[1]
+    existing_advisor_days = {
+        int(a.day) for a in shift.assignments if a.employee == "顧問"
+    }
+    for day in range(1, days_in_month + 1):
+        if day not in existing_advisor_days:
+            shift.assignments.append(ShiftAssignment(
+                employee="顧問", day=day, store=Store.OFF,
+            ))
+    return shift
+
+
+def advisor_candidate_trigger_issues(validation_result) -> list[dict]:
+    """顧問候補を出すきっかけになる人数系の検証結果を抜き出す。"""
+    rows = []
+    for issue in getattr(validation_result, "issues", []):
+        category = str(getattr(issue, "category", ""))
+        if not (
+            "店舗人数" in category
+            or "人数少" in category
+            or "大宮アンカー" in category
+        ):
+            continue
+        rows.append({
+            "日付": (
+                f"{int(getattr(issue, 'month', 0) or 0)}/{int(issue.day)}"
+                if getattr(issue, "day", None) else ""
+            ),
+            "区分": category,
+            "内容": str(getattr(issue, "message", "")),
+        })
+    return rows
+
+
+def render_advisor_candidate_notice(input_summary: dict) -> None:
+    """直近生成結果に、顧問投入候補を表示する。"""
+    candidates = input_summary.get("advisor_candidates") or []
+    trigger_issues = input_summary.get("advisor_candidate_triggers") or []
+    if not candidates and not trigger_issues:
+        return
+    if input_summary.get("advisor_candidate_base_used"):
+        st.warning(
+            "専務/顧問なしではシフトを確定できないため、"
+            "候補を外した確認用下書きを表示しています。"
+            "候補から手動で入れる店舗を選んでください。"
+        )
+    else:
+        st.warning(
+            "専務/顧問は自動では確定していません。"
+            "人員不足や解なしに近い条件の確認用として、投入候補だけを表示しています。"
+        )
+    if candidates:
+        st.dataframe(candidates, width="stretch", hide_index=True)
+    if trigger_issues:
+        with st.expander("候補表示の理由", expanded=False):
+            st.dataframe(trigger_issues, width="stretch", hide_index=True)
+
+
 def format_monthly_rule_condition(rule: dict) -> str:
     """月別配置ルールの条件を画面表示用に整える。"""
     comparison = str(rule.get("comparison") or "min").lower()
@@ -1990,6 +2082,9 @@ if mode == "📊 経営者ビュー":
                     st.session_state.pop("last_gen_result", None)
                     st.rerun()
 
+            if "input_summary" in _last_gen:
+                render_advisor_candidate_notice(_last_gen["input_summary"])
+
             # 入力データの詳細（成功・失敗どちらでも展開可能）
             if "input_summary" in _last_gen:
                 _isum = _last_gen["input_summary"]
@@ -2028,6 +2123,7 @@ if mode == "📊 経営者ビュー":
                         st.write("- 月別ルール:")
                         for rule in _isum["monthly_store_count_rules"]:
                             st.write(f"    - {monthly_rule_display_text(rule)}")
+                    render_advisor_candidate_notice(_isum)
                     st.write(f"- 出勤希望（希望扱い）: {_isum.get('work_requests_count', 0)}件")
                     st.write(
                         f"- 自由記載の出勤希望（優先反映）: "
@@ -2689,17 +2785,11 @@ if mode == "📊 経営者ビュー":
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
                     if "advisor_max_days" in generator_params:
-                        advisor_max_days = 0
-                        if _saved_target_year == 2026 and _saved_target_month == 5:
-                            # 2026年5月は大型連休の個別事情により、顧問を最終手段として2日まで許容。
-                            # 過去実績への自動寄せではなく、この月だけの明示的な月別例外として扱う。
-                            advisor_max_days = 2
-                        generation_kwargs["advisor_max_days"] = advisor_max_days
-                        if advisor_max_days:
-                            data_source_msg += (
-                                f"\n{_saved_target_year}年{_saved_target_month}月の月別例外として、"
-                                f"顧問を最大{advisor_max_days}日まで最終手段で許容します。"
-                            )
+                        # 顧問は自動では確定しない。必要時だけ候補試算として別途確認する。
+                        generation_kwargs["advisor_max_days"] = 0
+                        data_source_msg += (
+                            "\n顧問は自動配置せず、必要な場合だけ候補として表示します。"
+                        )
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
@@ -2717,6 +2807,57 @@ if mode == "📊 経営者ビュー":
                             "\n※警告が出ない条件では解が見つからなかったため、"
                             "一部の警告条件だけ緩めて生成しました。"
                         )
+
+                    advisor_candidates = []
+                    advisor_candidate_triggers = []
+                    advisor_candidate_base_used = False
+                    if shift is not None:
+                        candidate_validation = run_shift_validation(
+                            shift=shift,
+                            work_requests=list(use_work_requests) + list(use_preferred_work_requests),
+                            off_requests=use_off_requests,
+                            prev_month=use_prev_month,
+                            holiday_overrides=use_holiday_overrides,
+                            default_holidays=rule_cfg.parameters.get("default_holiday_days", 8),
+                            max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                            monthly_store_count_rules=use_monthly_store_count_rules,
+                        )
+                        advisor_candidate_triggers = advisor_candidate_trigger_issues(
+                            candidate_validation
+                        )
+
+                    if shift is None or advisor_candidate_triggers:
+                        advisor_probe_kwargs = dict(generation_kwargs)
+                        if "advisor_max_days" in generator_params:
+                            advisor_probe_kwargs["advisor_max_days"] = advisor_candidate_limit(
+                                _saved_target_year, _saved_target_month,
+                            )
+                        advisor_probe_shift = generate_shift(**advisor_probe_kwargs)
+                        if (
+                            advisor_probe_shift is None
+                            and "strict_warning_constraints" in advisor_probe_kwargs
+                        ):
+                            relaxed_probe_kwargs = dict(advisor_probe_kwargs)
+                            relaxed_probe_kwargs["strict_warning_constraints"] = False
+                            advisor_probe_shift = generate_shift(**relaxed_probe_kwargs)
+                        advisor_candidates = advisor_candidate_rows_from_shift(
+                            advisor_probe_shift
+                        )
+                        if shift is None and not advisor_candidate_triggers:
+                            advisor_candidate_triggers = [{
+                                "日付": "",
+                                "区分": "解なし",
+                                "内容": "顧問なしでは条件を満たすシフトを見つけられませんでした。",
+                            }]
+
+                        if shift is None and advisor_probe_shift is not None:
+                            shift = strip_advisor_assignments(advisor_probe_shift)
+                            advisor_candidate_base_used = True
+                            data_source_msg += (
+                                "\n顧問なしでは解が見つからなかったため、"
+                                "顧問候補を外した確認用下書きを表示します。"
+                                "候補を手動で入れるか、条件を調整してください。"
+                            )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
@@ -2759,6 +2900,13 @@ if mode == "📊 経営者ビュー":
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
                     "relaxed_advisor_limit": bool(relaxed_advisor_limit),
+                    "advisor_auto_assignment": False,
+                    "advisor_candidate_limit": advisor_candidate_limit(
+                        _saved_target_year, _saved_target_month,
+                    ),
+                    "advisor_candidates": list(advisor_candidates),
+                    "advisor_candidate_triggers": list(advisor_candidate_triggers),
+                    "advisor_candidate_base_used": bool(advisor_candidate_base_used),
                     "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
