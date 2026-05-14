@@ -25,6 +25,8 @@ from .excel_exporter import (
     DEFAULT_FOOTER_NOTES,
     EXPORT_COLUMN_ORDER,
     SHORT_STAFF_STORE_LABELS,
+    detect_key_warnings_by_store,
+    format_key_warning_text,
 )
 
 
@@ -205,6 +207,7 @@ def export_shift_to_pdf(
     header_notes: Optional[list[str]] = None,
     footer_notes: Optional[list[str]] = None,
     short_staff_days: Optional[object] = None,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
 ) -> Path:
     """
     シフトを Excel 印刷イメージに合わせた A4 縦 1ページ PDF に出力する。
@@ -213,6 +216,7 @@ def export_shift_to_pdf(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     short_staff_days = short_staff_days or []
+    key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
     days_in_month = monthrange(shift.year, shift.month)[1]
     title = title or f"{shift.year}年{shift.month}月の目標とシフト表  決定版"
     header_notes = list(header_notes or ["", "", ""])[:3]
@@ -225,7 +229,7 @@ def export_shift_to_pdf(
     margin_x = 14.0
     margin_y = 14.0
 
-    columns = ["B", "C"] + [chr(ord("D") + i) for i in range(len(EXPORT_COLUMN_ORDER))] + ["W", "X", "Y"]
+    columns = ["B", "C"] + [chr(ord("D") + i) for i in range(len(EXPORT_COLUMN_ORDER))] + ["W", "X", "Y", "Z"]
     col_widths_base = [COLUMN_WIDTHS[col] * EXCEL_WIDTH_TO_POINTS for col in columns]
     row_heights_base = (
         [ROW_HEIGHTS["title"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment_last"]]
@@ -338,6 +342,17 @@ def export_shift_to_pdf(
         font_size=FONT_SIZES["header"] * scale,
         line_width=line_width,
     )
+    _draw_cell(
+        pdf,
+        col_x(right_date_idx + 3),
+        y,
+        col_widths[right_date_idx + 3],
+        header_h,
+        text="鍵",
+        font_name=font_name,
+        font_size=FONT_SIZES["header"] * scale,
+        line_width=line_width,
+    )
     current_y = y
 
     # データ行
@@ -377,6 +392,19 @@ def export_shift_to_pdf(
             font_name,
             FONT_SIZES["cell"] * scale,
             fill_color=colors.HexColor("#FFF59D") if short_text else colors.white,
+            line_width=line_width,
+        )
+        key_text = format_key_warning_text(key_warnings_by_store.get(day, {}))
+        _draw_cell(
+            pdf,
+            col_x(right_date_idx + 3),
+            y,
+            col_widths[right_date_idx + 3],
+            data_h,
+            key_text,
+            font_name,
+            FONT_SIZES["cell"] * scale,
+            fill_color=colors.HexColor("#FFEDD5") if key_text else colors.white,
             line_width=line_width,
         )
         current_y = y

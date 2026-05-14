@@ -26,6 +26,7 @@ from openpyxl.utils import get_column_letter
 from .models import MonthlyShift, Store, OperationMode
 from .paths import OUTPUT_DIR
 from .employees import ALL_EMPLOYEES
+from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity
 
 
 # 出力時の従業員列順（運用に慣れた順番、テンプレートと同じ）
@@ -66,7 +67,8 @@ COLUMN_WIDTHS = {
     "V": 13.0,        # 顧問
     "W": 8.5,         # 日付（右）
     "X": 7.0,         # 曜日（右）
-    "Y": 24.0,        # 人員少（店舗別マークが収まる幅）
+    "Y": 21.0,        # 人員少（店舗別マークが収まる幅）
+    "Z": 18.0,        # 鍵確認
 }
 
 SHORT_STAFF_STORE_LABELS = {
@@ -84,6 +86,56 @@ DEFAULT_FOOTER_NOTES = [
 ]
 
 
+def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, str]]:
+    """鍵担当がいない店舗を日付・店舗別に検出する。"""
+    warnings_by_store: dict[int, dict[Store, str]] = {}
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    for d in range(1, days_in_month + 1):
+        mode = shift.operation_modes.get(d, OperationMode.NORMAL)
+        if mode == OperationMode.CLOSED:
+            continue
+        capacity_map = get_capacity(mode)
+        weekday = date(shift.year, shift.month, d).weekday()
+        day_assignments = shift.get_day_assignments(d)
+        for store, keyholders in STORE_KEYHOLDERS.items():
+            cap = capacity_map.get(store)
+            if cap is None:
+                continue
+            if weekday in cap.closed_dow:
+                continue
+            workers = [a.employee for a in day_assignments if a.store == store]
+            if not workers:
+                continue
+            if any(name in keyholders for name in workers):
+                continue
+            status = "missing"
+            if store == Store.SUZURAN:
+                omiya_workers = [
+                    a.employee for a in day_assignments
+                    if a.store == Store.OMIYA
+                ]
+                if any(name in SUZURAN_KEY_SUPPORT_FROM_OMIYA for name in omiya_workers):
+                    status = "support"
+            warnings_by_store.setdefault(d, {})[store] = status
+    return warnings_by_store
+
+
+def format_key_warning_text(statuses: dict[Store, str]) -> str:
+    """鍵欄に出す短い文字列。"""
+    if not statuses:
+        return ""
+    order = list(SHORT_STAFF_STORE_LABELS)
+    labels = []
+    for store in sorted(
+        statuses,
+        key=lambda s: order.index(s) if s in order else len(order),
+    ):
+        base = SHORT_STAFF_STORE_LABELS.get(store, getattr(store, "value", str(store)))
+        prefix = "応援" if statuses[store] == "support" else "鍵"
+        labels.append(f"{prefix}{base}")
+    return " ".join(labels)
+
+
 def export_shift_to_excel(
     shift: MonthlyShift,
     output_path,  # str or Path
@@ -91,6 +143,7 @@ def export_shift_to_excel(
     header_comments: Optional[list[str]] = None,
     footer_notes: Optional[list[str]] = None,
     short_staff_days: Optional[object] = None,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
 ) -> Path:
     """
     シフトを Excel に出力する（テンプレート完全互換・A4縦）。
@@ -102,6 +155,7 @@ def export_shift_to_excel(
         header_comments: タイトル下の3行コメント（B3, B4, B5に対応）
         footer_notes: 表の下の注意書き（任意の行数）
         short_staff_days: 「人員少」マークを付ける日のリスト、または {日: {店舗}} の辞書
+        key_warnings_by_store: 鍵確認の {日: {店舗: "missing"|"support"}}
 
     Returns:
         実際に書き込んだファイルパス
@@ -111,6 +165,7 @@ def export_shift_to_excel(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     short_staff_days = short_staff_days or []
+    key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
     days_in_month = monthrange(shift.year, shift.month)[1]
 
     if title is None:
@@ -154,8 +209,9 @@ def export_shift_to_excel(
     center = Alignment(horizontal="center", vertical="center", shrink_to_fit=True)
     left_center = Alignment(horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True)
     short_fill = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
+    key_fill = PatternFill(start_color="FFEDD5", end_color="FFEDD5", fill_type="solid")
 
-    LAST_COL = 25  # Y列
+    LAST_COL = 26  # Z列
 
     def _style_range_border(row: int, start_col: int = 2, end_col: int = LAST_COL) -> None:
         """結合行でも外枠と内部罫線が印刷で崩れないよう、範囲全体に罫線を入れる。"""
@@ -163,7 +219,7 @@ def export_shift_to_excel(
             ws.cell(row=row, column=col).border = border
 
     # ============================================================
-    # B2:Y2 タイトル
+    # B2:Z2 タイトル
     # ============================================================
     ws.merge_cells(start_row=2, start_column=2, end_row=2, end_column=LAST_COL)
     c = ws.cell(row=2, column=2, value=title)
@@ -172,7 +228,7 @@ def export_shift_to_excel(
     _style_range_border(2)
 
     # ============================================================
-    # B3:Y3, B4:Y4, B5:Y5 コメント欄（自由記述）
+    # B3:Z3, B4:Z4, B5:Z5 コメント欄（自由記述）
     # ============================================================
     for i in range(3):
         row = 3 + i
@@ -183,7 +239,7 @@ def export_shift_to_excel(
         _style_range_border(row)
 
     # ============================================================
-    # B6:Y6 凡例
+    # B6:Z6 凡例
     # ============================================================
     legend = f"{shift.year}年{shift.month}月のシフト表　○赤羽　□東口　△大宮　☆西口　◆すずらん"
     ws.merge_cells(start_row=6, start_column=2, end_row=6, end_column=LAST_COL)
@@ -226,6 +282,12 @@ def export_shift_to_excel(
     c.alignment = center
     c.border = border
 
+    # Z7: 鍵
+    c = ws.cell(row=7, column=26, value="鍵")
+    c.font = header_font
+    c.alignment = center
+    c.border = border
+
     # ============================================================
     # 8行目以降 データ
     # ============================================================
@@ -236,6 +298,17 @@ def export_shift_to_excel(
 
         # B列: 日付（左）
         c = ws.cell(row=row, column=2, value=d)
+        c.font = cell_font
+        c.alignment = center
+        c.border = border
+
+        # Z列: 鍵確認
+        key_text = format_key_warning_text(key_warnings_by_store.get(d, {}))
+        if key_text:
+            c = ws.cell(row=row, column=26, value=key_text)
+            c.fill = key_fill
+        else:
+            c = ws.cell(row=row, column=26, value="")
         c.font = cell_font
         c.alignment = center
         c.border = border
@@ -328,7 +401,7 @@ def export_shift_to_excel(
     ws.page_margins.right = 0.0
     ws.page_margins.top = 0.748
     ws.page_margins.bottom = 0.748
-    ws.print_area = f"B2:Y{end_row + len(footer_notes) - 1}"
+    ws.print_area = f"B2:Z{end_row + len(footer_notes) - 1}"
 
     wb.save(output_path)
     return output_path
