@@ -1,7 +1,7 @@
 """
-シフト表 PDF 出力（A4 横 1ページに収まる印刷用）
+シフト表 PDF 出力（Excel印刷レイアウト準拠・A4縦1ページ）
 ================================================
-店舗掲示用に、現状のExcelレイアウトと同じデザインでPDFを生成する。
+Excel 出力を A4 縦 1ページに縮小印刷した時と同じ構成で PDF を生成する。
 """
 
 from __future__ import annotations
@@ -10,69 +10,156 @@ from pathlib import Path
 from typing import Optional
 from calendar import monthrange
 
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.lib.units import mm
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
 
 from .models import MonthlyShift, Store
 from .paths import OUTPUT_DIR
+from .excel_exporter import (
+    COLUMN_WIDTHS,
+    DEFAULT_FOOTER_NOTES,
+    EXPORT_COLUMN_ORDER,
+    SHORT_STAFF_STORE_LABELS,
+)
 
 
-# 日本語フォント登録（macOS の標準フォント）
-JAPANESE_FONT_PATHS = [
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
+
+# Excel の列幅単位をPDFのポイントへ近似変換する係数。
+# 実際のExcel印刷も縮小率がかかるため、相対幅が合うことを優先する。
+EXCEL_WIDTH_TO_POINTS = 5.25
+
+ROW_HEIGHTS = {
+    "title": 90.0,
+    "comment": 90.0,
+    "comment_last": 93.0,
+    "legend": 45.0,
+    "header": 45.0,
+    "data": 45.0,
+    "spacer": 46.0,
+    "footer": 49.0,
+}
+
+FONT_SIZES = {
+    "title": 60.0,
+    "comment": 43.0,
+    "legend": 36.0,
+    "header": 24.0,
+    "cell": 35.0,
+    "footer": 27.0,
+}
+
+JAPANESE_TTF_PATHS = [
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
     "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/Library/Fonts/Arial Unicode.ttf",
     "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
 ]
 
 
 def _register_japanese_font() -> str:
-    """日本語フォントを登録し、フォント名を返す"""
-    for path in JAPANESE_FONT_PATHS:
-        if Path(path).exists():
-            try:
-                pdfmetrics.registerFont(TTFont("JapFont", path))
-                return "JapFont"
-            except Exception:
-                continue
-    # フォールバック: Helvetica（日本語が表示されない可能性あり）
+    """日本語が文字化けしないPDFフォント名を返す。"""
+    try:
+        pdfmetrics.registerFont(UnicodeCIDFont("HeiseiKakuGo-W5"))
+        return "HeiseiKakuGo-W5"
+    except Exception:
+        pass
+
+    for path in JAPANESE_TTF_PATHS:
+        if not Path(path).exists():
+            continue
+        try:
+            pdfmetrics.registerFont(TTFont("DaikokuyaJP", path))
+            return "DaikokuyaJP"
+        except Exception:
+            continue
+
+    # 最後の保険。日本語表示は弱いが、PDF生成自体は止めない。
     return "Helvetica"
 
 
-# 出力時の従業員列順
-EXPORT_COLUMN_ORDER = [
-    "山本", "板倉", "今津", "鈴木", "田中", "岩野", "大塚", "南",
-    "黒澤", "牧野", "春山", "下地", "大類", "長尾", "野澤", "下田",
-    "楯", "土井", "顧問",
-]
+def _short_staff_text(short_staff_days: object, day: int) -> str:
+    if isinstance(short_staff_days, dict):
+        stores = short_staff_days.get(day, set())
+        order = list(SHORT_STAFF_STORE_LABELS)
+        labels = []
+        for store in sorted(
+            stores,
+            key=lambda s: order.index(s) if s in order else len(order),
+        ):
+            labels.append(SHORT_STAFF_STORE_LABELS.get(store, getattr(store, "value", str(store))))
+        return " ".join(labels)
+    return "△" if day in (short_staff_days or []) else ""
 
-WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
-# セルの色マップ
-CELL_COLORS = {
-    "○": colors.HexColor("#fef3c7"),
-    "〇": colors.HexColor("#fef3c7"),
-    "□": colors.HexColor("#dbeafe"),
-    "△": colors.HexColor("#d1fae5"),
-    "☆": colors.HexColor("#fce7f3"),
-    "◆": colors.HexColor("#e0e7ff"),
-    "×": colors.HexColor("#f3f4f6"),
-    "": colors.white,
-}
+def _fit_font_size(text: str, font_name: str, size: float, max_width: float, max_height: float) -> float:
+    """セル内に文字が収まるよう、フォントサイズだけを控えめに縮める。"""
+    text = str(text or "")
+    if not text:
+        return size
+    fitted = size
+    while fitted > 3.5:
+        try:
+            text_width = pdfmetrics.stringWidth(text, font_name, fitted)
+        except Exception:
+            text_width = len(text) * fitted
+        if text_width <= max_width * 0.92 and fitted <= max_height * 0.72:
+            return fitted
+        fitted -= 0.5
+    return fitted
 
-SHORT_STAFF_STORE_LABELS = {
-    Store.AKABANE: "○赤羽",
-    Store.HIGASHIGUCHI: "□東口",
-    Store.OMIYA: "△大宮",
-    Store.NISHIGUCHI: "☆西口",
-    Store.SUZURAN: "◆すずらん",
-}
+
+def _draw_text(
+    c: canvas.Canvas,
+    text: object,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    font_name: str,
+    font_size: float,
+    align: str = "center",
+    bold: bool = False,
+) -> None:
+    text = "" if text is None else str(text)
+    if not text:
+        return
+    size = _fit_font_size(text, font_name, font_size, w, h)
+    c.setFont(font_name, size)
+    text_y = y + (h - size) / 2 + size * 0.18
+    if align == "left":
+        c.drawString(x + max(2.0, size * 0.35), text_y, text)
+    else:
+        c.drawCentredString(x + w / 2, text_y, text)
+
+
+def _draw_cell(
+    c: canvas.Canvas,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    text: object = "",
+    font_name: str = "Helvetica",
+    font_size: float = 9,
+    align: str = "center",
+    fill_color=colors.white,
+    stroke_color=colors.black,
+    line_width: float = 0.35,
+) -> None:
+    c.setFillColor(fill_color)
+    c.setStrokeColor(stroke_color)
+    c.setLineWidth(line_width)
+    c.rect(x, y, w, h, stroke=1, fill=1)
+    c.setFillColor(colors.black)
+    _draw_text(c, text, x, y, w, h, font_name, font_size, align=align)
 
 
 def export_shift_to_pdf(
@@ -80,171 +167,177 @@ def export_shift_to_pdf(
     output_path,  # str or Path
     title: Optional[str] = None,
     header_notes: Optional[list[str]] = None,
+    footer_notes: Optional[list[str]] = None,
     short_staff_days: Optional[object] = None,
 ) -> Path:
     """
-    シフトを A4 横 1ページの PDF に出力する。
+    シフトを Excel 印刷イメージに合わせた A4 縦 1ページ PDF に出力する。
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     short_staff_days = short_staff_days or []
     days_in_month = monthrange(shift.year, shift.month)[1]
+    title = title or f"{shift.year}年{shift.month}月の目標とシフト表  決定版"
+    header_notes = list(header_notes or ["", "", ""])[:3]
+    while len(header_notes) < 3:
+        header_notes.append("")
+    footer_notes = footer_notes or DEFAULT_FOOTER_NOTES
+
     font_name = _register_japanese_font()
+    page_width, page_height = A4
+    margin_x = 14.0
+    margin_y = 14.0
 
-    if title is None:
-        title = f"{shift.year}年{shift.month}月の目標とシフト表  決定版"
-
-    # PDF ドキュメント作成（A4横、余白小さめ）
-    doc = SimpleDocTemplate(
-        str(output_path),
-        pagesize=landscape(A4),
-        leftMargin=8 * mm,
-        rightMargin=8 * mm,
-        topMargin=8 * mm,
-        bottomMargin=8 * mm,
+    columns = ["B", "C"] + [chr(ord("D") + i) for i in range(len(EXPORT_COLUMN_ORDER))] + ["W", "X", "Y"]
+    col_widths_base = [COLUMN_WIDTHS[col] * EXCEL_WIDTH_TO_POINTS for col in columns]
+    row_heights_base = (
+        [ROW_HEIGHTS["title"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment_last"]]
+        + [ROW_HEIGHTS["legend"], ROW_HEIGHTS["header"]]
+        + [ROW_HEIGHTS["data"]] * days_in_month
+        + [ROW_HEIGHTS["spacer"]]
+        + [ROW_HEIGHTS["footer"]] * len(footer_notes)
     )
 
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle(
-        "Title",
-        parent=styles["Title"],
-        fontName=font_name,
-        fontSize=14,
-        alignment=TA_CENTER,
-        spaceAfter=4,
+    base_width = sum(col_widths_base)
+    base_height = sum(row_heights_base)
+    scale = min(
+        (page_width - margin_x * 2) / base_width,
+        (page_height - margin_y * 2) / base_height,
     )
-    note_style = ParagraphStyle(
-        "Note",
-        parent=styles["BodyText"],
-        fontName=font_name,
-        fontSize=8,
-        alignment=TA_LEFT,
-        spaceAfter=2,
-    )
-    legend_style = ParagraphStyle(
-        "Legend",
-        parent=styles["BodyText"],
-        fontName=font_name,
-        fontSize=10,
-        alignment=TA_CENTER,
-        spaceAfter=4,
-    )
+    table_width = base_width * scale
+    table_height = base_height * scale
+    start_x = (page_width - table_width) / 2
+    start_y = page_height - margin_y
 
-    story = []
-    # タイトル
-    story.append(Paragraph(title, title_style))
+    col_widths = [w * scale for w in col_widths_base]
+    row_heights = [h * scale for h in row_heights_base]
+    line_width = max(0.25, 0.9 * scale)
 
-    # ヘッダー注記
-    for note in (header_notes or []):
-        story.append(Paragraph(note, note_style))
+    pdf = canvas.Canvas(str(output_path), pagesize=A4)
+    pdf.setTitle(title)
 
-    # 凡例
-    legend = "○赤羽　□東口　△大宮　☆西口　◆すずらん　×休み"
-    story.append(Paragraph(legend, legend_style))
+    def col_x(index: int) -> float:
+        return start_x + sum(col_widths[:index])
 
-    # シフトテーブル
+    current_y = start_y
+
+    def draw_merged_row(text: str, height: float, font_key: str, align: str = "center") -> None:
+        nonlocal current_y
+        h = height
+        y = current_y - h
+        _draw_cell(
+            pdf,
+            start_x,
+            y,
+            table_width,
+            h,
+            text=text,
+            font_name=font_name,
+            font_size=FONT_SIZES[font_key] * scale,
+            align=align,
+            line_width=line_width,
+        )
+        current_y = y
+
+    draw_merged_row(title, row_heights[0], "title")
+    draw_merged_row(header_notes[0], row_heights[1], "comment")
+    draw_merged_row(header_notes[1], row_heights[2], "comment")
+    draw_merged_row(header_notes[2], row_heights[3], "comment")
+    legend = f"{shift.year}年{shift.month}月のシフト表　○赤羽　□東口　△大宮　☆西口　◆すずらん"
+    draw_merged_row(legend, row_heights[4], "legend")
+
     # ヘッダー行
-    header = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人員少"]
-    table_data = [header]
+    header_h = row_heights[5]
+    y = current_y - header_h
+    _draw_cell(
+        pdf, col_x(0), y, col_widths[0] + col_widths[1], header_h,
+        text=f"{shift.month}月", font_name=font_name,
+        font_size=FONT_SIZES["header"] * scale, line_width=line_width,
+    )
+    for i, name in enumerate(EXPORT_COLUMN_ORDER):
+        col_idx = 2 + i
+        _draw_cell(
+            pdf, col_x(col_idx), y, col_widths[col_idx], header_h,
+            text=name, font_name=font_name,
+            font_size=FONT_SIZES["header"] * scale, line_width=line_width,
+        )
+    right_date_idx = 2 + len(EXPORT_COLUMN_ORDER)
+    _draw_cell(
+        pdf,
+        col_x(right_date_idx),
+        y,
+        col_widths[right_date_idx] + col_widths[right_date_idx + 1],
+        header_h,
+        text=f"{shift.month}月",
+        font_name=font_name,
+        font_size=FONT_SIZES["header"] * scale,
+        line_width=line_width,
+    )
+    _draw_cell(
+        pdf,
+        col_x(right_date_idx + 2),
+        y,
+        col_widths[right_date_idx + 2],
+        header_h,
+        text="人員少",
+        font_name=font_name,
+        font_size=FONT_SIZES["header"] * scale,
+        line_width=line_width,
+    )
+    current_y = y
 
-    # 各日のデータ
-    cell_styles = []  # (row, col, color) のリスト
+    # データ行
+    data_h = ROW_HEIGHTS["data"] * scale
+    for day in range(1, days_in_month + 1):
+        y = current_y - data_h
+        wd = WEEKDAY_JP[date(shift.year, shift.month, day).weekday()]
+        _draw_cell(pdf, col_x(0), y, col_widths[0], data_h, day, font_name, FONT_SIZES["cell"] * scale, line_width=line_width)
+        _draw_cell(pdf, col_x(1), y, col_widths[1], data_h, wd, font_name, FONT_SIZES["cell"] * scale, line_width=line_width)
 
-    def _short_staff_text(day: int) -> str:
-        if isinstance(short_staff_days, dict):
-            stores = short_staff_days.get(day, set())
-            order = list(SHORT_STAFF_STORE_LABELS)
-            labels = []
-            for store in sorted(
-                stores,
-                key=lambda s: order.index(s) if s in order else len(order),
-            ):
-                labels.append(SHORT_STAFF_STORE_LABELS.get(store, getattr(store, "value", str(store))))
-            return " ".join(labels)
-        return "△" if day in short_staff_days else ""
+        for i, emp_name in enumerate(EXPORT_COLUMN_ORDER):
+            col_idx = 2 + i
+            assignment = shift.get_assignment(emp_name, day)
+            value = assignment.store.value if assignment else ""
+            _draw_cell(
+                pdf, col_x(col_idx), y, col_widths[col_idx], data_h,
+                value, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+            )
 
-    for d in range(1, days_in_month + 1):
-        weekday = date(shift.year, shift.month, d).weekday()
-        wd = WEEKDAY_JP[weekday]
-        row_data = [str(d), wd]
+        _draw_cell(
+            pdf, col_x(right_date_idx), y, col_widths[right_date_idx], data_h,
+            day, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+        )
+        _draw_cell(
+            pdf, col_x(right_date_idx + 1), y, col_widths[right_date_idx + 1], data_h,
+            wd, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+        )
 
-        for emp_name in EXPORT_COLUMN_ORDER:
-            a = shift.get_assignment(emp_name, d)
-            value = a.store.value if a else ""
-            row_data.append(value)
-            color = CELL_COLORS.get(value, colors.white)
-            if color != colors.white:
-                col_idx = 2 + EXPORT_COLUMN_ORDER.index(emp_name)
-                cell_styles.append((d, col_idx, color))
+        short_text = _short_staff_text(short_staff_days, day)
+        _draw_cell(
+            pdf,
+            col_x(right_date_idx + 2),
+            y,
+            col_widths[right_date_idx + 2],
+            data_h,
+            short_text,
+            font_name,
+            FONT_SIZES["cell"] * scale,
+            fill_color=colors.HexColor("#FFF59D") if short_text else colors.white,
+            line_width=line_width,
+        )
+        current_y = y
 
-        # 人員少マーク
-        short_mark = _short_staff_text(d)
-        row_data.append(short_mark)
-        if short_mark:
-            cell_styles.append((d, 2 + len(EXPORT_COLUMN_ORDER), colors.HexColor("#fff3cd")))
+    # Excelと同じ空白行
+    current_y -= ROW_HEIGHTS["spacer"] * scale
 
-        table_data.append(row_data)
+    for note in footer_notes:
+        draw_merged_row(note, ROW_HEIGHTS["footer"] * scale, "footer", align="left")
 
-    # テーブル列幅
-    n_cols = len(header)
-    # ページ幅約 280mm, 余白考慮で 270mm 利用可
-    available_width = 270 * mm
-    day_col_w = 8 * mm
-    weekday_col_w = 8 * mm
-    short_col_w = 28 * mm
-    emp_col_w = (available_width - day_col_w - weekday_col_w - short_col_w) / len(EXPORT_COLUMN_ORDER)
-    col_widths = [day_col_w, weekday_col_w] + [emp_col_w] * len(EXPORT_COLUMN_ORDER) + [short_col_w]
-
-    # 行高
-    row_height = 6.5 * mm
-    row_heights = [row_height * 1.5] + [row_height] * days_in_month
-
-    table = Table(table_data, colWidths=col_widths, rowHeights=row_heights)
-
-    # スタイル設定
-    table_style = [
-        # 全体
-        ("FONT", (0, 0), (-1, -1), font_name, 8),
-        ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        # ヘッダー
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1e3a8a")),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONT", (0, 0), (-1, 0), font_name, 9),
-    ]
-    # 土日の背景
-    for d in range(1, days_in_month + 1):
-        weekday = date(shift.year, shift.month, d).weekday()
-        if weekday == 5:  # 土
-            table_style.append(("BACKGROUND", (0, d), (1, d), colors.HexColor("#dbeafe")))
-        elif weekday == 6:  # 日
-            table_style.append(("BACKGROUND", (0, d), (1, d), colors.HexColor("#fee2e2")))
-
-    # セル個別色
-    for row, col, color in cell_styles:
-        table_style.append(("BACKGROUND", (col, row), (col, row), color))
-
-    table.setStyle(TableStyle(table_style))
-    story.append(table)
-    story.append(Spacer(1, 4 * mm))
-
-    # 末尾の注記
-    footer_notes = [
-        "※25日までに翌月のお休み又は出勤希望日を、ご連絡ください。",
-        "※出勤基準日数（の目安）と違いがある場合は、希望するお休み日数と消化する有給休暇日数もお願いします。",
-    ]
-    for n in footer_notes:
-        story.append(Paragraph(n, note_style))
-
-    doc.build(story)
+    pdf.showPage()
+    pdf.save()
     return output_path
 
-
-# ============================================================
-# 動作テスト
-# ============================================================
 
 if __name__ == "__main__":
     from .generator import generate_shift, determine_operation_modes

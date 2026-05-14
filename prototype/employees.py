@@ -28,6 +28,7 @@ ECO_STAFF: list[Employee] = [
         employee_id="076",
         role=Role.MANAGER,
         skill=Skill.ECO,
+        home_store=Store.AKABANE,
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.AKABANE: Affinity.STRONG,
