@@ -430,7 +430,7 @@ def _check_holiday_days(
     for emp in ALL_EMPLOYEES:
         if not emp.is_shift_eligible:
             continue
-        if emp.name in CONSTRAINT_EXCLUDED:
+        if emp.name in CONSTRAINT_EXCLUDED and emp.name not in overrides:
             continue
 
         required = overrides.get(emp.name, default_days)

@@ -87,6 +87,15 @@ ALL_STORES = [
     Store.NISHIGUCHI, Store.SUZURAN, Store.OFF,
 ]
 
+# 実運用では「月間の基準勤務日数」から大きく外れると、
+# 警告ゼロでも使いにくいシフトになるため、店舗嗜好より強く寄せる。
+TARGET_SHORTFALL_PENALTY = 1400
+TARGET_OVERAGE_PENALTY = 120
+
+# 月次ルールは「その月だけの運用指示」なので、通常の在勤嗜好より強く扱う。
+MONTHLY_RULE_REWARD = 1800
+MONTHLY_RULE_PENALTY = 2200
+
 
 def generate_shift(
     year: int,
@@ -469,6 +478,7 @@ def generate_shift(
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
     three_off_indicators = []  # 希望休を含まない3連休のインジケータ
     two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
+    two_off_over_terms = []  # 2連休が多すぎる場合のソフトペナルティ
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
@@ -519,7 +529,9 @@ def generate_shift(
     # 制約 10: 休日日数の最低ライン
     # ============================================================
     for e in main_employees:
-        if e.constraint_check_excluded or e.role == Role.ADVISOR:
+        if e.role == Role.ADVISOR:
+            continue
+        if e.constraint_check_excluded and e.name not in holiday_overrides:
             continue
         required_off = holiday_overrides.get(e.name, default_holidays)
         model.Add(sum(off[e.name][d] for d in days) >= required_off)
@@ -542,6 +554,13 @@ def generate_shift(
             if strict_warning_constraints:
                 model.Add(has_two_day_block == 1)
             two_off_goal_terms.append(has_two_day_block)
+            max_two_off = int(HARD_CONSTRAINTS.get("max_two_day_off_per_month", 2) or 0)
+            if max_two_off > 0:
+                two_off_count = sum(two_day_blocks)
+                over_two_off = model.NewIntVar(0, days_in_month, f"two_off_over_{e.name}")
+                model.Add(over_two_off >= two_off_count - max_two_off)
+                model.Add(over_two_off >= 0)
+                two_off_over_terms.append(over_two_off)
 
     # ============================================================
     # 制約 11: 3連休は原則避ける（ソフト）
@@ -613,11 +632,20 @@ def generate_shift(
         if name not in main_employee_names:
             continue
         any_work = sum(x[name][d][s] for s in main_stores)
+        any_work_weight = 70
+        store_weight = 130
+        no_store_weight = 90
+        if name == "顧問":
+            # 顧問は通常は最終手段として強く回避するが、
+            # 月別例外で明示された日・店舗がある場合はその中で実態に寄せる。
+            any_work_weight = 5000
+            store_weight = 9000
+            no_store_weight = 6000
         if store is not None and store in main_stores:
-            preferred_work_terms.append(70 * any_work)
-            preferred_work_terms.append(130 * x[name][d][store])
+            preferred_work_terms.append(any_work_weight * any_work)
+            preferred_work_terms.append(store_weight * x[name][d][store])
         else:
-            preferred_work_terms.append(90 * any_work)
+            preferred_work_terms.append(no_store_weight * any_work)
 
     # 「3日か29日のいずれか1日は出勤したい」のような自由記載は、
     # 候補のうち指定回数分だけ満たせるように優先する。
@@ -740,21 +768,32 @@ def generate_shift(
 
     # 目標出勤日数への近づき度（不足分を強くペナルティ）
     target_penalty_terms = []
+    target_overage_terms = []
     for e in main_employees:
         if e.annual_target_days is None:
             continue
-        target_monthly = round(e.annual_target_days / 12)
+        requested_off_count = len(set(off_requests.get(e.name, [])))
+        target_monthly = min(
+            round(e.annual_target_days / 12),
+            max(0, days_in_month - requested_off_count),
+        )
         actual = sum(1 - off[e.name][d] for d in days)
-        # actual < target ならペナルティ
+        # actual < target なら強いペナルティ。過剰勤務も軽く避ける。
         shortfall = model.NewIntVar(0, days_in_month, f"shortfall_{e.name}")
         model.Add(shortfall >= target_monthly - actual)
         model.Add(shortfall >= 0)
         target_penalty_terms.append(shortfall)
+        overage = model.NewIntVar(0, days_in_month, f"overage_{e.name}")
+        model.Add(overage >= actual - target_monthly)
+        model.Add(overage >= 0)
+        target_overage_terms.append(overage)
 
     # 在勤要望スコアを最大化、目標未達/連勤超過ペナルティを最小化
     obj = sum(objective_terms)
     if target_penalty_terms:
-        obj = obj - 20 * sum(target_penalty_terms)
+        obj = obj - TARGET_SHORTFALL_PENALTY * sum(target_penalty_terms)
+    if target_overage_terms:
+        obj = obj - TARGET_OVERAGE_PENALTY * sum(target_overage_terms)
     if over_4_indicators:
         # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
         obj = obj - 50 * sum(over_4_indicators)
@@ -763,16 +802,19 @@ def generate_shift(
         obj = obj + 260 * sum(two_off_goal_terms)
     if three_off_indicators:
         # 3連休はあり得るが、必要がなければ避ける
-        obj = obj - 15 * sum(three_off_indicators)
+        obj = obj - 650 * sum(three_off_indicators)
+    if two_off_over_terms:
+        # 2連休が多すぎる状態も、可能な限り避ける。
+        obj = obj - 520 * sum(two_off_over_terms)
     if preferred_consecutive_off_indicators:
         # 自由記載で明示された連休希望は、通常の3連休回避ペナルティより強く優先する。
         obj = obj + 180 * sum(preferred_consecutive_off_indicators)
     if preferred_work_terms:
         obj = obj + sum(preferred_work_terms)
     if monthly_rule_terms:
-        obj = obj + 160 * sum(monthly_rule_terms)
+        obj = obj + MONTHLY_RULE_REWARD * sum(monthly_rule_terms)
     if monthly_rule_penalty_terms:
-        obj = obj - 220 * sum(monthly_rule_penalty_terms)
+        obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
     if historical_actual_terms:
         obj = obj + sum(historical_actual_terms)
     if affinity_none_assignments:
