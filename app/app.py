@@ -1603,13 +1603,52 @@ def record_edit_history_with_github(
         pass
 
 
+def system_monthly_store_count_rules(year: int, month: int) -> list[dict]:
+    """チャットで固まった標準の月次運用ルールを返す。"""
+    rules = [
+        {
+            "name": "春山さんの東口・西口代替",
+            "employee": "春山",
+            "stores": ["HIGASHIGUCHI", "NISHIGUCHI"],
+            "count": 3,
+            "severity": "WARNING",
+            "comparison": "min",
+            "source": "system",
+        },
+    ]
+    if int(year) == 2026 and int(month) == 5:
+        rules.append({
+            "name": "2026年5月 顧問は実績どおり2日まで",
+            "employee": "顧問",
+            "stores": ["AKABANE", "HIGASHIGUCHI"],
+            "count": 2,
+            "severity": "ERROR",
+            "comparison": "exact",
+            "source": "system",
+        })
+    return rules
+
+
+def system_monthly_preferred_work_requests(
+    year: int,
+    month: int,
+) -> list[tuple[str, int, Store]]:
+    """特定月だけ、日付・店舗まで明示されている実運用例外を返す。"""
+    if int(year) == 2026 and int(month) == 5:
+        return [
+            ("顧問", 3, Store.HIGASHIGUCHI),
+            ("顧問", 4, Store.AKABANE),
+        ]
+    return []
+
+
 def active_monthly_store_count_rules(
     rule_cfg: RuleConfig,
     year: int,
     month: int,
 ) -> list[dict]:
     """対象年月に有効な月別配置ルールだけを生成・検証用に取り出す。"""
-    active_rules = []
+    active_rules = system_monthly_store_count_rules(year, month)
     for rule in getattr(rule_cfg, "custom_rules", []):
         if not getattr(rule, "enabled", True):
             continue
@@ -2452,6 +2491,14 @@ if mode == "📊 経営者ビュー":
                     use_monthly_store_count_rules = active_monthly_store_count_rules(
                         rule_cfg, _saved_target_year, _saved_target_month,
                     )
+                    for _emp, _day, _store in system_monthly_preferred_work_requests(
+                        _saved_target_year, _saved_target_month,
+                    ):
+                        if _day in set(use_off_requests.get(_emp, [])):
+                            continue
+                        _item = (_emp, int(_day), _store)
+                        if _item not in use_preferred_work_requests:
+                            use_preferred_work_requests.append(_item)
 
                     progress_area.info(
                         f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
