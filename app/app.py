@@ -808,6 +808,51 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
     return rows
 
 
+def normalize_editor_records(rows: list[dict]) -> list[dict]:
+    """編集部品から返った行データを、シフト表の標準形式に揃える。"""
+    normalized = []
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        normalized_row = {
+            "日": day,
+            "曜": str(row.get("曜") or ""),
+        }
+        for name in EXPORT_COLUMN_ORDER:
+            normalized_row[name] = normalize_store_symbol(row.get(name, ""))
+        normalized_row["人数少"] = str(row.get("人数少") or "")
+        normalized.append(normalized_row)
+    return normalized
+
+
+def editor_symbol_signature(rows: list[dict]) -> str:
+    """編集行の勤務記号だけを比較するための署名。"""
+    payload = []
+    for row in normalize_editor_records(rows):
+        payload.append([
+            int(row["日"]),
+            [row.get(name, "") for name in EXPORT_COLUMN_ORDER],
+        ])
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def refresh_editor_short_staff_column(
+    base_shift: MonthlyShift,
+    rows: list[dict],
+) -> list[dict]:
+    """未確定編集を反映した人員少欄に更新する。"""
+    normalized = normalize_editor_records(rows)
+    preview_shift = editor_rows_to_shift(base_shift, normalized)
+    short_staff_by_store = detect_short_staff_by_store(preview_shift)
+    for row in normalized:
+        row["人数少"] = format_short_staff_summary_for_day(
+            short_staff_by_store.get(int(row["日"]), set())
+        )
+    return normalized
+
+
 def format_short_staff_summary_for_day(stores: set[Store]) -> str:
     """編集グリッド内の人員少欄に入れる短いテキスト。"""
     if not stores:
@@ -966,6 +1011,7 @@ def render_colored_shift_editor(
         "fit_columns_on_grid_load": False,
         "allow_unsafe_jscode": True,
         "theme": "streamlit",
+        "reload_data": True,
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
@@ -3257,6 +3303,8 @@ if mode == "📊 経営者ビュー":
             inline_redo_key = f"inline_edit_redo_stack_{edit_ym}"
             inline_status_key = f"inline_edit_status_{edit_ym}"
             inline_autosave_key = f"inline_edit_autosave_signature_{edit_ym}"
+            inline_draft_key = f"inline_edit_draft_rows_{edit_ym}"
+            inline_base_signature_key = f"inline_edit_base_signature_{edit_ym}"
             if inline_version_key not in st.session_state:
                 st.session_state[inline_version_key] = 0
             if inline_undo_key not in st.session_state:
@@ -3276,7 +3324,15 @@ if mode == "📊 経営者ビュー":
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
                 editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少"]
-                editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
+                base_editor_rows = shift_to_editor_rows(shift)
+                base_signature = editor_symbol_signature(base_editor_rows)
+                if st.session_state.get(inline_base_signature_key) != base_signature:
+                    st.session_state[inline_draft_key] = base_editor_rows
+                    st.session_state[inline_base_signature_key] = base_signature
+                draft_rows = st.session_state.get(inline_draft_key) or base_editor_rows
+                draft_rows = refresh_editor_short_staff_column(shift, draft_rows)
+                st.session_state[inline_draft_key] = draft_rows
+                editor_df = pd.DataFrame(draft_rows, columns=editor_columns)
                 column_config = {
                     "日": st.column_config.NumberColumn("日", width="small"),
                     "曜": st.column_config.TextColumn("曜", width="small"),
@@ -3332,9 +3388,18 @@ if mode == "📊 経営者ビュー":
                         column_config=column_config,
                         disabled=disabled_columns,
                     )
-                edited_records = editor_rows_to_records(edited_value)
+                edited_records = normalize_editor_records(editor_rows_to_records(edited_value))
                 if not edited_records:
-                    edited_records = shift_to_editor_rows(shift)
+                    edited_records = draft_rows
+                edited_records = refresh_editor_short_staff_column(shift, edited_records)
+                if (
+                    HAS_AGGRID
+                    and lock_info is None
+                    and editor_symbol_signature(edited_records)
+                    != editor_symbol_signature(st.session_state.get(inline_draft_key, []))
+                ):
+                    st.session_state[inline_draft_key] = edited_records
+                    st.rerun()
 
                 inline_changed_cells = get_editor_changed_cells(shift, edited_records)
                 inline_display_shift = editor_rows_to_shift(shift, edited_records)
@@ -3447,6 +3512,8 @@ if mode == "📊 経営者ビュー":
                         )
                         st.session_state[inline_version_key] += 1
                         st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
                         st.session_state.pop("chat_engine", None)
                         st.session_state.pop("chat_shift_id", None)
                         st.session_state[inline_status_key] = f"{len(inline_changed_cells)}件の変更を確定しました。"
@@ -3460,6 +3527,8 @@ if mode == "📊 経営者ビュー":
                     ):
                         st.session_state[inline_version_key] += 1
                         st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
                         st.session_state[inline_status_key] = "編集中の変更を破棄しました。"
                         st.rerun()
                 with btn_col3:
@@ -3492,6 +3561,8 @@ if mode == "📊 経営者ビュー":
                         )
                         st.session_state[inline_version_key] += 1
                         st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
                         st.session_state.pop("chat_engine", None)
                         st.session_state.pop("chat_shift_id", None)
                         st.session_state[inline_status_key] = "直前の変更を元に戻しました。"
@@ -3526,6 +3597,8 @@ if mode == "📊 経営者ビュー":
                         )
                         st.session_state[inline_version_key] += 1
                         st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
                         st.session_state.pop("chat_engine", None)
                         st.session_state.pop("chat_shift_id", None)
                         st.session_state[inline_status_key] = "元に戻した変更をもう一度反映しました。"
