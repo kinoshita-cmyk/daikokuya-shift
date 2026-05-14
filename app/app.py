@@ -876,10 +876,15 @@ def render_colored_shift_editor(
     grid_key: str,
     locked: bool = False,
     off_request_cells: Optional[set[tuple[str, int]]] = None,
+    changed_cells: Optional[set[tuple[str, int]]] = None,
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
     off_request_keys = json.dumps(
         sorted(f"{employee}|{int(day)}" for employee, day in (off_request_cells or set())),
+        ensure_ascii=False,
+    )
+    changed_cell_keys = json.dumps(
+        sorted(f"{employee}|{int(day)}" for employee, day in (changed_cells or set())),
         ensure_ascii=False,
     )
     cell_style = JsCode(
@@ -887,8 +892,10 @@ def render_colored_shift_editor(
         function(params) {
             const value = params.value;
             const fixedOffCells = new Set(__OFF_REQUEST_KEYS__);
+            const changedCells = new Set(__CHANGED_CELL_KEYS__);
             const cellKey = String(params.colDef.field) + '|' + String(params.data['日']);
             const isFixedOff = fixedOffCells.has(cellKey);
+            const isChanged = changedCells.has(cellKey);
             const base = {
                 textAlign: 'center',
                 fontWeight: '800',
@@ -896,23 +903,31 @@ def render_colored_shift_editor(
                 borderRight: '1px solid #cbd5e1',
                 borderBottom: '1px solid #e5e7eb'
             };
-            function withFixedOff(style) {
-                if (isFixedOff) {
+            function withMarkers(style) {
+                if (isFixedOff && isChanged) {
+                    style.boxShadow = 'inset 0 0 0 2px #dc2626, inset 0 0 0 5px #16a34a';
+                    style.color = '#991b1b';
+                    style.fontWeight = '900';
+                } else if (isFixedOff) {
                     style.boxShadow = 'inset 0 0 0 3px #dc2626';
                     style.color = '#991b1b';
+                    style.fontWeight = '900';
+                } else if (isChanged) {
+                    style.boxShadow = 'inset 0 0 0 3px #16a34a';
                     style.fontWeight = '900';
                 }
                 return style;
             }
-            if (value === '○') { return withFixedOff({...base, backgroundColor: '#fef3c7', color: '#92400e'}); }
-            if (value === '□') { return withFixedOff({...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}); }
-            if (value === '△') { return withFixedOff({...base, backgroundColor: '#d1fae5', color: '#047857'}); }
-            if (value === '☆') { return withFixedOff({...base, backgroundColor: '#fce7f3', color: '#be185d'}); }
-            if (value === '◆') { return withFixedOff({...base, backgroundColor: '#e0e7ff', color: '#4338ca'}); }
-            if (value === '×') { return withFixedOff({...base, backgroundColor: '#f3f4f6', color: '#4b5563'}); }
-            return withFixedOff({...base, backgroundColor: '#ffffff', color: '#111827'});
+            if (value === '○') { return withMarkers({...base, backgroundColor: '#fef3c7', color: '#92400e'}); }
+            if (value === '□') { return withMarkers({...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}); }
+            if (value === '△') { return withMarkers({...base, backgroundColor: '#d1fae5', color: '#047857'}); }
+            if (value === '☆') { return withMarkers({...base, backgroundColor: '#fce7f3', color: '#be185d'}); }
+            if (value === '◆') { return withMarkers({...base, backgroundColor: '#e0e7ff', color: '#4338ca'}); }
+            if (value === '×') { return withMarkers({...base, backgroundColor: '#f3f4f6', color: '#4b5563'}); }
+            return withMarkers({...base, backgroundColor: '#ffffff', color: '#111827'});
         }
         """.replace("__OFF_REQUEST_KEYS__", off_request_keys)
+        .replace("__CHANGED_CELL_KEYS__", changed_cell_keys)
     )
     header_style = JsCode(
         """
@@ -3332,6 +3347,7 @@ if mode == "📊 経営者ビュー":
                 draft_rows = st.session_state.get(inline_draft_key) or base_editor_rows
                 draft_rows = refresh_editor_short_staff_column(shift, draft_rows)
                 st.session_state[inline_draft_key] = draft_rows
+                draft_changed_cells = get_editor_changed_cells(shift, draft_rows)
                 editor_df = pd.DataFrame(draft_rows, columns=editor_columns)
                 column_config = {
                     "日": st.column_config.NumberColumn("日", width="small"),
@@ -3364,6 +3380,7 @@ if mode == "📊 経営者ビュー":
                         grid_key=editor_key,
                         locked=lock_info is not None,
                         off_request_cells=_table_off_cells,
+                        changed_cells=draft_changed_cells,
                     )
                     edited_value = grid_response.get("data", editor_df)
                 else:
