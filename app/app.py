@@ -1158,6 +1158,110 @@ def save_validation_context(inputs: dict) -> None:
     st.session_state["validation_inputs_by_month"] = inputs_by_month
 
 
+def restore_validation_context_for_month(
+    year: int,
+    month: int,
+    rule_cfg: RuleConfig,
+) -> dict:
+    """下書き・確定版の復元時に、その月の提出データを検証条件として読み直す。"""
+    from prototype.submission_loader import load_submissions_for_month
+
+    days_in_month = monthrange(int(year), int(month))[1]
+    sub_data = load_submissions_for_month(
+        int(year), int(month), shift_submission_employee_names(),
+    )
+
+    def _valid_days(days_list) -> list[int]:
+        valid = []
+        for day in days_list or []:
+            try:
+                day_int = int(day)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= day_int <= days_in_month:
+                valid.append(day_int)
+        return valid
+
+    off_requests = {
+        emp: _valid_days(days)
+        for emp, days in sub_data.off_requests.items()
+    }
+    off_requests = {emp: days for emp, days in off_requests.items() if days}
+    off_sets = {emp: set(days) for emp, days in off_requests.items()}
+
+    work_requests = [
+        (emp, int(day), store)
+        for emp, day, store in sub_data.work_requests
+        if 1 <= int(day) <= days_in_month and int(day) not in off_sets.get(emp, set())
+    ]
+    preferred_work_requests = [
+        (emp, int(day), store)
+        for emp, day, store in getattr(sub_data, "preferred_work_requests", [])
+        if 1 <= int(day) <= days_in_month and int(day) not in off_sets.get(emp, set())
+    ]
+    for emp, day, store in system_monthly_preferred_work_requests(int(year), int(month)):
+        if int(day) in off_sets.get(emp, set()):
+            continue
+        item = (emp, int(day), store)
+        if item not in preferred_work_requests:
+            preferred_work_requests.append(item)
+
+    preferred_work_groups = []
+    for emp, candidate_days, required_count, store in getattr(
+        sub_data, "preferred_work_groups", []
+    ):
+        filtered = [
+            int(day) for day in candidate_days
+            if 1 <= int(day) <= days_in_month
+            and int(day) not in off_sets.get(emp, set())
+        ]
+        if filtered:
+            preferred_work_groups.append((
+                emp,
+                sorted(set(filtered)),
+                min(int(required_count), len(set(filtered))),
+                store,
+            ))
+
+    holiday_overrides = {}
+    effective_paid_leave_days = combined_paid_leave_days(
+        sub_data.paid_leave_days, int(year), int(month),
+    )
+    for emp_name, paid_days in effective_paid_leave_days.items():
+        try:
+            emp = get_employee(emp_name)
+            if emp.annual_target_days:
+                base_target = round(emp.annual_target_days / 12)
+                holiday_overrides[emp_name] = days_in_month - base_target + int(paid_days)
+        except Exception:
+            pass
+    for emp_name, requested_days in getattr(sub_data, "requested_holiday_days", {}).items():
+        try:
+            requested_days_int = int(requested_days)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= requested_days_int <= days_in_month:
+            holiday_overrides[emp_name] = max(
+                int(holiday_overrides.get(emp_name, 0) or 0),
+                requested_days_int,
+            )
+
+    context = {
+        "ym": f"{int(year):04d}-{int(month):02d}",
+        "off_requests": off_requests,
+        "work_requests": work_requests,
+        "preferred_work_requests": preferred_work_requests,
+        "preferred_work_groups": preferred_work_groups,
+        "prev_month": [],
+        "holiday_overrides": holiday_overrides,
+        "monthly_store_count_rules": active_monthly_store_count_rules(
+            rule_cfg, int(year), int(month),
+        ),
+    }
+    save_validation_context(context)
+    return context
+
+
 def build_part_time_paid_leave_suggestions(
     shift: MonthlyShift,
     validation_context: dict,
@@ -3108,6 +3212,12 @@ if mode == "📊 経営者ビュー":
                 if snapshot_path.exists():
                     loaded = backup_mgr.load_shift(snapshot_path)
                     save_session_shift(loaded)
+                    try:
+                        restore_validation_context_for_month(
+                            int(target_year), int(target_month), rule_cfg,
+                        )
+                    except Exception:
+                        pass
                     st.success("✅ 確定版を読み込みました")
                     st.rerun()
                 else:
@@ -3258,6 +3368,12 @@ if mode == "📊 経営者ビュー":
                 key="restore_latest_draft_shift",
             ):
                 save_session_shift(latest_draft)
+                try:
+                    restore_validation_context_for_month(
+                        int(target_year), int(target_month), rule_cfg,
+                    )
+                except Exception:
+                    pass
                 st.success("自動保存の下書きを復元しました")
                 st.rerun()
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
@@ -3306,6 +3422,14 @@ if mode == "📊 経営者ビュー":
 
             render_shift_legend()
             _table_validation_context = get_validation_context_for_shift(shift)
+            _table_ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+            if _table_ym not in st.session_state.get("validation_inputs_by_month", {}):
+                try:
+                    _table_validation_context = restore_validation_context_for_month(
+                        int(shift.year), int(shift.month), rule_cfg,
+                    )
+                except Exception:
+                    pass
             _table_off_cells = build_off_request_cells(
                 _table_validation_context.get("off_requests", {})
             )
