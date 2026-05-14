@@ -1605,25 +1605,15 @@ def record_edit_history_with_github(
 
 def system_monthly_store_count_rules(year: int, month: int) -> list[dict]:
     """チャットで固まった標準の月次運用ルールを返す。"""
-    rules = [
-        {
-            "name": "春山さんの東口・西口代替",
-            "employee": "春山",
-            "stores": ["HIGASHIGUCHI", "NISHIGUCHI"],
-            "count": 3,
-            "severity": "WARNING",
-            "comparison": "min",
-            "source": "system",
-        },
-    ]
+    rules = []
     if int(year) == 2026 and int(month) == 5:
         rules.append({
-            "name": "2026年5月 顧問は実績どおり2日まで",
+            "name": "2026年5月 顧問は最大2日まで",
             "employee": "顧問",
             "stores": ["AKABANE", "HIGASHIGUCHI"],
             "count": 2,
             "severity": "ERROR",
-            "comparison": "exact",
+            "comparison": "max",
             "source": "system",
         })
     return rules
@@ -1634,11 +1624,6 @@ def system_monthly_preferred_work_requests(
     month: int,
 ) -> list[tuple[str, int, Store]]:
     """特定月だけ、日付・店舗まで明示されている実運用例外を返す。"""
-    if int(year) == 2026 and int(month) == 5:
-        return [
-            ("顧問", 3, Store.HIGASHIGUCHI),
-            ("顧問", 4, Store.AKABANE),
-        ]
     return []
 
 
@@ -1672,6 +1657,57 @@ def active_monthly_store_count_rules(
             "comparison": getattr(rule, "comparison", "min"),
         })
     return active_rules
+
+
+def active_monthly_custom_rules(
+    rule_cfg: RuleConfig,
+    year: int,
+    month: int,
+) -> list[CustomRule]:
+    """対象年月に有効な、画面で追加された月別ルールを返す。"""
+    active_rules = []
+    for rule in getattr(rule_cfg, "custom_rules", []):
+        if not getattr(rule, "enabled", True):
+            continue
+        try:
+            target_year = getattr(rule, "target_year", None)
+            target_month = getattr(rule, "target_month", None)
+            if target_year is not None and int(target_year) != int(year):
+                continue
+            if target_month is not None and int(target_month) != int(month):
+                continue
+        except (TypeError, ValueError):
+            continue
+        active_rules.append(rule)
+    return active_rules
+
+
+def monthly_rule_store_label(stores: list) -> str:
+    """月別ルールの店舗名を画面表示用に整える。"""
+    labels = []
+    for raw_store in stores or []:
+        try:
+            store = raw_store if isinstance(raw_store, Store) else Store[str(raw_store)]
+        except Exception:
+            store = next(
+                (
+                    s for s in Store
+                    if s.display_name == str(raw_store) or s.value == str(raw_store)
+                ),
+                None,
+            )
+        labels.append(store.display_name if isinstance(store, Store) else str(raw_store))
+    return "・".join(labels) if labels else "店舗指定なし"
+
+
+def monthly_rule_display_text(rule: dict) -> str:
+    """月別ルール1件を自然な日本語にする。"""
+    store_label = monthly_rule_store_label(rule.get("stores") or [])
+    return (
+        f"{rule.get('name', '月別ルール')}: "
+        f"{rule.get('employee') or 'スタッフ指定なし'} / "
+        f"{store_label} / {format_monthly_rule_condition(rule)}"
+    )
 
 
 def format_monthly_rule_condition(rule: dict) -> str:
@@ -1991,11 +2027,7 @@ if mode == "📊 経営者ビュー":
                     if _isum.get("monthly_store_count_rules"):
                         st.write("- 月別ルール:")
                         for rule in _isum["monthly_store_count_rules"]:
-                            st.write(
-                                f"    - {rule.get('name', '月別ルール')}: "
-                                f"{rule.get('employee')} / {rule.get('stores')} / "
-                                f"{format_monthly_rule_condition(rule)} / {rule.get('severity')}"
-                            )
+                            st.write(f"    - {monthly_rule_display_text(rule)}")
                     st.write(f"- 出勤希望（希望扱い）: {_isum.get('work_requests_count', 0)}件")
                     st.write(
                         f"- 自由記載の出勤希望（優先反映）: "
@@ -2195,6 +2227,23 @@ if mode == "📊 経営者ビュー":
         admin_leave_by_employee = admin_paid_leave_days_for_month(
             int(target_year), int(target_month),
         )
+        monthly_custom_by_employee: dict[str, list[str]] = {}
+        for rule in active_monthly_custom_rules(rule_cfg, int(target_year), int(target_month)):
+            employee = getattr(rule, "employee", "") or ""
+            if not employee:
+                continue
+            if getattr(rule, "rule_type", "note") == "employee_store_count":
+                label = monthly_rule_display_text({
+                    "name": rule.name,
+                    "employee": rule.employee,
+                    "stores": list(rule.stores),
+                    "count": rule.count,
+                    "comparison": getattr(rule, "comparison", "min"),
+                })
+            else:
+                label = f"月別メモ: {rule.name}"
+            monthly_custom_by_employee.setdefault(employee, []).append(label)
+
         request_rows = []
         for emp_name in expected_employees:
             s = submitted_by_name.get(emp_name)
@@ -2210,6 +2259,7 @@ if mode == "📊 経営者ビュー":
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
                 note_applied.extend(s.get("work_request_group_labels", []))
+                note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
                 request_rows.append({
                     "氏名": emp_name,
                     "状態": "提出済み",
@@ -2229,40 +2279,147 @@ if mode == "📊 経営者ビュー":
                     "△ できれば休み": "",
                     "出勤希望": "",
                     "有給": f"管理者+{admin_leave}日" if admin_leave else "",
-                    "自由記載から反映": "",
+                    "自由記載から反映": " / ".join(monthly_custom_by_employee.get(emp_name, [])),
                     "備考": "",
                 })
         render_scrollable_request_table(request_rows)
 
     st.markdown("---")
 
-    with st.expander("📌 今月の適用ルール", expanded=False):
+    with st.expander("📌 今月だけの特別ルール", expanded=False):
         current_month_rules = active_monthly_store_count_rules(
             rule_cfg, int(target_year), int(target_month),
         )
-        st.markdown(
-            "\n".join([
-                "- 本人の `×` 休み希望は例外なく休みとして扱います。",
-                "- 出勤希望・希望店舗は希望扱いです。まず出勤可否を調整し、出勤になった場合は希望店舗を優先します。",
-                f"- 最大連勤は `{rule_cfg.parameters.get('max_consec_work', 5)}連勤`、"
-                f"2連休は最低 `{rule_cfg.parameters.get('min_2off_per_month', 1)}回` を目標にします。",
-                f"- 自動生成の探索時間は最大 `{max(180, int(rule_cfg.parameters.get('solver_time_limit_seconds', 180)))}秒` です。",
-                "- 顧問は自動生成では原則使いません。必要な場合は月別ルールや手動調整で扱います。",
-                "- 南さんは出勤希望日のみ稼働します。`○` の提出日だけを候補にし、無闇には配置しません。",
-                "- 大宮西口店は楯さんメインですが、楯さん不在時・研修時は春山さんなどの代替を許容します。",
-                "- 赤羽東口店は休店日以外は開店前提です。省人員日でも閉店扱いにはしません。",
-            ])
+        current_custom_rules = active_monthly_custom_rules(
+            rule_cfg, int(target_year), int(target_month),
         )
-        if current_month_rules:
-            st.markdown("**月別ルール**")
-            for rule in current_month_rules:
-                st.write(
-                    f"- {rule.get('name', '月別ルール')}: "
-                    f"{rule.get('employee')} / {rule.get('stores')} / "
-                    f"{format_monthly_rule_condition(rule)} / {rule.get('severity')}"
-                )
+        st.caption(
+            "基本ルールは「設定 → ルール設定」と従業員マスタで管理しています。"
+            "ここには、その月だけの例外・研修・一時的な配置条件だけを表示します。"
+        )
+
+        display_rows = []
+        for rule in current_month_rules:
+            display_rows.append({
+                "種類": "システム月別例外" if rule.get("source") == "system" else "月別配置",
+                "内容": monthly_rule_display_text(rule),
+                "重要度": rule.get("severity", "WARNING"),
+            })
+        for rule in current_custom_rules:
+            if getattr(rule, "rule_type", "note") == "employee_store_count":
+                continue
+            display_rows.append({
+                "種類": "月別メモ",
+                "内容": f"{rule.name}: {rule.description}",
+                "重要度": rule.severity,
+            })
+        if display_rows:
+            st.dataframe(display_rows, width="stretch", hide_index=True)
         else:
             st.caption("この月だけの追加ルールは未設定です。")
+
+        with st.form(
+            f"quick_monthly_rule_form_{int(target_year)}_{int(target_month)}",
+            clear_on_submit=True,
+        ):
+            st.markdown("##### 特別ルールを追加")
+            rule_mode = st.radio(
+                "反映方法",
+                ["メモとして残す", "生成にも反映する"],
+                horizontal=True,
+                help=(
+                    "生成にも反映する場合、スタッフ・店舗・回数の条件をシフト計算に渡します。"
+                    "文章の細かい条件は備考として残ります。"
+                ),
+            )
+            quick_rule_name = st.text_input(
+                "見出し",
+                placeholder="例: 牧野さんの西口研修",
+            )
+            quick_rule_desc = st.text_area(
+                "内容",
+                placeholder="例: 牧野さんを研修のため、楯さんが西口勤務の時に一緒に3回だけ入れる",
+                height=80,
+            )
+            employee_options = ["指定なし"] + shift_submission_employee_names()
+            quick_employee = st.selectbox("対象スタッフ", employee_options)
+            quick_stores = []
+            quick_count = 0
+            quick_comparison = "min"
+            if rule_mode == "生成にも反映する":
+                store_options = [s.name for s in Store if s != Store.OFF]
+                store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
+                quick_stores = st.multiselect(
+                    "対象店舗",
+                    options=store_options,
+                    format_func=lambda name: store_labels.get(name, name),
+                )
+                comparison_label = st.selectbox(
+                    "条件",
+                    ["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
+                )
+                quick_comparison = {
+                    "最低回数": "min",
+                    "最大回数": "max",
+                    "ちょうど回数": "exact",
+                    "配置禁止": "forbid",
+                }[comparison_label]
+                quick_count = int(st.number_input(
+                    "月内回数",
+                    min_value=0 if quick_comparison == "forbid" else 1,
+                    max_value=31,
+                    value=0 if quick_comparison == "forbid" else 3,
+                    disabled=quick_comparison == "forbid",
+                ))
+            quick_severity = st.selectbox(
+                "重要度",
+                ["WARNING", "ERROR"],
+                help="ERRORは必ず守る条件、WARNINGはできるだけ守る条件です。",
+            )
+            submitted_quick_rule = st.form_submit_button("この月の特別ルールに追加")
+            if submitted_quick_rule:
+                is_structured = rule_mode == "生成にも反映する"
+                missing_structured = (
+                    is_structured
+                    and (
+                        quick_employee == "指定なし"
+                        or not quick_stores
+                        or (quick_comparison != "forbid" and quick_count <= 0)
+                    )
+                )
+                if not quick_rule_name or not quick_rule_desc:
+                    st.error("見出しと内容を入力してください。")
+                elif missing_structured:
+                    st.error("生成にも反映する場合は、スタッフ・店舗・回数を入力してください。")
+                else:
+                    new_rule = CustomRule(
+                        id=f"monthly_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        name=quick_rule_name,
+                        description=quick_rule_desc,
+                        enabled=True,
+                        severity=quick_severity,
+                        created_at=datetime.now().isoformat(),
+                        created_by="管理者",
+                        target_year=int(target_year),
+                        target_month=int(target_month),
+                        rule_type="employee_store_count" if is_structured else "note",
+                        employee="" if quick_employee == "指定なし" else quick_employee,
+                        stores=quick_stores,
+                        count=0 if quick_comparison == "forbid" else quick_count,
+                        comparison=quick_comparison,
+                    )
+                    next_cfg = RuleConfig(
+                        enabled_checks=dict(rule_cfg.enabled_checks),
+                        parameters=dict(rule_cfg.parameters),
+                        custom_rules=list(rule_cfg.custom_rules) + [new_rule],
+                    )
+                    rule_mgr.save(
+                        next_cfg,
+                        actor="管理者",
+                        note=f"{int(target_year)}年{int(target_month)}月の特別ルール追加",
+                    )
+                    st.success("この月の特別ルールに追加しました。")
+                    st.rerun()
 
     # 操作ボタン群
     st.markdown("##### 操作")
