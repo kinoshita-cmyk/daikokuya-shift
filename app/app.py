@@ -83,6 +83,28 @@ def get_anthropic_api_key() -> Optional[str]:
 
 
 ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
+RULE_LEDGER_FILE = CONFIG_DIR / "rule_ledger_v1_0.json"
+
+
+def load_rule_ledger_v1() -> dict:
+    """ルール台帳 v1.0 を読み込む。壊れている場合は空の台帳を返す。"""
+    fallback = {
+        "version": "1.0",
+        "title": "大黒屋シフト作成ルール台帳",
+        "rules": [],
+        "employee_store_suitability": [],
+        "numeric_parameters": [],
+    }
+    if not RULE_LEDGER_FILE.exists():
+        return fallback
+    try:
+        with open(RULE_LEDGER_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return fallback
+    if not isinstance(data, dict):
+        return fallback
+    return {**fallback, **data}
 
 
 def load_admin_paid_leave_data() -> dict:
@@ -6123,10 +6145,10 @@ elif mode == "⚙️ 設定":
         else:
             st.info("現在の本設定: デフォルト設定")
 
-        st.markdown("#### ルール全体像")
+        st.markdown("#### ルール台帳 v1.0")
         st.caption(
-            "現在システム内にあるルールを、シフト生成・検証・画面表示のどこに効いているかで整理しています。"
-            "まずはここを台帳として育て、編集可能にする項目を少しずつ増やしていく想定です。"
+            "現時点でこのフォルダ上にある固定ルールを、"
+            "絶対条件・強い目標・弱い目標・月別例外に分類して保存しています。"
         )
 
         def _rule_row(
@@ -6340,19 +6362,23 @@ elif mode == "⚙️ 設定":
                 "この画面で変更可", "一部反映",
             ),
         ]
+        ledger = load_rule_ledger_v1()
+        rule_inventory = list(ledger.get("rules", []))
+        employee_suitability_rows = list(ledger.get("employee_store_suitability", []))
+        numeric_ledger_rows = list(ledger.get("numeric_parameters", []))
 
-        status_counts = {}
+        category_counts = {}
         for row in rule_inventory:
-            status_counts[row["状態"]] = status_counts.get(row["状態"], 0) + 1
+            category_counts[row["分類"]] = category_counts.get(row["分類"], 0) + 1
         stat_cols = st.columns(4)
-        stat_cols[0].metric("反映中", status_counts.get("反映中", 0))
-        stat_cols[1].metric("一部反映", status_counts.get("一部反映", 0))
-        stat_cols[2].metric("未接続", status_counts.get("未接続", 0))
-        stat_cols[3].metric("表示/メモ", status_counts.get("表示/メモ", 0))
+        stat_cols[0].metric("絶対条件", category_counts.get("絶対条件", 0))
+        stat_cols[1].metric("強い目標", category_counts.get("強い目標", 0))
+        stat_cols[2].metric("弱い目標", category_counts.get("弱い目標", 0))
+        stat_cols[3].metric("月別例外", category_counts.get("月別例外", 0))
 
         filter_col1, filter_col2 = st.columns([1, 1])
         categories = ["すべて"] + sorted({row["分類"] for row in rule_inventory})
-        statuses = ["すべて", "反映中", "一部反映", "未接続", "表示/メモ"]
+        rule_search = ""
         with filter_col1:
             selected_rule_category = st.selectbox(
                 "分類で絞り込み",
@@ -6360,16 +6386,20 @@ elif mode == "⚙️ 設定":
                 key="rule_inventory_category",
             )
         with filter_col2:
-            selected_rule_status = st.selectbox(
-                "状態で絞り込み",
-                statuses,
-                key="rule_inventory_status",
+            rule_search = st.text_input(
+                "キーワード検索",
+                key="rule_inventory_search",
+                placeholder="例: 牧野、赤羽、連勤",
             )
 
+        rule_search_normalized = rule_search.strip()
         visible_rule_inventory = [
             row for row in rule_inventory
             if (selected_rule_category == "すべて" or row["分類"] == selected_rule_category)
-            and (selected_rule_status == "すべて" or row["状態"] == selected_rule_status)
+            and (
+                not rule_search_normalized
+                or rule_search_normalized in json.dumps(row, ensure_ascii=False)
+            )
         ]
         st.dataframe(
             visible_rule_inventory,
@@ -6378,35 +6408,39 @@ elif mode == "⚙️ 設定":
             height=360,
         )
 
-        with st.expander("状態ラベルの見方", expanded=False):
+        with st.expander("分類の見方", expanded=False):
             st.markdown(
                 """
-                - **反映中**: 生成・検証・表示のいずれかに実際に効いています。
-                - **一部反映**: 生成だけ、検証だけ、または特定条件だけで効いています。
-                - **未接続**: 設定やメモはありますが、まだ実際の生成・検証には効いていません。
-                - **表示/メモ**: 台帳や履歴として記録されるだけで、シフト算出には使いません。
+                - **絶対条件**: 破るとシフト生成できない、または検証ERRORになる条件です。
+                - **強い目標**: できる限り守る条件です。無理な月は警告や候補表示に回ります。
+                - **弱い目標**: 配置の好みや補助的な判断です。
+                - **月別例外**: その月だけ追加・調整する条件です。
                 """
             )
+        with st.expander("従業員別の店舗適性（表示名を整理済み）", expanded=False):
+            st.dataframe(
+                employee_suitability_rows,
+                width="stretch",
+                hide_index=True,
+                height=360,
+            )
+        with st.expander("台帳に残した数値基準", expanded=False):
+            st.dataframe(
+                numeric_ledger_rows,
+                width="stretch",
+                hide_index=True,
+            )
+        st.caption(
+            f"ルール台帳 v{ledger.get('version', '1.0')} は "
+            f"`config/rule_ledger_v1_0.json` にバックアップとして保存されています。"
+        )
 
         st.markdown("---")
         draft_status_area = st.container()
 
-        # サブセクション: 検証チェックのON/OFF
-        st.markdown("#### ✅ 検証チェックの ON/OFF")
-        st.caption(
-            "ここは今後細分化していく予定の設定です。現在は設定値として保存されますが、"
-            "実際の生成・検証への接続状況は上のルール全体像で確認してください。"
-        )
-
-        new_enabled = {}
-        ck_col1, ck_col2 = st.columns(2)
-        keys = list(check_labels.keys())
-        for i, key in enumerate(keys):
-            with (ck_col1 if i < len(keys) // 2 + 1 else ck_col2):
-                new_enabled[key] = st.toggle(
-                    check_labels[key],
-                    key=f"chk_{key}",
-                )
+        # 検証ON/OFFは実処理への接続が不完全だったため、画面からは外す。
+        # 既存configとの互換性のため、保存値自体はそのまま保持する。
+        new_enabled = dict(cfg.enabled_checks)
 
         # サブセクション: 数値パラメータ
         st.markdown("---")
@@ -6418,7 +6452,9 @@ elif mode == "⚙️ 設定":
         )
 
         param_col1, param_col2 = st.columns(2)
-        new_params = {}
+        new_params = dict(cfg.parameters)
+        for key, spec in param_specs.items():
+            new_params.setdefault(key, int(spec["default"]))
 
         def warn_if_unsafe(key: str, value: int) -> None:
             """値が推奨範囲外なら警告を表示"""
@@ -6437,7 +6473,7 @@ elif mode == "⚙️ 設定":
                     )
 
         with param_col1:
-            for key in ("max_consec_work", "soft_consec_threshold", "default_holiday_days"):
+            for key in ("max_consec_work", "soft_consec_threshold"):
                 spec = param_specs[key]
                 new_params[key] = int(st.number_input(
                     spec["label"],
@@ -6447,7 +6483,7 @@ elif mode == "⚙️ 設定":
                 ))
                 warn_if_unsafe(key, new_params[key])
         with param_col2:
-            for key in ("min_2off_per_month", "max_2off_per_month"):
+            for key in ("solver_time_limit_seconds", "solver_seed"):
                 spec = param_specs[key]
                 new_params[key] = int(st.number_input(
                     spec["label"],
@@ -6456,19 +6492,7 @@ elif mode == "⚙️ 設定":
                     key=f"param_{key}",
                 ))
                 warn_if_unsafe(key, new_params[key])
-            # 旧設定値は画面には出さないが、既存 config との不要な差分を出さないため保持する。
-            if "higashi_eco2_max_per_month" in cfg.parameters:
-                new_params["higashi_eco2_max_per_month"] = int(
-                    cfg.parameters.get("higashi_eco2_max_per_month", 0)
-                )
 
-        # 矛盾チェック: 2連休 最低 > 最大 はおかしい
-        if new_params["min_2off_per_month"] > new_params["max_2off_per_month"]:
-            st.error(
-                f"❌ 設定矛盾: 2連休 最低{new_params['min_2off_per_month']}回 > "
-                f"最大{new_params['max_2off_per_month']}回 になっています。"
-                "最低 ≤ 最大 になるよう調整してください。"
-            )
         # ソフト閾値 > ハード上限 はおかしい
         if new_params["soft_consec_threshold"] > new_params["max_consec_work"]:
             st.error(
@@ -6476,25 +6500,6 @@ elif mode == "⚙️ 設定":
                 f"ハード上限（{new_params['max_consec_work']}）を超えています。"
                 "推奨 ≤ ハード になるよう調整してください。"
             )
-
-        st.markdown("##### ソルバー設定")
-        param_col3, param_col4 = st.columns(2)
-        with param_col3:
-            spec = param_specs["solver_seed"]
-            new_params["solver_seed"] = int(st.number_input(
-                spec["label"],
-                min_value=spec["min"], max_value=spec["max"],
-                help=spec["help"],
-                key="param_solver_seed",
-            ))
-        with param_col4:
-            spec = param_specs["solver_time_limit_seconds"]
-            new_params["solver_time_limit_seconds"] = int(st.number_input(
-                spec["label"],
-                min_value=spec["min"], max_value=spec["max"],
-                help=spec["help"],
-                key="param_solver_time_limit_seconds",
-            ))
 
         # 月ごとの特別ルールは、実際に対象月を見ながら判断できる
         # シフト生成画面側へ一本化する。
@@ -6523,8 +6528,7 @@ elif mode == "⚙️ 設定":
             cfg, draft_cfg, actor=save_actor, note=save_note,
         )
         has_setting_error = (
-            new_params["min_2off_per_month"] > new_params["max_2off_per_month"]
-            or new_params["soft_consec_threshold"] > new_params["max_consec_work"]
+            new_params["soft_consec_threshold"] > new_params["max_consec_work"]
         )
 
         def _change_text(change) -> str:
