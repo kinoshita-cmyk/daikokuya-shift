@@ -1287,6 +1287,9 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
             "off_requests": {},
             "prev_month": [],
             "holiday_overrides": {},
+            "exact_holiday_days": {},
+            "employee_max_consecutive_work": {},
+            "employee_max_consecutive_off": {},
             "monthly_store_count_rules": [],
         }
     return {
@@ -1296,6 +1299,9 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         "off_requests": inputs.get("off_requests", {}),
         "prev_month": inputs.get("prev_month", []),
         "holiday_overrides": inputs.get("holiday_overrides", {}),
+        "exact_holiday_days": inputs.get("exact_holiday_days", {}),
+        "employee_max_consecutive_work": inputs.get("employee_max_consecutive_work", {}),
+        "employee_max_consecutive_off": inputs.get("employee_max_consecutive_off", {}),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
     }
 
@@ -1377,6 +1383,7 @@ def restore_validation_context_for_month(
             ))
 
     holiday_overrides = {}
+    exact_holiday_days = {}
     effective_paid_leave_days = combined_paid_leave_days(
         sub_data.paid_leave_days, int(year), int(month),
     )
@@ -1402,6 +1409,7 @@ def restore_validation_context_for_month(
                 int(holiday_overrides.get(emp_name, 0) or 0),
                 requested_days_int,
             )
+            exact_holiday_days[emp_name] = requested_days_int
 
     context = {
         "ym": f"{int(year):04d}-{int(month):02d}",
@@ -1411,6 +1419,13 @@ def restore_validation_context_for_month(
         "preferred_work_groups": preferred_work_groups,
         "prev_month": [],
         "holiday_overrides": holiday_overrides,
+        "exact_holiday_days": exact_holiday_days,
+        "employee_max_consecutive_work": dict(
+            getattr(sub_data, "max_consecutive_work_days", {})
+        ),
+        "employee_max_consecutive_off": dict(
+            getattr(sub_data, "max_consecutive_off_days", {})
+        ),
         "monthly_store_count_rules": active_monthly_store_count_rules(
             rule_cfg, int(year), int(month),
         ),
@@ -1881,6 +1896,10 @@ def enrich_submission_days_from_files(
                 )
             if parsed_note.requested_holiday_days is not None:
                 submitted["requested_holiday_days"] = parsed_note.requested_holiday_days
+            if parsed_note.max_consecutive_work_days is not None:
+                submitted["max_consecutive_work_days"] = parsed_note.max_consecutive_work_days
+            if parsed_note.max_consecutive_off_days is not None:
+                submitted["max_consecutive_off_days"] = parsed_note.max_consecutive_off_days
             if parsed_note.preferred_consecutive_off_days is not None:
                 submitted["preferred_consecutive_off_days"] = parsed_note.preferred_consecutive_off_days
         except Exception:
@@ -2514,6 +2533,10 @@ if mode == "📊 経営者ビュー":
                         )
                     if _isum.get("requested_holiday_days"):
                         st.write(f"- 自由記載の休日日数指定: {_isum['requested_holiday_days']}")
+                    if _isum.get("employee_max_consecutive_work"):
+                        st.write(f"- 自由記載の連勤上限: {_isum['employee_max_consecutive_work']}")
+                    if _isum.get("employee_max_consecutive_off"):
+                        st.write(f"- 自由記載の連休上限: {_isum['employee_max_consecutive_off']}")
                     if _isum.get("preferred_consecutive_off"):
                         st.write(f"- 自由記載の連休希望: {_isum['preferred_consecutive_off']}")
                     if _isum.get("monthly_store_count_rules"):
@@ -2749,6 +2772,10 @@ if mode == "📊 経営者ビュー":
                 note_applied = []
                 if s.get("requested_holiday_days"):
                     note_applied.append(f"休み計{s['requested_holiday_days']}日")
+                if s.get("max_consecutive_work_days"):
+                    note_applied.append(f"{s['max_consecutive_work_days']}連勤まで")
+                if s.get("max_consecutive_off_days"):
+                    note_applied.append(f"{s['max_consecutive_off_days']}連休まで")
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
                 note_applied.extend(s.get("work_request_group_labels", []))
@@ -3050,6 +3077,13 @@ if mode == "📊 経営者ビュー":
                                 if cands:
                                     use_flexible_off.append((emp, cands, n))
                         use_holiday_overrides = {}
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = dict(
+                            getattr(sub_data, "max_consecutive_work_days", {})
+                        )
+                        use_employee_max_consecutive_off = dict(
+                            getattr(sub_data, "max_consecutive_off_days", {})
+                        )
                         use_preferred_consecutive_off = list(
                             getattr(sub_data, "preferred_consecutive_off", [])
                         )
@@ -3081,6 +3115,7 @@ if mode == "📊 経営者ビュー":
                                     int(use_holiday_overrides.get(emp_name, 0) or 0),
                                     int(requested_days),
                                 )
+                                use_exact_holiday_days[emp_name] = int(requested_days)
                         # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
                         use_prev_month = []
                         use_consec_exceptions = []
@@ -3115,6 +3150,9 @@ if mode == "📊 経営者ビュー":
                         use_preferred_work_groups = []
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = {}
+                        use_employee_max_consecutive_off = {}
                         use_preferred_consecutive_off = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
@@ -3129,6 +3167,9 @@ if mode == "📊 経営者ビュー":
                         use_preferred_work_groups = []
                         use_flexible_off = []
                         use_holiday_overrides = {}
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = {}
+                        use_employee_max_consecutive_off = {}
                         use_preferred_consecutive_off = []
                         use_prev_month = []
                         use_consec_exceptions = []
@@ -3181,6 +3222,12 @@ if mode == "📊 経営者ビュー":
                         generation_kwargs["preferred_work_groups"] = use_preferred_work_groups
                     if "preferred_consecutive_off" in generator_params:
                         generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
+                    if "exact_holiday_days" in generator_params:
+                        generation_kwargs["exact_holiday_days"] = use_exact_holiday_days
+                    if "employee_max_consecutive_work" in generator_params:
+                        generation_kwargs["employee_max_consecutive_work"] = use_employee_max_consecutive_work
+                    if "employee_max_consecutive_off" in generator_params:
+                        generation_kwargs["employee_max_consecutive_off"] = use_employee_max_consecutive_off
                     if "monthly_store_count_rules" in generator_params:
                         generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
                     if "strict_warning_constraints" in generator_params:
@@ -3220,6 +3267,9 @@ if mode == "📊 経営者ビュー":
                             off_requests=use_off_requests,
                             prev_month=use_prev_month,
                             holiday_overrides=use_holiday_overrides,
+                            exact_holiday_days=use_exact_holiday_days,
+                            employee_max_consecutive_work=use_employee_max_consecutive_work,
+                            employee_max_consecutive_off=use_employee_max_consecutive_off,
                             default_holidays=rule_cfg.parameters.get("default_holiday_days", 8),
                             max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                             monthly_store_count_rules=use_monthly_store_count_rules,
@@ -3336,6 +3386,9 @@ if mode == "📊 経営者ビュー":
                     "requested_holiday_days": dict(
                         getattr(sub_data, "requested_holiday_days", {})
                     ),
+                    "exact_holiday_days": dict(use_exact_holiday_days),
+                    "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
+                    "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
@@ -3379,6 +3432,9 @@ if mode == "📊 経営者ビュー":
                         "preferred_work_groups": list(use_preferred_work_groups),
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
+                        "exact_holiday_days": dict(use_exact_holiday_days),
+                        "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
+                        "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     })
                     progress_area.empty()
@@ -3845,6 +3901,9 @@ if mode == "📊 経営者ビュー":
                     off_requests=_table_validation_context.get("off_requests", {}),
                     prev_month=_table_validation_context.get("prev_month", []),
                     holiday_overrides=_table_validation_context.get("holiday_overrides", {}),
+                    exact_holiday_days=_table_validation_context.get("exact_holiday_days", {}),
+                    employee_max_consecutive_work=_table_validation_context.get("employee_max_consecutive_work", {}),
+                    employee_max_consecutive_off=_table_validation_context.get("employee_max_consecutive_off", {}),
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                     monthly_store_count_rules=_table_validation_context.get("monthly_store_count_rules", []),
                 )
@@ -4183,6 +4242,9 @@ if mode == "📊 経営者ビュー":
                 off_requests=validation_context.get("off_requests", {}),
                 prev_month=validation_context.get("prev_month", []),
                 holiday_overrides=validation_context.get("holiday_overrides", {}),
+                exact_holiday_days=validation_context.get("exact_holiday_days", {}),
+                employee_max_consecutive_work=validation_context.get("employee_max_consecutive_work", {}),
+                employee_max_consecutive_off=validation_context.get("employee_max_consecutive_off", {}),
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                 monthly_store_count_rules=validation_context.get("monthly_store_count_rules", []),
             )
@@ -4369,10 +4431,16 @@ if mode == "📊 経営者ビュー":
             _v_off = _validation_context.get("off_requests", {})
             _v_prev = _validation_context.get("prev_month", [])
             _v_holiday = _validation_context.get("holiday_overrides", {})
+            _v_exact_holiday = _validation_context.get("exact_holiday_days", {})
+            _v_max_work = _validation_context.get("employee_max_consecutive_work", {})
+            _v_max_off = _validation_context.get("employee_max_consecutive_off", {})
             result = run_shift_validation(
                 shift=shift, work_requests=_v_work,
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
+                exact_holiday_days=_v_exact_holiday,
+                employee_max_consecutive_work=_v_max_work,
+                employee_max_consecutive_off=_v_max_off,
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                 monthly_store_count_rules=_validation_context.get("monthly_store_count_rules", []),
             )
@@ -4672,17 +4740,26 @@ if mode == "📊 経営者ビュー":
                     _cv_off = _cv_inputs.get("off_requests", {})
                     _cv_prev = _cv_inputs.get("prev_month", [])
                     _cv_holiday = _cv_inputs.get("holiday_overrides", {})
+                    _cv_exact_holiday = _cv_inputs.get("exact_holiday_days", {})
+                    _cv_max_work = _cv_inputs.get("employee_max_consecutive_work", {})
+                    _cv_max_off = _cv_inputs.get("employee_max_consecutive_off", {})
                     _cv_monthly_rules = _cv_inputs.get("monthly_store_count_rules", [])
                 else:
                     _cv_work = []
                     _cv_off = {}
                     _cv_prev = []
                     _cv_holiday = {}
+                    _cv_exact_holiday = {}
+                    _cv_max_work = {}
+                    _cv_max_off = {}
                     _cv_monthly_rules = []
                 chat_result = run_shift_validation(
                     shift=display_shift, work_requests=_cv_work,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
+                    exact_holiday_days=_cv_exact_holiday,
+                    employee_max_consecutive_work=_cv_max_work,
+                    employee_max_consecutive_off=_cv_max_off,
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                     monthly_store_count_rules=_cv_monthly_rules,
                 )
