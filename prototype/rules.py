@@ -94,10 +94,11 @@ STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
 }
 
 # 1日全体の人数上限。
-# 通常は11人体制、13人までは許容、14人以上はNG。
+# 通常は11人体制。13人までを通常の許容範囲、14人は過去実績上の例外として扱う。
+# 15人以上は受け入れ不可。
 GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
     standard_total=11,
-    max_total=13,
+    max_total=14,
     over_standard_penalty=900,
 )
 

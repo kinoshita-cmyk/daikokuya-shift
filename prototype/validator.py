@@ -226,15 +226,16 @@ def _check_daily_staffing_limit(
                 ),
             ))
         elif total > GLOBAL_DAILY_STAFFING_LIMIT.standard_total:
+            is_exceptional_total = total >= GLOBAL_DAILY_STAFFING_LIMIT.max_total
             result.issues.append(Issue(
-                severity="INFO",
+                severity="WARNING" if is_exceptional_total else "INFO",
                 category="全体人数多め",
                 day=day,
                 employee=None,
                 message=(
                     f"全体の出勤人数が{total}名です"
                     f"（標準{GLOBAL_DAILY_STAFFING_LIMIT.standard_total}名、"
-                    f"許容{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名まで）"
+                    f"通常許容13名、例外{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名まで）"
                     f"／出勤者: {worker_str}"
                 ),
             ))
@@ -282,32 +283,41 @@ def _check_store_capacity(
             worker_str = ", ".join(worker_names) if worker_names else "(誰もいない)"
             all_store_workers = [a.employee for a in day_assignments if a.store == store]
             all_worker_str = ", ".join(all_store_workers) if all_store_workers else "(誰もいない)"
+            staffing_total = len(all_store_workers)
             yamamoto_present = any(
                 a.employee == YamamotoLogic.EMPLOYEE_NAME and a.store == store
                 for a in day_assignments
             )
             staffing_limit = STORE_STAFFING_LIMITS.get(store)
             if staffing_limit is not None:
-                if total > staffing_limit.max_total:
+                if staffing_total > staffing_limit.max_total:
+                    akabane_five_person_exception = (
+                        store == Store.AKABANE
+                        and staffing_total == staffing_limit.max_total + 1
+                    )
                     result.issues.append(Issue(
-                        severity="ERROR",
-                        category="店舗人数上限",
+                        severity="WARNING" if akabane_five_person_exception else "ERROR",
+                        category=(
+                            "店舗人数多め"
+                            if akabane_five_person_exception
+                            else "店舗人数上限"
+                        ),
                         day=day, employee=None,
                         message=(
-                            f"{store.display_name}が{total}名です"
-                            f"（最大{staffing_limit.max_total}名）"
-                            f"／配属: {worker_str}"
+                            f"{store.display_name}が{staffing_total}名です"
+                            f"（原則最大{staffing_limit.max_total}名）"
+                            f"／配属: {all_worker_str}"
                         ),
                     ))
-                elif total > staffing_limit.standard_total:
+                elif staffing_total > staffing_limit.standard_total:
                     result.issues.append(Issue(
                         severity="WARNING",
                         category="店舗人数多め",
                         day=day, employee=None,
                         message=(
-                            f"{store.display_name}が{total}名です"
+                            f"{store.display_name}が{staffing_total}名です"
                             f"（標準{staffing_limit.standard_total}名）"
-                            f"／配属: {worker_str}"
+                            f"／配属: {all_worker_str}"
                         ),
                     ))
 

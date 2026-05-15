@@ -140,6 +140,12 @@ TARGET_OVERAGE_PENALTY = 120
 MONTHLY_RULE_REWARD = 1800
 MONTHLY_RULE_PENALTY = 2200
 
+# 南さんのような「出勤希望日のみ稼働」のパートは年間目標日数を持たないため、
+# 放っておくと全体人数を削る最適化で全休になりやすい。過去実績に合わせ、
+# 候補日が十分ある月は8日程度の勤務を目標にする。
+ONLY_ON_REQUEST_TARGET_DAYS = 8
+ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
+
 
 def generate_shift(
     year: int,
@@ -867,8 +873,25 @@ def generate_shift(
     # 目標出勤日数への近づき度（不足分を強くペナルティ）
     target_penalty_terms = []
     target_overage_terms = []
+    only_on_request_shortfall_terms = []
     for e in main_employees:
         if e.annual_target_days is None:
+            if getattr(e, "only_on_request_days", False):
+                allowed_days = sorted(request_allowed_days_by_employee.get(e.name, set()))
+                if allowed_days:
+                    target_monthly = min(
+                        ONLY_ON_REQUEST_TARGET_DAYS,
+                        len(allowed_days),
+                    )
+                    actual = sum(1 - off[e.name][d] for d in days)
+                    shortfall = model.NewIntVar(
+                        0,
+                        days_in_month,
+                        f"only_request_shortfall_{e.name}",
+                    )
+                    model.Add(shortfall >= target_monthly - actual)
+                    model.Add(shortfall >= 0)
+                    only_on_request_shortfall_terms.append(shortfall)
             continue
         requested_off_count = len(set(off_requests.get(e.name, [])))
         target_monthly = min(
@@ -892,6 +915,12 @@ def generate_shift(
         obj = obj - TARGET_SHORTFALL_PENALTY * sum(target_penalty_terms)
     if target_overage_terms:
         obj = obj - TARGET_OVERAGE_PENALTY * sum(target_overage_terms)
+    if only_on_request_shortfall_terms:
+        obj = (
+            obj
+            - ONLY_ON_REQUEST_SHORTFALL_PENALTY
+            * sum(only_on_request_shortfall_terms)
+        )
     if over_standard_staffing_terms:
         # 月間目標日数を満たすために店舗人数が膨らみすぎないよう、
         # 店舗ごとの標準人数超過を強く抑える。
