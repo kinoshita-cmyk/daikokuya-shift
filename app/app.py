@@ -107,6 +107,120 @@ def load_rule_ledger_v1() -> dict:
     return {**fallback, **data}
 
 
+def build_employee_suitability_rows_from_master() -> list[dict]:
+    """台帳の店舗適性欄が空の場合、現在の従業員マスターから表示用に作る。"""
+    try:
+        from prototype.employee_config import get_all_employees_including_retired
+        from prototype.models import Affinity, Role, Store
+    except Exception:
+        return []
+
+    store_order = [
+        Store.AKABANE,
+        Store.HIGASHIGUCHI,
+        Store.OMIYA,
+        Store.NISHIGUCHI,
+        Store.SUZURAN,
+    ]
+    affinity_bucket = {
+        Affinity.STRONG: "強",
+        Affinity.MEDIUM: "中",
+        Affinity.WEAK: "弱",
+        Affinity.NONE: "不可",
+    }
+    rows = []
+    try:
+        employees = get_all_employees_including_retired()
+    except Exception:
+        return []
+
+    for emp in employees:
+        if getattr(emp, "role", None) in (Role.REPRESENTATIVE, Role.ADVISOR):
+            continue
+        if getattr(emp, "is_auxiliary", False):
+            continue
+        grouped = {"強": [], "中": [], "弱": [], "不可": []}
+        affinities = getattr(emp, "affinities", {}) or {}
+        for store in store_order:
+            bucket = affinity_bucket.get(affinities.get(store, Affinity.NONE), "不可")
+            grouped[bucket].append(store.display_name)
+        rows.append({
+            "氏名": getattr(emp, "name", ""),
+            "主担当・強": "、".join(grouped["強"]) or "-",
+            "通常対応・中": "、".join(grouped["中"]) or "-",
+            "応援・巡回・弱": "、".join(grouped["弱"]) or "-",
+            "原則不可": "、".join(grouped["不可"]) or "-",
+            "備考": getattr(emp, "notes", "") or "",
+        })
+    return rows
+
+
+def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
+    """台帳の数値基準欄が空の場合、現在の本設定から表示用に作る。"""
+    return [
+        {
+            "分類": "絶対条件",
+            "項目": "最大連勤日数",
+            "現在値": str(parameters.get("max_consec_work", 5)),
+            "備考": "この日数を超える連勤はエラー扱い。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "推奨連勤上限",
+            "現在値": str(parameters.get("soft_consec_threshold", 4)),
+            "備考": "この日数を超えると、生成時にできるだけ避ける。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "既定の月内最低休日数",
+            "現在値": str(parameters.get("default_holiday_days", 8)),
+            "備考": "個別指定がない従業員の基本休日数。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "2連休 月内最低回数",
+            "現在値": str(parameters.get("min_2off_per_month", 1)),
+            "備考": "原則として月内に確保したい2連休の最低回数。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "2連休 月内最大回数",
+            "現在値": str(parameters.get("max_2off_per_month", 2)),
+            "備考": "取りすぎ確認用の目安。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "店舗標準人数",
+            "現在値": "赤羽3 / 東口1 / 大宮3 / すずらん3 / 西口1",
+            "備考": "生成時は標準人数に寄せる。研修や不足時は例外あり。",
+        },
+        {
+            "分類": "絶対条件",
+            "項目": "店舗最大人数",
+            "現在値": "赤羽4 / 東口1 / 大宮4 / すずらん4 / 西口2",
+            "備考": "赤羽・大宮の5名は原則NG。4月3日などの特殊日は月別例外で扱う。",
+        },
+        {
+            "分類": "絶対条件",
+            "項目": "1日全体人数上限",
+            "現在値": "通常許容13名 / 例外14名 / 15名以上不可",
+            "備考": "通常は11名体制。14名は特殊日扱い。",
+        },
+        {
+            "分類": "運用設定",
+            "項目": "ソルバー最大実行時間",
+            "現在値": f"{parameters.get('solver_time_limit_seconds', 180)}秒",
+            "備考": "シフト自動生成に使う最大時間。",
+        },
+        {
+            "分類": "運用設定",
+            "項目": "ソルバーシード",
+            "現在値": str(parameters.get("solver_seed", 42)),
+            "備考": "同じ入力で同じ結果に近づけるための値。",
+        },
+    ]
+
+
 def load_admin_paid_leave_data() -> dict:
     """管理者が後から付けた有給調整を読み込む。"""
     if not ADMIN_PAID_LEAVE_FILE.exists():
@@ -6366,6 +6480,10 @@ elif mode == "⚙️ 設定":
         rule_inventory = list(ledger.get("rules", []))
         employee_suitability_rows = list(ledger.get("employee_store_suitability", []))
         numeric_ledger_rows = list(ledger.get("numeric_parameters", []))
+        if not employee_suitability_rows:
+            employee_suitability_rows = build_employee_suitability_rows_from_master()
+        if not numeric_ledger_rows:
+            numeric_ledger_rows = build_numeric_ledger_rows_from_parameters(cfg.parameters)
 
         category_counts = {}
         for row in rule_inventory:
@@ -6376,9 +6494,14 @@ elif mode == "⚙️ 設定":
         stat_cols[2].metric("弱い目標", category_counts.get("弱い目標", 0))
         stat_cols[3].metric("月別例外", category_counts.get("月別例外", 0))
 
-        filter_col1, filter_col2 = st.columns([1, 1])
-        categories = ["すべて"] + sorted({row["分類"] for row in rule_inventory})
-        rule_search = ""
+        category_order = ["絶対条件", "強い目標", "弱い目標", "月別例外"]
+        existing_categories = {row.get("分類", "") for row in rule_inventory}
+        categories = (
+            ["すべて"]
+            + [c for c in category_order if c in existing_categories]
+            + sorted(existing_categories - set(category_order) - {""})
+        )
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.1, 2, 0.8, 0.8])
         with filter_col1:
             selected_rule_category = st.selectbox(
                 "分類で絞り込み",
@@ -6386,21 +6509,41 @@ elif mode == "⚙️ 設定":
                 key="rule_inventory_category",
             )
         with filter_col2:
-            rule_search = st.text_input(
+            rule_search_input = st.text_input(
                 "キーワード検索",
-                key="rule_inventory_search",
+                key="rule_inventory_search_input",
                 placeholder="例: 牧野、赤羽、連勤",
             )
+        with filter_col3:
+            search_requested = st.button(
+                "検索する",
+                key="rule_inventory_search_button",
+                width="stretch",
+            )
+        with filter_col4:
+            clear_search_requested = st.button(
+                "クリア",
+                key="rule_inventory_clear_button",
+                width="stretch",
+            )
 
-        rule_search_normalized = rule_search.strip()
+        if search_requested:
+            st.session_state["rule_inventory_search_term"] = rule_search_input.strip()
+        if clear_search_requested:
+            st.session_state["rule_inventory_search_term"] = ""
+
+        rule_search_normalized = st.session_state.get("rule_inventory_search_term", "")
         visible_rule_inventory = [
             row for row in rule_inventory
-            if (selected_rule_category == "すべて" or row["分類"] == selected_rule_category)
+            if (selected_rule_category == "すべて" or row.get("分類") == selected_rule_category)
             and (
                 not rule_search_normalized
                 or rule_search_normalized in json.dumps(row, ensure_ascii=False)
             )
         ]
+        if rule_search_normalized:
+            st.caption(f"検索中: {rule_search_normalized}")
+        st.caption(f"表示中: {len(visible_rule_inventory)}件 / 台帳全体: {len(rule_inventory)}件")
         st.dataframe(
             visible_rule_inventory,
             width="stretch",
@@ -6417,19 +6560,31 @@ elif mode == "⚙️ 設定":
                 - **月別例外**: その月だけ追加・調整する条件です。
                 """
             )
-        with st.expander("従業員別の店舗適性（表示名を整理済み）", expanded=False):
-            st.dataframe(
-                employee_suitability_rows,
-                width="stretch",
-                hide_index=True,
-                height=360,
-            )
-        with st.expander("台帳に残した数値基準", expanded=False):
-            st.dataframe(
-                numeric_ledger_rows,
-                width="stretch",
-                hide_index=True,
-            )
+        with st.expander(
+            f"従業員別の店舗適性（{len(employee_suitability_rows)}件）",
+            expanded=True,
+        ):
+            if employee_suitability_rows:
+                st.dataframe(
+                    employee_suitability_rows,
+                    width="stretch",
+                    hide_index=True,
+                    height=360,
+                )
+            else:
+                st.warning("店舗適性を表示できません。従業員マスターと台帳ファイルを確認してください。")
+        with st.expander(
+            f"台帳に残した数値基準（{len(numeric_ledger_rows)}件）",
+            expanded=True,
+        ):
+            if numeric_ledger_rows:
+                st.dataframe(
+                    numeric_ledger_rows,
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.warning("数値基準を表示できません。ルール設定ファイルを確認してください。")
         st.caption(
             f"ルール台帳 v{ledger.get('version', '1.0')} は "
             f"`config/rule_ledger_v1_0.json` にバックアップとして保存されています。"
