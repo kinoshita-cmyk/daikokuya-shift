@@ -15,11 +15,11 @@
         "AKABANE": "強",
         "HIGASHIGUCHI": "弱",
         "NISHIGUCHI": "弱",
-        "OMIYA": "不可",
-        "SUZURAN": "不可"
+        "OMIYA": "弱",
+        "SUZURAN": "弱"
       },
       "annual_target_days": 280,
-      "notes": "赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填",
+      "notes": "赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填。月数回は他店舗巡回あり",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -90,11 +90,11 @@
         "OMIYA": "強",
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "弱",
-        "AKABANE": "不可",
-        "SUZURAN": "不可"
+        "AKABANE": "弱",
+        "SUZURAN": "弱"
       },
       "annual_target_days": 268,
-      "notes": "大宮強。東口1名体制は当面不可。月次ルールで西口研修配置の候補",
+      "notes": "大宮強。赤羽・すずらん巡回あり。東口単独NG。西口は月次ルールで楯との研修時のみ",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -314,12 +314,12 @@
       "affinities": {
         "OMIYA": "強",
         "SUZURAN": "弱",
-        "AKABANE": "不可",
+        "AKABANE": "弱",
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": 260,
-      "notes": "大宮強、すずらん弱",
+      "notes": "大宮強、すずらん弱。月に数回はすずらん、状況により赤羽応援あり",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -365,11 +365,11 @@
         "SUZURAN": "強",
         "OMIYA": "弱",
         "NISHIGUCHI": "弱",
-        "AKABANE": "不可",
+        "AKABANE": "弱",
         "HIGASHIGUCHI": "不可"
       },
       "annual_target_days": 265,
-      "notes": "すずらん強、大宮弱、1日の総人数過剰時は西口へ移動。新入社員（将来的には258日に調整予定）",
+      "notes": "すずらん強、大宮弱、赤羽弱。1日の総人数過剰時は西口へ移動。新入社員（将来的には258日に調整予定）",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
