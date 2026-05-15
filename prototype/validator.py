@@ -27,6 +27,7 @@ from .rules import (
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
     get_capacity, OFF_MAIN_STORE_MINIMUMS,
+    STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER,
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
@@ -113,6 +114,9 @@ def validate(
     off_requests: Optional[dict[str, list[int]]] = None,
     prev_month: Optional[list[PreviousMonthCarryover]] = None,
     holiday_overrides: Optional[dict[str, int]] = None,
+    exact_holiday_days: Optional[dict[str, int]] = None,
+    employee_max_consecutive_work: Optional[dict[str, int]] = None,
+    employee_max_consecutive_off: Optional[dict[str, int]] = None,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     max_consec: Optional[int] = None,
     allow_omiya_short: bool = True,
@@ -134,6 +138,9 @@ def validate(
     off_requests = off_requests or {}
     prev_month = prev_month or []
     holiday_overrides = holiday_overrides or {}
+    exact_holiday_days = exact_holiday_days or {}
+    employee_max_consecutive_work = employee_max_consecutive_work or {}
+    employee_max_consecutive_off = employee_max_consecutive_off or {}
     monthly_store_count_rules = monthly_store_count_rules or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -148,13 +155,24 @@ def validate(
     _check_eco_placement(shift, result, days_in_month)
 
     # 4. 連勤チェック
-    _check_consecutive_work(shift, result, days_in_month, prev_month, max_consec=max_consec)
+    _check_consecutive_work(
+        shift, result, days_in_month, prev_month,
+        max_consec=max_consec,
+        employee_max_consecutive_work=employee_max_consecutive_work,
+    )
 
     # 5. 休日日数チェック
-    _check_holiday_days(shift, result, days_in_month, holiday_overrides, default_holidays)
+    _check_holiday_days(
+        shift, result, days_in_month,
+        holiday_overrides, default_holidays,
+        exact_holiday_days=exact_holiday_days,
+    )
 
     # 6. 連休チェック（2連休回数、3連休確認）
-    _check_consecutive_off(shift, result, days_in_month, off_requests)
+    _check_consecutive_off(
+        shift, result, days_in_month, off_requests,
+        employee_max_consecutive_off=employee_max_consecutive_off,
+    )
 
     # 7. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
@@ -171,16 +189,19 @@ def validate(
     # 11. 楯・春山・長尾のメイン店舗外勤務チェック
     _check_required_off_main_store_days(shift, result)
 
-    # 12. 月別の追加配置ルールチェック
+    # 12. 標準巡回配置チェック
+    _check_store_rotation_minimums(shift, result)
+
+    # 13. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 13. 牧野さんの東口・西口研修ルールチェック
+    # 14. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 14. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 15. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 15. 統計情報の集計
+    # 16. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -471,16 +492,26 @@ def _check_consecutive_work(
     shift: MonthlyShift, result: ValidationResult, days: int,
     prev_month: list[PreviousMonthCarryover],
     max_consec: Optional[int] = None,
+    employee_max_consecutive_work: Optional[dict[str, int]] = None,
 ) -> None:
     """最大連勤チェック（前月持ち越し含む）"""
     if max_consec is None:
         max_consec = HARD_CONSTRAINTS["max_consecutive_work_days"]
+    employee_max_consecutive_work = employee_max_consecutive_work or {}
 
     for emp in ALL_EMPLOYEES:
         if not emp.is_shift_eligible:
             continue
-        if emp.name in CONSTRAINT_EXCLUDED and emp.name not in CONSEC_WORK_CHECK_APPLIES:
+        if (
+            emp.name in CONSTRAINT_EXCLUDED
+            and emp.name not in CONSEC_WORK_CHECK_APPLIES
+            and emp.name not in employee_max_consecutive_work
+        ):
             continue
+        emp_max_consec = min(
+            int(max_consec),
+            int(employee_max_consecutive_work.get(emp.name, max_consec)),
+        )
 
         # 前月最終日からの連続出勤日数を取得
         prev_consec = 0
@@ -504,12 +535,12 @@ def _check_consecutive_work(
             is_working = a is not None and a.store != Store.OFF and not emp.is_auxiliary
             if is_working:
                 consec += 1
-                if consec > max_consec:
+                if consec > emp_max_consec:
                     result.issues.append(Issue(
                         severity="ERROR",
                         category="連勤",
                         day=day, employee=emp.name,
-                        message=f"{consec}連勤（上限{max_consec}）",
+                        message=f"{consec}連勤（上限{emp_max_consec}）",
                     ))
             else:
                 consec = 0
@@ -518,12 +549,18 @@ def _check_consecutive_work(
 def _check_holiday_days(
     shift: MonthlyShift, result: ValidationResult, days: int,
     overrides: dict[str, int], default_days: int,
+    exact_holiday_days: Optional[dict[str, int]] = None,
 ) -> None:
     """月内の休日日数チェック"""
+    exact_holiday_days = exact_holiday_days or {}
     for emp in ALL_EMPLOYEES:
         if not emp.is_shift_eligible:
             continue
-        if emp.name in CONSTRAINT_EXCLUDED and emp.name not in overrides:
+        if (
+            emp.name in CONSTRAINT_EXCLUDED
+            and emp.name not in overrides
+            and emp.name not in exact_holiday_days
+        ):
             continue
 
         required = overrides.get(emp.name, default_days)
@@ -531,7 +568,16 @@ def _check_holiday_days(
             1 for day in range(1, days + 1)
             if (a := shift.get_assignment(emp.name, day)) is None or a.store == Store.OFF
         )
-        if actual_off < required:
+        if emp.name in exact_holiday_days:
+            expected = int(exact_holiday_days[emp.name])
+            if actual_off != expected:
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="休日数",
+                    day=None, employee=emp.name,
+                    message=f"休日{actual_off}日（指定{expected}日）",
+                ))
+        elif actual_off < required:
             result.issues.append(Issue(
                 severity="ERROR",
                 category="休日数",
@@ -543,15 +589,17 @@ def _check_holiday_days(
 def _check_consecutive_off(
     shift: MonthlyShift, result: ValidationResult, days: int,
     off_requests: dict[str, list[int]],
+    employee_max_consecutive_off: Optional[dict[str, int]] = None,
 ) -> None:
     """2連休回数（1〜2回）と3連休の確認"""
     min_2off = HARD_CONSTRAINTS["min_two_day_off_per_month"]
     max_2off = HARD_CONSTRAINTS["max_two_day_off_per_month"]
+    employee_max_consecutive_off = employee_max_consecutive_off or {}
 
     for emp in ALL_EMPLOYEES:
         if not emp.is_shift_eligible:
             continue
-        if emp.name in CONSTRAINT_EXCLUDED:
+        if emp.name in CONSTRAINT_EXCLUDED and emp.name not in employee_max_consecutive_off:
             continue
 
         emp_off_requests = set(off_requests.get(emp.name, []))
@@ -572,7 +620,15 @@ def _check_consecutive_off(
                     off_block = list(range(day - consec_off, day))
                     # 寛容版: 連休のうち1日でも希望休（または柔軟休み候補）が含まれていれば許容
                     has_request = any(d in emp_off_requests for d in off_block)
-                    if not has_request:
+                    emp_max_off = employee_max_consecutive_off.get(emp.name)
+                    if emp_max_off is not None and consec_off > int(emp_max_off):
+                        result.issues.append(Issue(
+                            severity="ERROR",
+                            category="連休",
+                            day=third_day, employee=emp.name,
+                            message=f"{consec_off}連休（上限{int(emp_max_off)}）",
+                        ))
+                    elif not has_request:
                         result.issues.append(Issue(
                             severity="WARNING",
                             category="3連休確認",
@@ -591,7 +647,15 @@ def _check_consecutive_off(
             if consec_off >= 3:
                 off_block = list(range(days - consec_off + 1, days + 1))
                 has_request = any(d in emp_off_requests for d in off_block)
-                if not has_request:
+                emp_max_off = employee_max_consecutive_off.get(emp.name)
+                if emp_max_off is not None and consec_off > int(emp_max_off):
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="連休",
+                        day=days, employee=emp.name,
+                        message=f"{consec_off}連休（上限{int(emp_max_off)}）",
+                    ))
+                elif not has_request:
                     result.issues.append(Issue(
                         severity="WARNING",
                         category="3連休確認",
@@ -602,6 +666,9 @@ def _check_consecutive_off(
                             "。人数過多などの事情があれば許容可能です。"
                         ),
                     ))
+
+        if emp.name in CONSTRAINT_EXCLUDED:
+            continue
 
         if two_off_count < min_2off:
             result.issues.append(Issue(
@@ -715,7 +782,7 @@ def _check_higashiguchi_monday_closed(
 def _check_required_off_main_store_days(
     shift: MonthlyShift, result: ValidationResult,
 ) -> None:
-    """楯・春山・長尾が月3日以上メイン店舗以外で勤務しているか。"""
+    """指定スタッフが月3日以上メイン店舗以外で勤務しているか。"""
     for emp_name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
         outside_days = [
             a.day for a in shift.assignments
@@ -731,6 +798,31 @@ def _check_required_off_main_store_days(
                 message=(
                     f"メイン店舗（{main_store.display_name}）以外の勤務が"
                     f"{len(outside_days)}日です。最低{min_count}日必要です。"
+                ),
+            ))
+
+
+def _check_store_rotation_minimums(
+    shift: MonthlyShift, result: ValidationResult,
+) -> None:
+    """固定しすぎを避けるための巡回配置が最低限入っているか。"""
+    for emp_name, rules in STORE_ROTATION_MINIMUMS.items():
+        for stores, min_count in rules:
+            days = [
+                a.day for a in shift.assignments
+                if a.employee == emp_name and a.store in stores
+            ]
+            if len(days) >= min_count:
+                continue
+            store_label = "・".join(store.display_name for store in stores)
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="巡回配置",
+                day=None,
+                employee=emp_name,
+                message=(
+                    f"{store_label}への巡回が{len(days)}日です。"
+                    f"最低{min_count}日必要です。"
                 ),
             ))
 

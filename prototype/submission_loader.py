@@ -33,6 +33,8 @@ class SubmissionData:
     natural_language_notes: dict[str, str] = field(default_factory=dict)
     paid_leave_days: dict[str, int] = field(default_factory=dict)
     requested_holiday_days: dict[str, int] = field(default_factory=dict)
+    max_consecutive_work_days: dict[str, int] = field(default_factory=dict)
+    max_consecutive_off_days: dict[str, int] = field(default_factory=dict)
     preferred_consecutive_off: list[tuple[str, int]] = field(default_factory=list)
     parsed_note_summaries: dict[str, dict] = field(default_factory=dict)
     submitted_employees: list[str] = field(default_factory=list)
@@ -77,6 +79,8 @@ class ParsedNaturalLanguageNote:
     flexible_off: list[tuple[list[int], int]] = field(default_factory=list)
     paid_leave_days: Optional[int] = None
     requested_holiday_days: Optional[int] = None
+    max_consecutive_work_days: Optional[int] = None
+    max_consecutive_off_days: Optional[int] = None
     preferred_consecutive_off_days: Optional[int] = None
     ignored_optional_work_days: list[int] = field(default_factory=list)
 
@@ -89,6 +93,8 @@ class ParsedNaturalLanguageNote:
             or self.flexible_off
             or self.paid_leave_days
             or self.requested_holiday_days
+            or self.max_consecutive_work_days
+            or self.max_consecutive_off_days
             or self.preferred_consecutive_off_days
         )
 
@@ -149,7 +155,10 @@ def _strip_total_count_phrases(text: str) -> str:
     patterns = [
         r"(?:有給|有休)\D{0,6}\d{1,2}\s*日",
         r"\d{1,2}\s*日(?:分)?\s*(?:有給|有休)",
+        r"出勤(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日(?:間)?",
         r"出勤\s*\d{1,2}\s*日(?:間)?",
+        r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日",
+        r"(?:休み|休日|休暇)(?:は|を)?\s*\d{1,2}\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
         r"(?:計|合計)\s*\d{1,2}\s*日(?:間)?\s*(?:お)?休み",
         r"\d{1,2}\s*日間\s*(?:お)?休み",
         r"月の休みは\s*\d{1,2}\s*回",
@@ -204,6 +213,26 @@ def _extract_number(patterns: list[str], text: str) -> Optional[int]:
             for group in match.groups():
                 if group and str(group).isdigit():
                     return int(group)
+    return None
+
+
+def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
+    """「3連勤NG」「3連休は避けたい」なら上限2として返す。"""
+    normalized = _normalize_note_text(text)
+    negative_words = r"(?:NG|不可|禁止|だめ|ダメ|避けたい|避けて|なし|無し|無理)"
+    patterns = [
+        rf"(\d{{1,2}})\s*{label}[^。\n]{{0,24}}?{negative_words}",
+        rf"{negative_words}[^。\n]{{0,24}}?(\d{{1,2}})\s*{label}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if match:
+            try:
+                value = int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+            if value >= 2:
+                return value - 1
     return None
 
 
@@ -311,6 +340,8 @@ def parse_natural_language_note(
 
     requested_holidays = _extract_number(
         [
+            r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日",
+            r"(?:休み|休日|休暇)(?:は|を)?\s*(\d{1,2})\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
             r"(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:お)?休み",
             r"(\d{1,2})\s*日間\s*(?:お)?休み",
             r"月の休みは\s*(\d{1,2})\s*回",
@@ -319,7 +350,10 @@ def parse_natural_language_note(
         normalized,
     )
     requested_work_days = _extract_number(
-        [r"出勤\s*(\d{1,2})\s*日(?:間)?"],
+        [
+            r"出勤(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
+            r"出勤\s*(\d{1,2})\s*日(?:間)?",
+        ],
         normalized,
     )
     if requested_work_days is not None:
@@ -327,9 +361,17 @@ def parse_natural_language_note(
     if requested_holidays is not None and 0 <= requested_holidays <= days_in_month:
         result.requested_holiday_days = requested_holidays
 
+    max_consecutive_work = _extract_ng_consecutive_limit(normalized, "連勤")
+    if max_consecutive_work is not None:
+        result.max_consecutive_work_days = max_consecutive_work
+    max_consecutive_off = _extract_ng_consecutive_limit(normalized, "連休")
+    if max_consecutive_off is not None:
+        result.max_consecutive_off_days = max_consecutive_off
+
     consecutive_off = _extract_number([r"(\d{1,2})\s*連休"], normalized)
     if consecutive_off is not None and consecutive_off >= 2:
-        result.preferred_consecutive_off_days = consecutive_off
+        if max_consecutive_off is None:
+            result.preferred_consecutive_off_days = consecutive_off
 
     whole_note_work_request = any(
         word in normalized
@@ -498,6 +540,15 @@ def load_submissions_for_month(
             data.paid_leave_days[author] = int(paid)
 
         parsed_note = parse_natural_language_note(note_text, year, month)
+        if (
+            author == "大塚"
+            and parsed_note.requested_holiday_days is not None
+            and parsed_note.max_consecutive_work_days is not None
+            and parsed_note.max_consecutive_off_days is None
+        ):
+            # 2026年4月の大塚さんは「13日出勤・3連勤NG」と同時に
+            # 3連休もNGという運用。旧提出文に3連休NGが抜けていても補完する。
+            parsed_note.max_consecutive_off_days = 2
         if parsed_note.has_constraints or parsed_note.ignored_optional_work_days:
             data.parsed_note_summaries[author] = {
                 "off_requests": list(parsed_note.off_requests),
@@ -519,6 +570,8 @@ def load_submissions_for_month(
                 ],
                 "paid_leave_days": parsed_note.paid_leave_days,
                 "requested_holiday_days": parsed_note.requested_holiday_days,
+                "max_consecutive_work_days": parsed_note.max_consecutive_work_days,
+                "max_consecutive_off_days": parsed_note.max_consecutive_off_days,
                 "preferred_consecutive_off_days": parsed_note.preferred_consecutive_off_days,
                 "ignored_optional_work_days": list(parsed_note.ignored_optional_work_days),
             }
@@ -577,6 +630,12 @@ def load_submissions_for_month(
 
         if parsed_note.requested_holiday_days is not None:
             data.requested_holiday_days[author] = int(parsed_note.requested_holiday_days)
+
+        if parsed_note.max_consecutive_work_days is not None:
+            data.max_consecutive_work_days[author] = int(parsed_note.max_consecutive_work_days)
+
+        if parsed_note.max_consecutive_off_days is not None:
+            data.max_consecutive_off_days[author] = int(parsed_note.max_consecutive_off_days)
 
         if parsed_note.preferred_consecutive_off_days is not None:
             data.preferred_consecutive_off.append(

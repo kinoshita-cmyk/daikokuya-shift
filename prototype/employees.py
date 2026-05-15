@@ -34,11 +34,11 @@ ECO_STAFF: list[Employee] = [
             Store.AKABANE: Affinity.STRONG,
             Store.HIGASHIGUCHI: Affinity.WEAK,    # 月1回のみ
             Store.NISHIGUCHI: Affinity.WEAK,      # 不足時補填
-            Store.OMIYA: Affinity.NONE,
-            Store.SUZURAN: Affinity.NONE,
+            Store.OMIYA: Affinity.WEAK,           # 巡回・応援で少数あり
+            Store.SUZURAN: Affinity.WEAK,         # 巡回・応援で少数あり
         },
         annual_target_days=280,
-        notes="赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填",
+        notes="赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填。月数回は他店舗巡回あり",
     ),
     Employee(
         name="鈴木",
@@ -84,11 +84,11 @@ ECO_STAFF: list[Employee] = [
             Store.OMIYA: Affinity.STRONG,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 当面、東口1名体制は不可
             Store.NISHIGUCHI: Affinity.WEAK,      # 月次ルールで研修配置する候補
-            Store.AKABANE: Affinity.NONE,
-            Store.SUZURAN: Affinity.NONE,
+            Store.AKABANE: Affinity.WEAK,         # 巡回・応援で少数あり
+            Store.SUZURAN: Affinity.WEAK,         # 巡回・応援で少数あり
         },
         annual_target_days=268,
-        notes="大宮強。東口1名体制は当面不可。月次ルールで西口研修配置の候補",
+        notes="大宮強。赤羽・すずらん巡回あり。東口単独NG。西口は月次ルールで楯との研修時のみ",
     ),
     Employee(
         name="春山",
@@ -241,12 +241,12 @@ TICKET_STAFF: list[Employee] = [
         affinities={
             Store.OMIYA: Affinity.STRONG,
             Store.SUZURAN: Affinity.WEAK,
-            Store.AKABANE: Affinity.NONE,
+            Store.AKABANE: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
         annual_target_days=260,
-        notes="大宮強、すずらん弱",
+        notes="大宮強、すずらん弱。月に数回はすずらん、状況により赤羽応援あり",
     ),
     Employee(
         name="野澤",
@@ -274,11 +274,11 @@ TICKET_STAFF: list[Employee] = [
             Store.SUZURAN: Affinity.STRONG,
             Store.OMIYA: Affinity.WEAK,
             Store.NISHIGUCHI: Affinity.WEAK,    # 1日の総人数過剰時の調整先
-            Store.AKABANE: Affinity.NONE,
+            Store.AKABANE: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
         },
         annual_target_days=265,  # 新入社員。将来的には265-7=258日に調整予定
-        notes="すずらん強、大宮弱、1日の総人数過剰時は西口へ移動。新入社員（将来的には258日に調整予定）",
+        notes="すずらん強、大宮弱、赤羽弱。1日の総人数過剰時は西口へ移動。新入社員（将来的には258日に調整予定）",
     ),
     Employee(
         name="南",

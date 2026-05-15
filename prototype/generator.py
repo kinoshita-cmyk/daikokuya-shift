@@ -37,6 +37,7 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
+    STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
 )
@@ -155,6 +156,9 @@ def generate_shift(
     prev_month: list[PreviousMonthCarryover],
     flexible_off: Optional[list[tuple[str, list[int], int]]] = None,
     holiday_overrides: Optional[dict[str, int]] = None,
+    exact_holiday_days: Optional[dict[str, int]] = None,
+    employee_max_consecutive_work: Optional[dict[str, int]] = None,
+    employee_max_consecutive_off: Optional[dict[str, int]] = None,
     preferred_work_requests: Optional[list[tuple[str, int, Optional[Store]]]] = None,
     preferred_work_groups: Optional[list[tuple[str, list[int], int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
@@ -183,6 +187,9 @@ def generate_shift(
     """
     flexible_off = flexible_off or []
     holiday_overrides = holiday_overrides or {}
+    exact_holiday_days = exact_holiday_days or {}
+    employee_max_consecutive_work = employee_max_consecutive_work or {}
+    employee_max_consecutive_off = employee_max_consecutive_off or {}
     preferred_work_requests = preferred_work_requests or []
     preferred_work_groups = preferred_work_groups or []
     preferred_consecutive_off = preferred_consecutive_off or []
@@ -298,6 +305,21 @@ def generate_shift(
             normalized_preferred_consecutive_off.append((name, block_len_int))
     preferred_consecutive_off = normalized_preferred_consecutive_off
     yamamoto_off_days = set(off_requests.get("山本", []))
+    exact_holiday_days = {
+        name: int(value)
+        for name, value in exact_holiday_days.items()
+        if str(value).isdigit() and 0 <= int(value) <= days_in_month
+    }
+    employee_max_consecutive_work = {
+        name: int(value)
+        for name, value in employee_max_consecutive_work.items()
+        if str(value).isdigit() and 1 <= int(value) <= days_in_month
+    }
+    employee_max_consecutive_off = {
+        name: int(value)
+        for name, value in employee_max_consecutive_off.items()
+        if str(value).isdigit() and 1 <= int(value) <= days_in_month
+    }
 
     # ============================================================
     # CP-SAT モデルの構築
@@ -591,28 +613,34 @@ def generate_shift(
         if e.constraint_check_excluded and e.name != "大塚":
             continue
 
+        emp_hard_max = min(
+            hard_max_consec,
+            int(employee_max_consecutive_work.get(e.name, hard_max_consec)),
+        )
+
         # ハード制約：(hard_max_consec + 1)日窓内の出勤日数 ≤ hard_max_consec
         for start_day in days:
-            window_days = list(range(start_day, min(start_day + hard_max_consec + 1, days_in_month + 1)))
-            if len(window_days) < hard_max_consec + 1:
+            window_days = list(range(start_day, min(start_day + emp_hard_max + 1, days_in_month + 1)))
+            if len(window_days) < emp_hard_max + 1:
                 continue
             model.Add(
-                sum(1 - off[e.name][d] for d in window_days) <= hard_max_consec
+                sum(1 - off[e.name][d] for d in window_days) <= emp_hard_max
             )
 
         # ソフト制約：4連勤超え（5連勤）の発生数を計算してペナルティ
-        if hard_max_consec > soft_threshold:
+        emp_soft_threshold = min(soft_threshold, emp_hard_max)
+        if emp_hard_max > emp_soft_threshold:
             for start_day in days:
-                window_days = list(range(start_day, min(start_day + soft_threshold + 1, days_in_month + 1)))
-                if len(window_days) < soft_threshold + 1:
+                window_days = list(range(start_day, min(start_day + emp_soft_threshold + 1, days_in_month + 1)))
+                if len(window_days) < emp_soft_threshold + 1:
                     continue
                 # 4連勤超え判定: window 内の出勤数 > 4
                 over = model.NewBoolVar(f"over4_{e.name}_{start_day}")
                 model.Add(
-                    sum(1 - off[e.name][d] for d in window_days) >= soft_threshold + 1
+                    sum(1 - off[e.name][d] for d in window_days) >= emp_soft_threshold + 1
                 ).OnlyEnforceIf(over)
                 model.Add(
-                    sum(1 - off[e.name][d] for d in window_days) <= soft_threshold
+                    sum(1 - off[e.name][d] for d in window_days) <= emp_soft_threshold
                 ).OnlyEnforceIf(over.Not())
                 over_4_indicators.append(over)
 
@@ -620,8 +648,8 @@ def generate_shift(
         # 例：prev=3, hard_max=5 なら [5/1, 5/2, 5/3] のうち少なくとも1日は休み
         # （前月3連勤 + 5/1-3 全勤務 = 6連勤を防ぐ）
         if prev > 0 and e.name not in consec_exceptions:
-            window_size = hard_max_consec - prev + 1
-            allowed_work = hard_max_consec - prev
+            window_size = emp_hard_max - prev + 1
+            allowed_work = emp_hard_max - prev
             if window_size > 0 and allowed_work >= 0:
                 window = list(range(1, min(window_size + 1, days_in_month + 1)))
                 if window:
@@ -635,10 +663,18 @@ def generate_shift(
     for e in main_employees:
         if e.role == Role.ADVISOR:
             continue
-        if e.constraint_check_excluded and e.name not in holiday_overrides:
+        if (
+            e.constraint_check_excluded
+            and e.name not in holiday_overrides
+            and e.name not in exact_holiday_days
+        ):
             continue
         required_off = holiday_overrides.get(e.name, default_holidays)
-        model.Add(sum(off[e.name][d] for d in days) >= required_off)
+        off_total = sum(off[e.name][d] for d in days)
+        if e.name in exact_holiday_days:
+            model.Add(off_total == int(exact_holiday_days[e.name]))
+        else:
+            model.Add(off_total >= required_off)
 
     # ============================================================
     # 制約 10.5: 2連休を月1回以上
@@ -673,8 +709,16 @@ def generate_shift(
     # ============================================================
     for e in main_employees:
         if e.constraint_check_excluded or e.role == Role.ADVISOR:
-            continue
+            if e.name not in employee_max_consecutive_off:
+                continue
         emp_off_days = set(off_requests.get(e.name, []))
+        emp_max_off = int(employee_max_consecutive_off.get(e.name, 0) or 0)
+        if emp_max_off > 0:
+            for start in range(1, days_in_month - emp_max_off + 1):
+                window = list(range(start, start + emp_max_off + 1))
+                if len(window) == emp_max_off + 1:
+                    model.Add(sum(off[e.name][d] for d in window) <= emp_max_off)
+            continue
         # 柔軟休み候補日も除外対象に追加
         for fname, fcand_days, _ in (flexible_off or []):
             if fname == e.name:
@@ -713,6 +757,20 @@ def generate_shift(
         ]
         if outside_main:
             model.Add(sum(outside_main) >= int(min_count))
+
+    # 制約 13.5: 固定しすぎを避ける巡回配置
+    for name, rules in STORE_ROTATION_MINIMUMS.items():
+        if name not in main_employee_names:
+            continue
+        for stores, min_count in rules:
+            store_terms = [
+                x[name][d][s]
+                for d in days
+                for s in stores
+                if s in main_stores
+            ]
+            if store_terms:
+                model.Add(sum(store_terms) >= int(min_count))
 
     # ============================================================
     # 目的関数（ソフト制約）: 在勤要望の達成度を最大化
