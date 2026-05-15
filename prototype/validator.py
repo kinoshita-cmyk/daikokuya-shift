@@ -30,6 +30,7 @@ from .rules import (
     MAKINO_NISHIGUCHI_TRAINING_PARTNER,
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
+    get_monthly_work_target,
 )
 
 
@@ -948,12 +949,12 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
     会社方針として、月単位での過不足は他の月で調整しない運用のため。
     ただし経営判断材料として「目標 vs 実績」の数字は明示する。
     """
-    # 月別目標出勤日数の計算（年間基準を12分割したもの）
-    # 簡易版: 年間 / 12 を四捨五入。本来は月別に細かく按分（rules.py のロジック参照予定）
     def get_monthly_target(emp) -> Optional[int]:
-        if emp.annual_target_days is None:
-            return None
-        return round(emp.annual_target_days / 12)
+        return get_monthly_work_target(
+            emp.name,
+            shift.month,
+            emp.annual_target_days,
+        )
 
     # 各従業員の出勤日数・休日日数・目標達成度
     for emp in ALL_EMPLOYEES:
@@ -1018,7 +1019,9 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
     for emp in ALL_EMPLOYEES:
         if emp.is_auxiliary or emp.annual_target_days is None:
             continue
-        target = round(emp.annual_target_days / 12)
+        target = get_monthly_work_target(emp.name, shift.month, emp.annual_target_days)
+        if target is None:
+            continue
         actual = sum(
             1 for d in range(1, days + 1)
             if (a := shift.get_assignment(emp.name, d)) and a.store != Store.OFF

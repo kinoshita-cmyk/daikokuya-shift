@@ -8,7 +8,7 @@ from .paths import MAY_2026_SHIFT_XLSX
 from .validator import validate
 from .excel_loader import load_shift_from_excel
 from .may_2026_data import OFF_REQUESTS, WORK_REQUESTS, PREVIOUS_MONTH_CARRYOVER, FLEXIBLE_OFF_REQUESTS
-from .rules import MAY_2026_HOLIDAY_OVERRIDES
+from .rules import MAY_2026_HOLIDAY_OVERRIDES, get_monthly_work_target
 
 
 def categorize_issues(result) -> dict:
@@ -90,7 +90,7 @@ def main():
         a_work = sum(1 for d in range(1, days_in_month+1)
                      if (a := ai_shift.get_assignment(e.name, d)) and a.store != Store.OFF)
         a_off = days_in_month - a_work
-        target = round(e.annual_target_days / 12) if e.annual_target_days else "-"
+        target = get_monthly_work_target(e.name, 5, e.annual_target_days) or "-"
         print(f"  {e.name:<8} {f'{m_work}/{m_off}':<13} {f'{a_work}/{a_off}':<13} {target}")
 
     print("\n" + "=" * 70)

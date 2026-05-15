@@ -38,7 +38,7 @@ from .rules import (
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
-    GLOBAL_DAILY_STAFFING_LIMIT,
+    GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
 )
 
 
@@ -895,7 +895,7 @@ def generate_shift(
             continue
         requested_off_count = len(set(off_requests.get(e.name, [])))
         target_monthly = min(
-            round(e.annual_target_days / 12),
+            get_monthly_work_target(e.name, month, e.annual_target_days),
             max(0, days_in_month - requested_off_count),
         )
         actual = sum(1 - off[e.name][d] for d in days)

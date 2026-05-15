@@ -9,6 +9,7 @@
 """
 
 from dataclasses import dataclass
+from typing import Optional
 from .models import Store, Skill, OperationMode
 
 # ============================================================
@@ -101,6 +102,66 @@ GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
     max_total=14,
     over_standard_penalty=900,
 )
+
+
+# 月別の目標出勤日数（2025年7月〜2026年6月）。
+# 従来の「年間日数÷12」ではなく、管理側の月別表を優先する。
+# MAX行は暦日ではなく、12/31〜1/2の三が日休業を抜いた営業上の上限。
+MONTHLY_TARGET_MONTH_ORDER: tuple[int, ...] = (7, 8, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6)
+MONTHLY_MAX_WORK_DAYS: dict[int, int] = {
+    7: 31, 8: 31, 9: 30, 10: 31, 11: 30, 12: 30,
+    1: 29, 2: 28, 3: 31, 4: 30, 5: 31, 6: 30,
+}
+MONTHLY_WORK_TARGETS: dict[str, dict[int, int]] = {
+    "今津": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 23, 24, 23, 23, 22, 23, 24, 23, 24, 23))),
+    "板倉": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 22, 24, 22, 22, 22, 21, 24, 22, 24, 22))),
+    "長尾": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 22, 24, 22, 22, 21, 20, 24, 22, 24, 22))),
+    "楯": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 22, 24, 22, 21, 21, 20, 24, 22, 24, 22))),
+    "春山": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 21, 24, 21, 22, 21, 21, 24, 21, 24, 21))),
+    "牧野": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 21, 24, 21, 22, 21, 21, 24, 21, 24, 21))),
+    "鈴木": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (24, 24, 21, 24, 21, 22, 21, 20, 24, 21, 24, 21))),
+    "野澤": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 22, 23, 22, 22, 21, 20, 23, 23, 23, 22))),
+    "下地": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 22, 23, 21, 22, 21, 20, 23, 23, 23, 22))),
+    "田中": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 22, 23, 21, 22, 21, 20, 23, 23, 23, 22))),
+    "下田": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 22, 23, 21, 22, 21, 20, 23, 23, 23, 22))),
+    "大類": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 22, 23, 22, 21, 21, 20, 23, 23, 23, 22))),
+    "黒澤": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 21, 23, 21, 21, 20, 20, 23, 23, 23, 21))),
+    "岩野": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 21, 23, 21, 21, 20, 20, 23, 23, 23, 21))),
+    "土井": dict(zip(MONTHLY_TARGET_MONTH_ORDER, (23, 23, 21, 23, 21, 20, 20, 20, 23, 23, 23, 21))),
+}
+EMPLOYEE_TARGET_NAME_ALIASES: dict[str, str] = {
+    "今津悠貴": "今津",
+    "板倉七重": "板倉",
+    "長尾暁洋": "長尾",
+    "楯有史": "楯",
+    "春山廣植": "春山",
+    "春山廣直": "春山",
+    "牧野怜偉": "牧野",
+    "鈴木真美": "鈴木",
+    "野澤絵美": "野澤",
+    "下地里美": "下地",
+    "田中美紅": "田中",
+    "下田洋也": "下田",
+    "大類麻梨亜": "大類",
+    "黒澤彩夏": "黒澤",
+    "岩野衣里": "岩野",
+    "土井克彦": "土井",
+}
+
+
+def get_monthly_work_target(
+    employee_name: str,
+    month: int,
+    annual_target_days: Optional[int] = None,
+) -> Optional[int]:
+    """従業員の月別目標出勤日数を返す。未登録者は年間日数からの従来計算に戻す。"""
+    key = EMPLOYEE_TARGET_NAME_ALIASES.get(str(employee_name), str(employee_name))
+    monthly_targets = MONTHLY_WORK_TARGETS.get(key)
+    if monthly_targets is not None and int(month) in monthly_targets:
+        return int(monthly_targets[int(month)])
+    if annual_target_days is None:
+        return None
+    return round(int(annual_target_days) / 12)
 
 # 省人員モード（GW・お盆・SW等）
 REDUCED_CAPACITY: dict[Store, StoreCapacity] = {
