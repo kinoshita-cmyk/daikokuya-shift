@@ -239,6 +239,7 @@ from prototype.rules import (
     MAY_2026_HOLIDAY_OVERRIDES,
     STORE_KEYHOLDERS,
     SUZURAN_KEY_SUPPORT_FROM_OMIYA,
+    get_monthly_work_target,
 )
 
 
@@ -618,7 +619,11 @@ def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
     )
     try:
         employee = get_employee(name)
-        target = round(employee.annual_target_days / 12) if employee.annual_target_days else None
+        target = get_monthly_work_target(
+            employee.name,
+            shift.month,
+            employee.annual_target_days,
+        )
     except Exception:
         target = None
     if target is None:
@@ -1378,8 +1383,12 @@ def restore_validation_context_for_month(
     for emp_name, paid_days in effective_paid_leave_days.items():
         try:
             emp = get_employee(emp_name)
-            if emp.annual_target_days:
-                base_target = round(emp.annual_target_days / 12)
+            base_target = get_monthly_work_target(
+                emp.name,
+                int(month),
+                emp.annual_target_days,
+            )
+            if base_target:
                 holiday_overrides[emp_name] = days_in_month - base_target + int(paid_days)
         except Exception:
             pass
@@ -3054,8 +3063,12 @@ if mode == "📊 経営者ビュー":
                             try:
                                 from prototype.employees import get_employee
                                 emp = get_employee(emp_name)
-                                if emp.annual_target_days:
-                                    base_target = round(emp.annual_target_days / 12)
+                                base_target = get_monthly_work_target(
+                                    emp.name,
+                                    _saved_target_month,
+                                    emp.annual_target_days,
+                                )
+                                if base_target:
                                     base_holidays = days_in_m - base_target
                                     use_holiday_overrides[emp_name] = base_holidays + paid_days
                             except Exception:
@@ -4392,7 +4405,11 @@ if mode == "📊 経営者ビュー":
                 work = sum(1 for d in range(1, days_in_month+1)
                            if (a := shift.get_assignment(e.name, d)) and a.store != Store.OFF)
                 off = days_in_month - work
-                target = round(e.annual_target_days / 12) if e.annual_target_days else None
+                target = get_monthly_work_target(
+                    e.name,
+                    shift.month,
+                    e.annual_target_days,
+                )
                 diff = (work - target) if target else None
                 data.append({
                     "氏名": e.name,
@@ -5220,7 +5237,11 @@ elif mode == "👤 従業員ビュー":
         annual_target = None
 
     if annual_target:
-        monthly_target = round(annual_target / 12)
+        monthly_target = get_monthly_work_target(
+            selected,
+            target_month,
+            annual_target,
+        )
         base_holidays = days_in_month - monthly_target
     else:
         monthly_target = None
@@ -5371,7 +5392,11 @@ elif mode == "👤 従業員ビュー":
         annual_target = None
 
     if annual_target:
-        monthly_target = round(annual_target / 12)
+        monthly_target = get_monthly_work_target(
+            selected,
+            target_month,
+            annual_target,
+        )
         base_holidays = days_in_month - monthly_target
         st.caption(
             f"💡 **{selected}さんの今月の基準**: 勤務 {monthly_target}日 / 休み {base_holidays}日"
