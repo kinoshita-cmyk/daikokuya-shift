@@ -1792,9 +1792,7 @@ def render_scrollable_review_table(rows: list[dict]) -> None:
         return styles["自由"]
 
     html_parts = [
-        """
-        <div style="display:grid; gap:10px; margin:10px 0 14px 0; width:100%; max-width:100%;">
-        """,
+        '<div style="display:grid; gap:10px; margin:10px 0 14px 0; width:100%; max-width:100%;">',
     ]
     for row in rows:
         label = str(row.get("項目", ""))
@@ -1808,39 +1806,18 @@ def render_scrollable_review_table(rows: list[dict]) -> None:
             if day_text else ""
         )
         html_parts.append(
-            f'''
-            <div style="
-                background:{s["card"]};
-                border:1px solid {s["border"]};
-                border-radius:8px;
-                padding:10px 12px;
-                max-width:100%;
-                box-sizing:border-box;
-            ">
-              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
-                <span style="
-                    display:inline-flex;
-                    align-items:center;
-                    border-radius:999px;
-                    background:{s["badge"]};
-                    color:{s["badge_text"]};
-                    padding:5px 10px;
-                    font-size:14px;
-                    font-weight:800;
-                    line-height:1.2;
-                ">{escape(label)}</span>
-                {count_html}
-              </div>
-              <div style="
-                  margin-top:8px;
-                  color:#111827;
-                  font-size:14px;
-                  line-height:1.65;
-                  overflow-wrap:anywhere;
-                  word-break:break-word;
-              ">{content}</div>
-            </div>
-            '''
+            f'<div style="background:{s["card"]}; border:1px solid {s["border"]}; '
+            f'border-radius:8px; padding:10px 12px; max-width:100%; box-sizing:border-box;">'
+            f'<div style="display:flex; align-items:center; justify-content:space-between; '
+            f'gap:8px; flex-wrap:wrap;">'
+            f'<span style="display:inline-flex; align-items:center; border-radius:999px; '
+            f'background:{s["badge"]}; color:{s["badge_text"]}; padding:5px 10px; '
+            f'font-size:14px; font-weight:800; line-height:1.2;">{escape(label)}</span>'
+            f'{count_html}'
+            f'</div>'
+            f'<div style="margin-top:8px; color:#111827; font-size:14px; line-height:1.65; '
+            f'overflow-wrap:anywhere; word-break:break-word;">{content}</div>'
+            f'</div>'
         )
     html_parts.append("</div>")
     st.markdown("".join(html_parts), unsafe_allow_html=True)
