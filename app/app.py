@@ -5345,7 +5345,8 @@ elif mode == "👤 従業員ビュー":
             font-size: 20px;
             font-weight: 800;
             color: #111827;
-            margin: -1rem -1rem 12px -1rem;
+            margin: 0 0 12px 0;
+            border-radius: 8px 8px 0 0;
         }
         .employee-day-label {
             font-size: 17px;
@@ -5419,31 +5420,77 @@ elif mode == "👤 従業員ビュー":
         }
 
         @media (max-width: 640px) {
+            [class*="st-key-employee_answer_grid"] {
+                max-width: 100% !important;
+                overflow-x: hidden !important;
+                box-sizing: border-box !important;
+            }
+            [class*="st-key-employee_answer_grid"] * {
+                box-sizing: border-box !important;
+            }
             [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
                 display: flex !important;
                 flex-direction: row !important;
                 flex-wrap: nowrap !important;
                 align-items: center !important;
-                gap: 6px !important;
+                gap: 4px !important;
+                width: 100% !important;
+                max-width: 100% !important;
+                min-width: 0 !important;
+            }
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+                min-width: 0 !important;
+                padding: 0 !important;
             }
             [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
-                flex: 1 1 auto !important;
+                flex: 1 1 0 !important;
                 width: auto !important;
-                min-width: 94px !important;
+                min-width: 82px !important;
             }
             [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:not(:first-child) {
-                flex: 0 0 46px !important;
-                width: 46px !important;
-                min-width: 46px !important;
+                flex: 0 0 40px !important;
+                width: 40px !important;
+                min-width: 40px !important;
+                max-width: 40px !important;
             }
             [class*="st-key-pref_"] button {
-                max-width: 42px !important;
-                height: 42px !important;
-                min-height: 42px !important;
-                font-size: 21px !important;
+                max-width: 38px !important;
+                height: 38px !important;
+                min-height: 38px !important;
+                font-size: 20px !important;
+            }
+            [class*="st-key-pref_"] button p {
+                font-size: 20px !important;
             }
             .employee-day-label {
-                font-size: 16px;
+                font-size: 15px;
+                padding-left: 0;
+            }
+        }
+        @media (max-width: 380px) {
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
+                gap: 3px !important;
+            }
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+                min-width: 76px !important;
+            }
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:not(:first-child) {
+                flex-basis: 38px !important;
+                width: 38px !important;
+                min-width: 38px !important;
+                max-width: 38px !important;
+            }
+            [class*="st-key-pref_"] button {
+                max-width: 36px !important;
+                height: 36px !important;
+                min-height: 36px !important;
+                font-size: 19px !important;
+            }
+            [class*="st-key-pref_"] button p {
+                font-size: 19px !important;
+            }
+            .employee-day-label {
+                font-size: 14px;
             }
         }
         </style>
