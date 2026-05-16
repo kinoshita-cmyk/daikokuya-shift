@@ -5348,158 +5348,43 @@ elif mode == "👤 従業員ビュー":
             margin: 0 0 12px 0;
             border-radius: 8px 8px 0 0;
         }
-        .employee-day-label {
-            font-size: 17px;
-            font-weight: 800;
-            color: #111827;
-            padding: 8px 0 2px 2px;
-            white-space: nowrap;
+        [class*="st-key-choice_seg_"] {
+            margin: 4px 0 10px 0;
         }
-        .employee-day-label.sat { color: #2563eb; }
-        .employee-day-label.sun { color: #dc2626; }
-        .employee-row-divider {
-            border-top: 1px solid #f1f5f9;
-            margin: 4px 0 8px 0;
+        [class*="st-key-choice_seg_"] label p {
+            font-size: 16px !important;
+            font-weight: 800 !important;
+            color: #111827 !important;
+            margin-bottom: 4px !important;
         }
-
-        [class*="st-key-pref_"] button {
-            width: 100% !important;
-            max-width: 48px !important;
-            height: 44px !important;
-            min-height: 44px !important;
-            font-size: 22px !important;
-            font-weight: bold !important;
-            padding: 0 !important;
-            margin: 0 auto !important;
-            border-radius: 999px !important;
-            transition: all 0.15s ease;
+        [class*="st-key-choice_seg_"] button {
+            min-height: 42px !important;
+            font-size: 20px !important;
+            font-weight: 800 !important;
         }
-        [class*="st-key-pref_"] button p {
-            font-size: 22px !important;
+        [class*="st-key-choice_seg_"] button p {
+            font-size: 20px !important;
             line-height: 1 !important;
         }
-        [class*="st-key-pref_"] {
-            display: flex !important;
-            justify-content: center !important;
-        }
-
-        [class*="st-key-pref_ok_"] button[kind="primary"] {
-            background-color: #16a34a !important;
-            color: white !important;
-            border: 3px solid #15803d !important;
-            box-shadow: 0 3px 8px rgba(22,163,74,0.35) !important;
-        }
-        [class*="st-key-pref_ok_"] button[kind="secondary"] {
-            background-color: #f0fdf4 !important;
-            color: #166534 !important;
-            border: 2px solid #bbf7d0 !important;
-        }
-
-        [class*="st-key-pref_maybe_"] button[kind="primary"] {
-            background-color: #eab308 !important;
-            color: white !important;
-            border: 3px solid #ca8a04 !important;
-            box-shadow: 0 3px 8px rgba(234,179,8,0.35) !important;
-        }
-        [class*="st-key-pref_maybe_"] button[kind="secondary"] {
-            background-color: #fefce8 !important;
-            color: #854d0e !important;
-            border: 2px solid #fef08a !important;
-        }
-
-        [class*="st-key-pref_off_"] button[kind="primary"] {
-            background-color: #dc2626 !important;
-            color: white !important;
-            border: 3px solid #b91c1c !important;
-            box-shadow: 0 3px 8px rgba(220,38,38,0.35) !important;
-        }
-        [class*="st-key-pref_off_"] button[kind="secondary"] {
-            background-color: #fef2f2 !important;
-            color: #991b1b !important;
-            border: 2px solid #fecaca !important;
-        }
-
         @media (max-width: 640px) {
             [class*="st-key-employee_answer_grid"] {
                 max-width: 100% !important;
                 overflow-x: hidden !important;
-                box-sizing: border-box !important;
             }
-            [class*="st-key-employee_answer_grid"] * {
-                box-sizing: border-box !important;
+            [class*="st-key-choice_seg_"] {
+                margin-bottom: 8px;
             }
-            [class*="st-key-answer_row_"] {
-                max-width: 100% !important;
-                overflow-x: hidden !important;
+            [class*="st-key-choice_seg_"] label p {
+                font-size: 15px !important;
             }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] {
-                display: flex !important;
-                flex-direction: row !important;
-                flex-wrap: nowrap !important;
-                align-items: center !important;
-                gap: 4px !important;
-                width: 100% !important;
-                max-width: 100% !important;
-                min-width: 0 !important;
-            }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div {
-                min-width: 0 !important;
-                padding: 0 !important;
-            }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
-                flex: 0 0 92px !important;
-                width: 92px !important;
-                min-width: 92px !important;
-                max-width: 92px !important;
-                overflow: visible !important;
-            }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(n+2) {
-                flex: 0 0 40px !important;
-                width: 40px !important;
-                min-width: 40px !important;
-                max-width: 40px !important;
-            }
-            [class*="st-key-pref_"] button {
-                max-width: 38px !important;
-                height: 38px !important;
-                min-height: 38px !important;
-                font-size: 20px !important;
-            }
-            [class*="st-key-pref_"] button p {
-                font-size: 20px !important;
-            }
-            .employee-day-label {
-                font-size: 15px;
-                padding-left: 0;
-            }
-        }
-        @media (max-width: 380px) {
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] {
-                gap: 3px !important;
-            }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
-                flex-basis: 86px !important;
-                width: 86px !important;
-                min-width: 86px !important;
-                max-width: 86px !important;
-            }
-            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(n+2) {
-                flex-basis: 38px !important;
-                width: 38px !important;
-                min-width: 38px !important;
-                max-width: 38px !important;
-            }
-            [class*="st-key-pref_"] button {
-                max-width: 36px !important;
-                height: 36px !important;
-                min-height: 36px !important;
+            [class*="st-key-choice_seg_"] button {
+                min-height: 40px !important;
                 font-size: 19px !important;
+                padding-left: 0.65rem !important;
+                padding-right: 0.65rem !important;
             }
-            [class*="st-key-pref_"] button p {
+            [class*="st-key-choice_seg_"] button p {
                 font-size: 19px !important;
-            }
-            .employee-day-label {
-                font-size: 14px;
             }
         }
         </style>
@@ -5647,45 +5532,18 @@ elif mode == "👤 従業員ビュー":
             unsafe_allow_html=True,
         )
         for d in range(1, days_in_month + 1):
-            if d > 1:
-                st.markdown('<div class="employee-row-divider"></div>', unsafe_allow_html=True)
             wd = weekday_jp[date(target_year, target_month, d).weekday()]
-            wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
             current = prefs.get(d, "○")
-            with st.container(
-                horizontal=True,
-                vertical_alignment="center",
-                gap="small",
-                key=f"answer_row_{target_year}_{target_month}_{d}",
-            ):
-                st.markdown(
-                    f'<div class="employee-day-label {wd_class}">{target_month}.{d}({wd})</div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(
-                    "○",
-                    key=f"pref_ok_{target_year}_{target_month}_{d}",
-                    width="content",
-                    type="primary" if current == "○" else "secondary",
-                ):
-                    prefs[d] = "○"
-                    st.rerun()
-                if st.button(
-                    "△",
-                    key=f"pref_maybe_{target_year}_{target_month}_{d}",
-                    width="content",
-                    type="primary" if current == "△" else "secondary",
-                ):
-                    prefs[d] = "△"
-                    st.rerun()
-                if st.button(
-                    "×",
-                    key=f"pref_off_{target_year}_{target_month}_{d}",
-                    width="content",
-                    type="primary" if current == "×" else "secondary",
-                ):
-                    prefs[d] = "×"
-                    st.rerun()
+            selected_mark = st.segmented_control(
+                f"{target_month}.{d}({wd})",
+                ["○", "△", "×"],
+                default=current,
+                key=f"choice_seg_{target_year}_{target_month}_{d}",
+                width="stretch",
+            )
+            if selected_mark and selected_mark != current:
+                prefs[d] = selected_mark
+                st.rerun()
 
     # ============================================================
     # 希望有給日数の入力（任意）
