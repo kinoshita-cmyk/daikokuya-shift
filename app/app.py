@@ -31,7 +31,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
-from urllib.parse import quote, unquote, urlencode
+from urllib.parse import quote, unquote
 
 try:
     from st_aggrid import AgGrid, JsCode
@@ -5320,6 +5320,16 @@ elif mode == "👤 従業員ビュー":
 
     st.markdown(f"### {target_year}年{target_month}月の希望を入力")
     st.caption("各日ごとに、右側の ○・△・× から1つ選んでください。")
+    st.markdown(
+        """
+        <div style="display:flex; gap:14px; margin:8px 0 16px 0; font-size:15px; flex-wrap:wrap;">
+          <span style="background:#dcfce7; color:#166534; padding:6px 14px; border-radius:999px; font-weight:bold;">○ 出勤可能</span>
+          <span style="background:#fef9c3; color:#854d0e; padding:6px 14px; border-radius:999px; font-weight:bold;">△ できれば休み</span>
+          <span style="background:#fee2e2; color:#991b1b; padding:6px 14px; border-radius:999px; font-weight:bold;">× 休み希望</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     # ============================================================
     # ボタン用のCSS — Streamlit が key 属性を CSS クラス st-key-{key} に変換するのを利用
@@ -5328,121 +5338,111 @@ elif mode == "👤 従業員ビュー":
     st.markdown(
         """
         <style>
-        .line-answer-card {
-            background: #ffffff;
-            border: 1px solid #e5e7eb;
-            border-radius: 8px;
-            overflow: hidden;
-            margin: 12px 0 18px 0;
-        }
-        .line-answer-title {
-            padding: 16px 18px;
+        .employee-answer-title {
+            padding: 14px 16px;
             background: #f8fafc;
             border-bottom: 1px solid #e5e7eb;
             font-size: 20px;
             font-weight: 800;
             color: #111827;
+            margin: -1rem -1rem 12px -1rem;
         }
-        .line-answer-row {
-            display: grid;
-            grid-template-columns: minmax(104px, 1fr) 54px 54px 54px;
-            align-items: center;
-            min-height: 64px;
-            padding: 0 14px;
-            border-top: 1px solid #f1f5f9;
-            column-gap: 10px;
-        }
-        .line-answer-row:first-of-type {
-            border-top: 0;
-        }
-        .line-answer-date {
-            font-size: 18px;
-            font-weight: 700;
+        .employee-day-label {
+            font-size: 17px;
+            font-weight: 800;
             color: #111827;
+            padding: 8px 0 2px 2px;
             white-space: nowrap;
         }
-        .line-answer-date.sat { color: #2563eb; }
-        .line-answer-date.sun { color: #dc2626; }
-        .line-choice {
-            width: 44px;
-            height: 44px;
-            border-radius: 999px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            text-decoration: none !important;
-            font-size: 25px;
-            line-height: 1;
-            font-weight: 500;
-            color: #6b7280 !important;
-            border: 2px solid transparent;
-            background: transparent;
-            -webkit-tap-highlight-color: transparent;
+        .employee-day-label.sat { color: #2563eb; }
+        .employee-day-label.sun { color: #dc2626; }
+        .employee-row-divider {
+            border-top: 1px solid #f1f5f9;
+            margin: 4px 0 8px 0;
         }
-        .line-choice:hover {
-            text-decoration: none !important;
+
+        [class*="st-key-pref_"] button {
+            width: 100% !important;
+            max-width: 48px !important;
+            height: 44px !important;
+            min-height: 44px !important;
+            font-size: 22px !important;
+            font-weight: bold !important;
+            padding: 0 !important;
+            margin: 0 auto !important;
+            border-radius: 999px !important;
+            transition: all 0.15s ease;
         }
-        .line-choice.is-selected {
-            color: #ffffff !important;
-            background: #06c755;
-            border-color: #16a34a;
-            box-shadow: inset 0 0 0 3px rgba(255,255,255,0.18), 0 3px 8px rgba(22,163,74,0.28);
+        [class*="st-key-pref_"] button p {
+            font-size: 22px !important;
+            line-height: 1 !important;
         }
-        .line-choice:not(.is-selected) {
-            color: #6b7280 !important;
+        [class*="st-key-pref_"] {
+            display: flex !important;
+            justify-content: center !important;
         }
-        .line-choice.line-ok:not(.is-selected) {
-            border-color: #d1d5db;
-            background: #ffffff;
+
+        [class*="st-key-pref_ok_"] button[kind="primary"] {
+            background-color: #16a34a !important;
+            color: white !important;
+            border: 3px solid #15803d !important;
+            box-shadow: 0 3px 8px rgba(22,163,74,0.35) !important;
         }
-        .line-choice.line-maybe:not(.is-selected) {
-            border-color: transparent;
-            background: #ffffff;
+        [class*="st-key-pref_ok_"] button[kind="secondary"] {
+            background-color: #f0fdf4 !important;
+            color: #166534 !important;
+            border: 2px solid #bbf7d0 !important;
         }
-        .line-choice.line-off:not(.is-selected) {
-            border-color: transparent;
-            background: #ffffff;
-            font-size: 30px;
-            font-weight: 400;
+
+        [class*="st-key-pref_maybe_"] button[kind="primary"] {
+            background-color: #eab308 !important;
+            color: white !important;
+            border: 3px solid #ca8a04 !important;
+            box-shadow: 0 3px 8px rgba(234,179,8,0.35) !important;
         }
-        .line-submit-spacer {
-            height: 2px;
+        [class*="st-key-pref_maybe_"] button[kind="secondary"] {
+            background-color: #fefce8 !important;
+            color: #854d0e !important;
+            border: 2px solid #fef08a !important;
         }
+
+        [class*="st-key-pref_off_"] button[kind="primary"] {
+            background-color: #dc2626 !important;
+            color: white !important;
+            border: 3px solid #b91c1c !important;
+            box-shadow: 0 3px 8px rgba(220,38,38,0.35) !important;
+        }
+        [class*="st-key-pref_off_"] button[kind="secondary"] {
+            background-color: #fef2f2 !important;
+            color: #991b1b !important;
+            border: 2px solid #fecaca !important;
+        }
+
         @media (max-width: 640px) {
-            .line-answer-card {
-                margin-left: 0;
-                margin-right: 0;
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
+                display: flex !important;
+                flex-direction: row !important;
+                flex-wrap: nowrap !important;
+                align-items: center !important;
+                gap: 6px !important;
             }
-            .line-answer-title {
-                font-size: 19px;
-                padding: 15px 16px;
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
+                flex: 1 1 auto !important;
+                width: auto !important;
+                min-width: 94px !important;
             }
-            .line-answer-row {
-                grid-template-columns: minmax(96px, 1fr) 50px 50px 50px;
-                min-height: 62px;
-                padding: 0 10px;
-                column-gap: 7px;
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:not(:first-child) {
+                flex: 0 0 46px !important;
+                width: 46px !important;
+                min-width: 46px !important;
             }
-            .line-answer-date {
-                font-size: 17px;
+            [class*="st-key-pref_"] button {
+                max-width: 42px !important;
+                height: 42px !important;
+                min-height: 42px !important;
+                font-size: 21px !important;
             }
-            .line-choice {
-                width: 42px;
-                height: 42px;
-                font-size: 24px;
-            }
-        }
-        @media (max-width: 380px) {
-            .line-answer-row {
-                grid-template-columns: minmax(86px, 1fr) 46px 46px 46px;
-                padding: 0 8px;
-                column-gap: 5px;
-            }
-            .line-choice {
-                width: 40px;
-                height: 40px;
-            }
-            .line-answer-date {
+            .employee-day-label {
                 font-size: 16px;
             }
         }
@@ -5453,34 +5453,6 @@ elif mode == "👤 従業員ビュー":
 
     # LINEの日程回答に近い、スマホ向けの1日1行形式で入力
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
-
-    def _query_value_for_link(value):
-        if isinstance(value, list):
-            return value
-        return str(value)
-
-    def _pref_action_href(day: int, mark_key: str) -> str:
-        params = {}
-        try:
-            for key, value in st.query_params.items():
-                if key in {"pref_day", "pref_mark"}:
-                    continue
-                params[key] = _query_value_for_link(value)
-        except Exception:
-            params = {}
-        params["pref_day"] = str(day)
-        params["pref_mark"] = mark_key
-        return "?" + urlencode(params, doseq=True)
-
-    def _render_choice(day: int, current: str, mark_key: str, symbol: str, class_name: str) -> str:
-        mark_map = {"ok": "○", "maybe": "△", "off": "×"}
-        is_selected = current == mark_map[mark_key]
-        selected_class = " is-selected" if is_selected else ""
-        return (
-            f'<a class="line-choice {class_name}{selected_class}" '
-            f'href="{escape(_pref_action_href(day, mark_key))}" '
-            f'aria-label="{day}日を{escape(symbol)}にする">{escape(symbol)}</a>'
-        )
 
     paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
@@ -5501,27 +5473,6 @@ elif mode == "👤 従業員ビュー":
         paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
 
     prefs = st.session_state.user_prefs[user_key]
-    # URLのタップ操作をセッション状態へ反映する。
-    try:
-        action_day = st.query_params.get("pref_day", "")
-        action_mark = st.query_params.get("pref_mark", "")
-        if isinstance(action_day, list):
-            action_day = action_day[0] if action_day else ""
-        if isinstance(action_mark, list):
-            action_mark = action_mark[0] if action_mark else ""
-    except Exception:
-        action_day = ""
-        action_mark = ""
-
-    mark_from_query = {"ok": "○", "maybe": "△", "off": "×"}
-    try:
-        action_day_int = int(action_day)
-    except (TypeError, ValueError):
-        action_day_int = 0
-
-    if 1 <= action_day_int <= days_in_month and str(action_mark) in mark_from_query:
-        prefs[action_day_int] = mark_from_query[str(action_mark)]
-
     if existing_submission and not st.session_state.get(done_key):
         st.info(
             f"この月はすでに提出済みです"
@@ -5633,21 +5584,51 @@ elif mode == "👤 従業員ビュー":
                 st.rerun()
         st.stop()
 
-    answer_html = ['<div class="line-answer-card"><div class="line-answer-title">日程回答</div>']
-    for d in range(1, days_in_month + 1):
-        wd = weekday_jp[date(target_year, target_month, d).weekday()]
-        wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
-        current = prefs.get(d, "○")
-        answer_html.append(
-            '<div class="line-answer-row">'
-            f'<div class="line-answer-date {wd_class}">{target_month}.{d}({wd})</div>'
-            f'{_render_choice(d, current, "ok", "○", "line-ok")}'
-            f'{_render_choice(d, current, "maybe", "△", "line-maybe")}'
-            f'{_render_choice(d, current, "off", "×", "line-off")}'
-            '</div>'
+    # ここはStreamlitボタンで描画する。リンクではないため別タブ遷移は発生しない。
+    with st.container(border=True, key="employee_answer_grid"):
+        st.markdown(
+            '<div class="employee-answer-title">日程回答</div>',
+            unsafe_allow_html=True,
         )
-    answer_html.append("</div>")
-    st.markdown("".join(answer_html), unsafe_allow_html=True)
+        for d in range(1, days_in_month + 1):
+            if d > 1:
+                st.markdown('<div class="employee-row-divider"></div>', unsafe_allow_html=True)
+            wd = weekday_jp[date(target_year, target_month, d).weekday()]
+            wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
+            current = prefs.get(d, "○")
+            cols = st.columns([2.2, 1, 1, 1], gap="small")
+            with cols[0]:
+                st.markdown(
+                    f'<div class="employee-day-label {wd_class}">{target_month}.{d}({wd})</div>',
+                    unsafe_allow_html=True,
+                )
+            with cols[1]:
+                if st.button(
+                    "○",
+                    key=f"pref_ok_{target_year}_{target_month}_{d}",
+                    width="stretch",
+                    type="primary" if current == "○" else "secondary",
+                ):
+                    prefs[d] = "○"
+                    st.rerun()
+            with cols[2]:
+                if st.button(
+                    "△",
+                    key=f"pref_maybe_{target_year}_{target_month}_{d}",
+                    width="stretch",
+                    type="primary" if current == "△" else "secondary",
+                ):
+                    prefs[d] = "△"
+                    st.rerun()
+            with cols[3]:
+                if st.button(
+                    "×",
+                    key=f"pref_off_{target_year}_{target_month}_{d}",
+                    width="stretch",
+                    type="primary" if current == "×" else "secondary",
+                ):
+                    prefs[d] = "×"
+                    st.rerun()
 
     # ============================================================
     # 希望有給日数の入力（任意）
