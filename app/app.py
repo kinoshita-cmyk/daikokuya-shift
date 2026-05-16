@@ -5361,10 +5361,95 @@ elif mode == "👤 従業員ビュー":
             min-height: 42px !important;
             font-size: 20px !important;
             font-weight: 800 !important;
+            border-width: 2px !important;
+            border-radius: 999px !important;
+            transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease !important;
         }
         [class*="st-key-choice_seg_"] button p {
             font-size: 20px !important;
             line-height: 1 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(1) {
+            background: #dcfce7 !important;
+            border-color: #86efac !important;
+            color: #166534 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(1) p {
+            color: #166534 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(2) {
+            background: #fef9c3 !important;
+            border-color: #fde047 !important;
+            color: #854d0e !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(2) p {
+            color: #854d0e !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3) {
+            background: #fee2e2 !important;
+            border-color: #fca5a5 !important;
+            color: #991b1b !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3) p {
+            color: #991b1b !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(1):hover {
+            background: #bbf7d0 !important;
+            border-color: #4ade80 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(2):hover {
+            background: #fef08a !important;
+            border-color: #facc15 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3):hover {
+            background: #fecaca !important;
+            border-color: #f87171 !important;
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(1) {
+            background: #16a34a !important;
+            border-color: #15803d !important;
+            box-shadow: 0 4px 10px rgba(22, 163, 74, 0.28) !important;
+            color: #ffffff !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(2) {
+            background: #facc15 !important;
+            border-color: #ca8a04 !important;
+            box-shadow: 0 4px 10px rgba(250, 204, 21, 0.3) !important;
+            color: #713f12 !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(3) {
+            background: #ef4444 !important;
+            border-color: #b91c1c !important;
+            box-shadow: 0 4px 10px rgba(239, 68, 68, 0.26) !important;
+            color: #ffffff !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(3) p {
+            color: #ffffff !important;
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(2) p {
+            color: #713f12 !important;
         }
         @media (max-width: 640px) {
             [class*="st-key-employee_answer_grid"] {
