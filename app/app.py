@@ -31,7 +31,7 @@ import streamlit as st
 import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlencode
 
 try:
     from st_aggrid import AgGrid, JsCode
@@ -5320,16 +5320,6 @@ elif mode == "👤 従業員ビュー":
 
     st.markdown(f"### {target_year}年{target_month}月の希望を入力")
     st.caption("各日ごとに、右側の ○・△・× から1つ選んでください。")
-    st.markdown(
-        """
-        <div style="display:flex; gap:8px; margin:8px 0 12px 0; font-size:13px; flex-wrap:wrap;">
-          <span style="background:#dcfce7; color:#166534; padding:5px 10px; border-radius:999px; font-weight:700;">○ 出勤可能</span>
-          <span style="background:#fef9c3; color:#854d0e; padding:5px 10px; border-radius:999px; font-weight:700;">△ できれば休み</span>
-          <span style="background:#fee2e2; color:#991b1b; padding:5px 10px; border-radius:999px; font-weight:700;">× 休み希望</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
     # ============================================================
     # ボタン用のCSS — Streamlit が key 属性を CSS クラス st-key-{key} に変換するのを利用
@@ -5338,126 +5328,122 @@ elif mode == "👤 従業員ビュー":
     st.markdown(
         """
         <style>
-        .employee-answer-card {
+        .line-answer-card {
             background: #ffffff;
             border: 1px solid #e5e7eb;
-            border-radius: 10px;
+            border-radius: 8px;
             overflow: hidden;
-            margin: 8px 0 14px 0;
+            margin: 12px 0 18px 0;
         }
-        .employee-answer-title {
-            padding: 10px 12px;
+        .line-answer-title {
+            padding: 16px 18px;
             background: #f8fafc;
             border-bottom: 1px solid #e5e7eb;
-            font-weight: 700;
+            font-size: 20px;
+            font-weight: 800;
             color: #111827;
         }
-        .employee-day-label {
-            font-size: 16px;
+        .line-answer-row {
+            display: grid;
+            grid-template-columns: minmax(104px, 1fr) 54px 54px 54px;
+            align-items: center;
+            min-height: 64px;
+            padding: 0 14px;
+            border-top: 1px solid #f1f5f9;
+            column-gap: 10px;
+        }
+        .line-answer-row:first-of-type {
+            border-top: 0;
+        }
+        .line-answer-date {
+            font-size: 18px;
             font-weight: 700;
             color: #111827;
-            padding: 8px 0 2px 2px;
             white-space: nowrap;
         }
-        .employee-day-label.sat { color: #2563eb; }
-        .employee-day-label.sun { color: #dc2626; }
-        .employee-answer-header {
-            color: #6b7280;
-            font-size: 12px;
-            text-align: center;
-            font-weight: 700;
-            padding-top: 2px;
+        .line-answer-date.sat { color: #2563eb; }
+        .line-answer-date.sun { color: #dc2626; }
+        .line-choice {
+            width: 44px;
+            height: 44px;
+            border-radius: 999px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            text-decoration: none !important;
+            font-size: 25px;
+            line-height: 1;
+            font-weight: 500;
+            color: #6b7280 !important;
+            border: 2px solid transparent;
+            background: transparent;
+            -webkit-tap-highlight-color: transparent;
         }
-        .employee-row-divider {
-            border-top: 1px solid #f1f5f9;
-            margin: 2px 0 4px 0;
+        .line-choice:hover {
+            text-decoration: none !important;
         }
-
-        /* === 全ての日別ボタン共通の見た目 === */
-        [class*="st-key-pref_"] button {
-            width: 100% !important;
-            max-width: 46px !important;
-            height: 42px !important;
-            font-size: 21px !important;
-            font-weight: bold !important;
-            padding: 0 !important;
-            margin: 0 auto !important;
-            border-radius: 999px !important;
-            min-height: 42px !important;
-            transition: all 0.15s ease;
+        .line-choice.is-selected {
+            color: #ffffff !important;
+            background: #06c755;
+            border-color: #16a34a;
+            box-shadow: inset 0 0 0 3px rgba(255,255,255,0.18), 0 3px 8px rgba(22,163,74,0.28);
         }
-        [class*="st-key-pref_"] button p {
-            font-size: 21px !important;
-            line-height: 1 !important;
+        .line-choice:not(.is-selected) {
+            color: #6b7280 !important;
         }
-        [class*="st-key-pref_"] {
-            display: flex !important;
-            justify-content: center !important;
+        .line-choice.line-ok:not(.is-selected) {
+            border-color: #d1d5db;
+            background: #ffffff;
         }
-
-        /* === ○（出勤可能）= 緑系 === */
-        /* 選択中 (primary) — 鮮やかな緑 */
-        [class*="st-key-pref_ok_"] button[kind="primary"] {
-            background-color: #16a34a !important;
-            color: white !important;
-            border: 3px solid #15803d !important;
-            box-shadow: 0 2px 6px rgba(22,163,74,0.4) !important;
+        .line-choice.line-maybe:not(.is-selected) {
+            border-color: transparent;
+            background: #ffffff;
         }
-        /* 未選択 (secondary) — 薄い緑 */
-        [class*="st-key-pref_ok_"] button[kind="secondary"] {
-            background-color: #f0fdf4 !important;
-            color: #166534 !important;
-            border: 2px solid #bbf7d0 !important;
+        .line-choice.line-off:not(.is-selected) {
+            border-color: transparent;
+            background: #ffffff;
+            font-size: 30px;
+            font-weight: 400;
         }
-        [class*="st-key-pref_ok_"] button[kind="secondary"]:hover {
-            background-color: #dcfce7 !important;
-            border-color: #86efac !important;
+        .line-submit-spacer {
+            height: 2px;
         }
-
-        /* === ×（休み希望）= 赤系 === */
-        [class*="st-key-pref_off_"] button[kind="primary"] {
-            background-color: #dc2626 !important;
-            color: white !important;
-            border: 3px solid #b91c1c !important;
-            box-shadow: 0 2px 6px rgba(220,38,38,0.4) !important;
-        }
-        [class*="st-key-pref_off_"] button[kind="secondary"] {
-            background-color: #fef2f2 !important;
-            color: #991b1b !important;
-            border: 2px solid #fecaca !important;
-        }
-        [class*="st-key-pref_off_"] button[kind="secondary"]:hover {
-            background-color: #fee2e2 !important;
-            border-color: #fca5a5 !important;
-        }
-
-        /* === △（できれば休み）= 黄色系 === */
-        [class*="st-key-pref_maybe_"] button[kind="primary"] {
-            background-color: #eab308 !important;
-            color: white !important;
-            border: 3px solid #ca8a04 !important;
-            box-shadow: 0 2px 6px rgba(234,179,8,0.4) !important;
-        }
-        [class*="st-key-pref_maybe_"] button[kind="secondary"] {
-            background-color: #fefce8 !important;
-            color: #854d0e !important;
-            border: 2px solid #fef08a !important;
-        }
-        [class*="st-key-pref_maybe_"] button[kind="secondary"]:hover {
-            background-color: #fef9c3 !important;
-            border-color: #fde047 !important;
-        }
-
         @media (max-width: 640px) {
-            .employee-day-label {
-                font-size: 15px;
-                padding-top: 9px;
+            .line-answer-card {
+                margin-left: 0;
+                margin-right: 0;
             }
-            [class*="st-key-pref_"] button {
-                max-width: 40px !important;
-                height: 40px !important;
-                min-height: 40px !important;
-                font-size: 20px !important;
+            .line-answer-title {
+                font-size: 19px;
+                padding: 15px 16px;
+            }
+            .line-answer-row {
+                grid-template-columns: minmax(96px, 1fr) 50px 50px 50px;
+                min-height: 62px;
+                padding: 0 10px;
+                column-gap: 7px;
+            }
+            .line-answer-date {
+                font-size: 17px;
+            }
+            .line-choice {
+                width: 42px;
+                height: 42px;
+                font-size: 24px;
+            }
+        }
+        @media (max-width: 380px) {
+            .line-answer-row {
+                grid-template-columns: minmax(86px, 1fr) 46px 46px 46px;
+                padding: 0 8px;
+                column-gap: 5px;
+            }
+            .line-choice {
+                width: 40px;
+                height: 40px;
+            }
+            .line-answer-date {
+                font-size: 16px;
             }
         }
         </style>
@@ -5467,6 +5453,34 @@ elif mode == "👤 従業員ビュー":
 
     # LINEの日程回答に近い、スマホ向けの1日1行形式で入力
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+
+    def _query_value_for_link(value):
+        if isinstance(value, list):
+            return value
+        return str(value)
+
+    def _pref_action_href(day: int, mark_key: str) -> str:
+        params = {}
+        try:
+            for key, value in st.query_params.items():
+                if key in {"pref_day", "pref_mark"}:
+                    continue
+                params[key] = _query_value_for_link(value)
+        except Exception:
+            params = {}
+        params["pref_day"] = str(day)
+        params["pref_mark"] = mark_key
+        return "?" + urlencode(params, doseq=True)
+
+    def _render_choice(day: int, current: str, mark_key: str, symbol: str, class_name: str) -> str:
+        mark_map = {"ok": "○", "maybe": "△", "off": "×"}
+        is_selected = current == mark_map[mark_key]
+        selected_class = " is-selected" if is_selected else ""
+        return (
+            f'<a class="line-choice {class_name}{selected_class}" '
+            f'href="{escape(_pref_action_href(day, mark_key))}" '
+            f'aria-label="{day}日を{escape(symbol)}にする">{escape(symbol)}</a>'
+        )
 
     paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
@@ -5487,6 +5501,27 @@ elif mode == "👤 従業員ビュー":
         paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
 
     prefs = st.session_state.user_prefs[user_key]
+    # URLのタップ操作をセッション状態へ反映する。
+    try:
+        action_day = st.query_params.get("pref_day", "")
+        action_mark = st.query_params.get("pref_mark", "")
+        if isinstance(action_day, list):
+            action_day = action_day[0] if action_day else ""
+        if isinstance(action_mark, list):
+            action_mark = action_mark[0] if action_mark else ""
+    except Exception:
+        action_day = ""
+        action_mark = ""
+
+    mark_from_query = {"ok": "○", "maybe": "△", "off": "×"}
+    try:
+        action_day_int = int(action_day)
+    except (TypeError, ValueError):
+        action_day_int = 0
+
+    if 1 <= action_day_int <= days_in_month and str(action_mark) in mark_from_query:
+        prefs[action_day_int] = mark_from_query[str(action_mark)]
+
     if existing_submission and not st.session_state.get(done_key):
         st.info(
             f"この月はすでに提出済みです"
@@ -5598,63 +5633,21 @@ elif mode == "👤 従業員ビュー":
                 st.rerun()
         st.stop()
 
-    # 従業員のインデックス（Japaneseキーを避けてASCII-safeなキーにする）
-    emp_idx = employee_names.index(selected)
-
-    with st.container(border=True):
-        st.markdown(
-            '<div class="employee-answer-title">日程回答</div>',
-            unsafe_allow_html=True,
+    answer_html = ['<div class="line-answer-card"><div class="line-answer-title">日程回答</div>']
+    for d in range(1, days_in_month + 1):
+        wd = weekday_jp[date(target_year, target_month, d).weekday()]
+        wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
+        current = prefs.get(d, "○")
+        answer_html.append(
+            '<div class="line-answer-row">'
+            f'<div class="line-answer-date {wd_class}">{target_month}.{d}({wd})</div>'
+            f'{_render_choice(d, current, "ok", "○", "line-ok")}'
+            f'{_render_choice(d, current, "maybe", "△", "line-maybe")}'
+            f'{_render_choice(d, current, "off", "×", "line-off")}'
+            '</div>'
         )
-        head_cols = st.columns([2.2, 1, 1, 1], gap="small")
-        with head_cols[0]:
-            st.markdown('<div class="employee-answer-header">日付</div>', unsafe_allow_html=True)
-        with head_cols[1]:
-            st.markdown('<div class="employee-answer-header">○</div>', unsafe_allow_html=True)
-        with head_cols[2]:
-            st.markdown('<div class="employee-answer-header">△</div>', unsafe_allow_html=True)
-        with head_cols[3]:
-            st.markdown('<div class="employee-answer-header">×</div>', unsafe_allow_html=True)
-
-        for d in range(1, days_in_month + 1):
-            if d > 1:
-                st.markdown('<div class="employee-row-divider"></div>', unsafe_allow_html=True)
-            wd = weekday_jp[date(target_year, target_month, d).weekday()]
-            wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
-            current = prefs.get(d, "○")
-            cols = st.columns([2.2, 1, 1, 1], gap="small")
-            with cols[0]:
-                st.markdown(
-                    f'<div class="employee-day-label {wd_class}">{target_month}.{d}({wd})</div>',
-                    unsafe_allow_html=True,
-                )
-            with cols[1]:
-                if st.button(
-                    "○",
-                    key=f"pref_ok_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "○" else "secondary",
-                ):
-                    prefs[d] = "○"
-                    st.rerun()
-            with cols[2]:
-                if st.button(
-                    "△",
-                    key=f"pref_maybe_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "△" else "secondary",
-                ):
-                    prefs[d] = "△"
-                    st.rerun()
-            with cols[3]:
-                if st.button(
-                    "×",
-                    key=f"pref_off_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "×" else "secondary",
-                ):
-                    prefs[d] = "×"
-                    st.rerun()
+    answer_html.append("</div>")
+    st.markdown("".join(answer_html), unsafe_allow_html=True)
 
     # ============================================================
     # 希望有給日数の入力（任意）
