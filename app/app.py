@@ -5659,6 +5659,10 @@ elif mode == "👤 従業員ビュー":
                 st.session_state.pop(edit_existing_key, None)
                 st.rerun()
 
+    if st.session_state.get(review_key):
+        _render_employee_review()
+        st.stop()
+
     # ここはStreamlitボタンで描画する。リンクではないため別タブ遷移は発生しない。
     with st.container(border=True, key="employee_answer_grid"):
         st.markdown(
@@ -5827,10 +5831,6 @@ elif mode == "👤 従業員ビュー":
         height=180,
         key=free_text_key,
     )
-
-    if st.session_state.get(review_key):
-        _render_employee_review()
-        st.stop()
 
     if st.button(
         f"確認画面へ進む",
