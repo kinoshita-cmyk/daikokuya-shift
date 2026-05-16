@@ -5319,16 +5319,13 @@ elif mode == "👤 従業員ビュー":
         )
 
     st.markdown(f"### {target_year}年{target_month}月の希望を入力")
-    st.write("各日の希望を **3つのボタンから1つ** 選んでください：")
+    st.caption("各日ごとに、右側の ○・△・× から1つ選んでください。")
     st.markdown(
         """
-        <div style="display:flex; gap:14px; margin:8px 0 16px 0; font-size:15px; flex-wrap:wrap;">
-          <span style="background:#22c55e; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">○ 出勤可能</span>
-          <span style="background:#ef4444; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">× 休み希望（絶対）</span>
-          <span style="background:#eab308; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">△ できれば休み</span>
-        </div>
-        <div style="font-size:13px; color:#6b7280; margin-bottom:12px;">
-          選択中のボタンは「鮮やかな色」、未選択のボタンは「薄い色」で表示されます。
+        <div style="display:flex; gap:8px; margin:8px 0 12px 0; font-size:13px; flex-wrap:wrap;">
+          <span style="background:#dcfce7; color:#166534; padding:5px 10px; border-radius:999px; font-weight:700;">○ 出勤可能</span>
+          <span style="background:#fef9c3; color:#854d0e; padding:5px 10px; border-radius:999px; font-weight:700;">△ できれば休み</span>
+          <span style="background:#fee2e2; color:#991b1b; padding:5px 10px; border-radius:999px; font-weight:700;">× 休み希望</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -5341,16 +5338,61 @@ elif mode == "👤 従業員ビュー":
     st.markdown(
         """
         <style>
+        .employee-answer-card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 8px 0 14px 0;
+        }
+        .employee-answer-title {
+            padding: 10px 12px;
+            background: #f8fafc;
+            border-bottom: 1px solid #e5e7eb;
+            font-weight: 700;
+            color: #111827;
+        }
+        .employee-day-label {
+            font-size: 16px;
+            font-weight: 700;
+            color: #111827;
+            padding: 8px 0 2px 2px;
+            white-space: nowrap;
+        }
+        .employee-day-label.sat { color: #2563eb; }
+        .employee-day-label.sun { color: #dc2626; }
+        .employee-answer-header {
+            color: #6b7280;
+            font-size: 12px;
+            text-align: center;
+            font-weight: 700;
+            padding-top: 2px;
+        }
+        .employee-row-divider {
+            border-top: 1px solid #f1f5f9;
+            margin: 2px 0 4px 0;
+        }
+
         /* === 全ての日別ボタン共通の見た目 === */
         [class*="st-key-pref_"] button {
             width: 100% !important;
-            font-size: 22px !important;
+            max-width: 46px !important;
+            height: 42px !important;
+            font-size: 21px !important;
             font-weight: bold !important;
-            padding: 6px 0 !important;
-            margin: 2px 0 !important;
-            border-radius: 8px !important;
-            min-height: 44px !important;
+            padding: 0 !important;
+            margin: 0 auto !important;
+            border-radius: 999px !important;
+            min-height: 42px !important;
             transition: all 0.15s ease;
+        }
+        [class*="st-key-pref_"] button p {
+            font-size: 21px !important;
+            line-height: 1 !important;
+        }
+        [class*="st-key-pref_"] {
+            display: flex !important;
+            justify-content: center !important;
         }
 
         /* === ○（出勤可能）= 緑系 === */
@@ -5405,14 +5447,26 @@ elif mode == "👤 従業員ビュー":
             background-color: #fef9c3 !important;
             border-color: #fde047 !important;
         }
+
+        @media (max-width: 640px) {
+            .employee-day-label {
+                font-size: 15px;
+                padding-top: 9px;
+            }
+            [class*="st-key-pref_"] button {
+                max-width: 40px !important;
+                height: 40px !important;
+                min-height: 40px !important;
+                font-size: 20px !important;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # カレンダー形式で入力
+    # LINEの日程回答に近い、スマホ向けの1日1行形式で入力
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    days_per_row = 7
 
     paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
@@ -5547,22 +5601,34 @@ elif mode == "👤 従業員ビュー":
     # 従業員のインデックス（Japaneseキーを避けてASCII-safeなキーにする）
     emp_idx = employee_names.index(selected)
 
-    for week_start in range(1, days_in_month + 1, days_per_row):
-        cols = st.columns(days_per_row)
-        for i in range(days_per_row):
-            d = week_start + i
-            if d > days_in_month:
-                break
+    with st.container(border=True):
+        st.markdown(
+            '<div class="employee-answer-title">日程回答</div>',
+            unsafe_allow_html=True,
+        )
+        head_cols = st.columns([2.2, 1, 1, 1], gap="small")
+        with head_cols[0]:
+            st.markdown('<div class="employee-answer-header">日付</div>', unsafe_allow_html=True)
+        with head_cols[1]:
+            st.markdown('<div class="employee-answer-header">○</div>', unsafe_allow_html=True)
+        with head_cols[2]:
+            st.markdown('<div class="employee-answer-header">△</div>', unsafe_allow_html=True)
+        with head_cols[3]:
+            st.markdown('<div class="employee-answer-header">×</div>', unsafe_allow_html=True)
+
+        for d in range(1, days_in_month + 1):
+            if d > 1:
+                st.markdown('<div class="employee-row-divider"></div>', unsafe_allow_html=True)
             wd = weekday_jp[date(target_year, target_month, d).weekday()]
-            wd_color = "#dc2626" if wd == "日" else ("#2563eb" if wd == "土" else "#374151")
-            with cols[i]:
+            wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
+            current = prefs.get(d, "○")
+            cols = st.columns([2.2, 1, 1, 1], gap="small")
+            with cols[0]:
                 st.markdown(
-                    f'<div style="text-align:center; font-weight:bold; color:{wd_color}; '
-                    f'font-size:14px; margin-bottom:4px;">{d}日({wd})</div>',
+                    f'<div class="employee-day-label {wd_class}">{target_month}.{d}({wd})</div>',
                     unsafe_allow_html=True,
                 )
-                current = prefs.get(d, "○")
-                # ○ 出勤可能（緑）
+            with cols[1]:
                 if st.button(
                     "○",
                     key=f"pref_ok_{emp_idx}_{d}",
@@ -5571,16 +5637,7 @@ elif mode == "👤 従業員ビュー":
                 ):
                     prefs[d] = "○"
                     st.rerun()
-                # × 休み希望（赤）
-                if st.button(
-                    "×",
-                    key=f"pref_off_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "×" else "secondary",
-                ):
-                    prefs[d] = "×"
-                    st.rerun()
-                # △ できれば休み（黄色）
+            with cols[2]:
                 if st.button(
                     "△",
                     key=f"pref_maybe_{emp_idx}_{d}",
@@ -5588,6 +5645,15 @@ elif mode == "👤 従業員ビュー":
                     type="primary" if current == "△" else "secondary",
                 ):
                     prefs[d] = "△"
+                    st.rerun()
+            with cols[3]:
+                if st.button(
+                    "×",
+                    key=f"pref_off_{emp_idx}_{d}",
+                    width="stretch",
+                    type="primary" if current == "×" else "secondary",
+                ):
+                    prefs[d] = "×"
                     st.rerun()
 
     # ============================================================
