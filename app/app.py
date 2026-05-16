@@ -5428,7 +5428,11 @@ elif mode == "👤 従業員ビュー":
             [class*="st-key-employee_answer_grid"] * {
                 box-sizing: border-box !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
+            [class*="st-key-answer_row_"] {
+                max-width: 100% !important;
+                overflow-x: hidden !important;
+            }
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] {
                 display: flex !important;
                 flex-direction: row !important;
                 flex-wrap: nowrap !important;
@@ -5438,18 +5442,18 @@ elif mode == "👤 従業員ビュー":
                 max-width: 100% !important;
                 min-width: 0 !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"] {
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div {
                 min-width: 0 !important;
                 padding: 0 !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has(.employee-day-label) {
-                flex: 0 0 88px !important;
-                width: 88px !important;
-                min-width: 88px !important;
-                max-width: 88px !important;
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
+                flex: 0 0 92px !important;
+                width: 92px !important;
+                min-width: 92px !important;
+                max-width: 92px !important;
                 overflow: visible !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has([class*="st-key-pref_"]) {
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(n+2) {
                 flex: 0 0 40px !important;
                 width: 40px !important;
                 min-width: 40px !important;
@@ -5470,16 +5474,16 @@ elif mode == "👤 従業員ビュー":
             }
         }
         @media (max-width: 380px) {
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] {
                 gap: 3px !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has(.employee-day-label) {
-                flex-basis: 82px !important;
-                width: 82px !important;
-                min-width: 82px !important;
-                max-width: 82px !important;
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(1) {
+                flex-basis: 86px !important;
+                width: 86px !important;
+                min-width: 86px !important;
+                max-width: 86px !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has([class*="st-key-pref_"]) {
+            [class*="st-key-answer_row_"] div[data-testid="stHorizontalBlock"] > div:nth-child(n+2) {
                 flex-basis: 38px !important;
                 width: 38px !important;
                 min-width: 38px !important;
@@ -5648,35 +5652,36 @@ elif mode == "👤 従業員ビュー":
             wd = weekday_jp[date(target_year, target_month, d).weekday()]
             wd_class = "sun" if wd == "日" else ("sat" if wd == "土" else "")
             current = prefs.get(d, "○")
-            cols = st.columns([2.2, 1, 1, 1], gap="small")
-            with cols[0]:
+            with st.container(
+                horizontal=True,
+                vertical_alignment="center",
+                gap="small",
+                key=f"answer_row_{target_year}_{target_month}_{d}",
+            ):
                 st.markdown(
                     f'<div class="employee-day-label {wd_class}">{target_month}.{d}({wd})</div>',
                     unsafe_allow_html=True,
                 )
-            with cols[1]:
                 if st.button(
                     "○",
                     key=f"pref_ok_{target_year}_{target_month}_{d}",
-                    width="stretch",
+                    width="content",
                     type="primary" if current == "○" else "secondary",
                 ):
                     prefs[d] = "○"
                     st.rerun()
-            with cols[2]:
                 if st.button(
                     "△",
                     key=f"pref_maybe_{target_year}_{target_month}_{d}",
-                    width="stretch",
+                    width="content",
                     type="primary" if current == "△" else "secondary",
                 ):
                     prefs[d] = "△"
                     st.rerun()
-            with cols[3]:
                 if st.button(
                     "×",
                     key=f"pref_off_{target_year}_{target_month}_{d}",
-                    width="stretch",
+                    width="content",
                     type="primary" if current == "×" else "secondary",
                 ):
                     prefs[d] = "×"
