@@ -1741,35 +1741,108 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
 
 
 def render_scrollable_review_table(rows: list[dict]) -> None:
-    """提出前確認の内容を横スクロール可能な表で表示する。"""
-    columns = ["項目", "内容", "日数"]
-    widths = {"項目": 220, "内容": 720, "日数": 90}
+    """提出内容をスマホでも横スクロールなしで確認できる色付きカードで表示する。"""
+    styles = {
+        "○": {
+            "card": "#f0fdf4",
+            "border": "#86efac",
+            "badge": "#16a34a",
+            "badge_text": "#ffffff",
+            "text": "#166534",
+        },
+        "△": {
+            "card": "#fefce8",
+            "border": "#fde047",
+            "badge": "#facc15",
+            "badge_text": "#713f12",
+            "text": "#854d0e",
+        },
+        "×": {
+            "card": "#fef2f2",
+            "border": "#fca5a5",
+            "badge": "#ef4444",
+            "badge_text": "#ffffff",
+            "text": "#991b1b",
+        },
+        "有給": {
+            "card": "#eff6ff",
+            "border": "#93c5fd",
+            "badge": "#2563eb",
+            "badge_text": "#ffffff",
+            "text": "#1e40af",
+        },
+        "自由": {
+            "card": "#f8fafc",
+            "border": "#cbd5e1",
+            "badge": "#475569",
+            "badge_text": "#ffffff",
+            "text": "#334155",
+        },
+    }
+
+    def style_for(label: str) -> dict:
+        if label.startswith("○"):
+            return styles["○"]
+        if label.startswith("△"):
+            return styles["△"]
+        if label.startswith("×"):
+            return styles["×"]
+        if "有給" in label:
+            return styles["有給"]
+        return styles["自由"]
+
     html_parts = [
-        '<div style="overflow:auto; max-height:360px; border:1px solid #e5e7eb; '
-        'border-radius:6px; background:white;">',
-        '<table style="border-collapse:collapse; min-width:1030px; width:max-content; '
-        'font-size:14px;">',
-        '<thead><tr>',
+        """
+        <div style="display:grid; gap:10px; margin:10px 0 14px 0; width:100%; max-width:100%;">
+        """,
     ]
-    for col in columns:
-        html_parts.append(
-            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
-            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
-            f'min-width:{widths[col]}px;">{escape(col)}</th>'
-        )
-    html_parts.append('</tr></thead><tbody>')
     for row in rows:
-        html_parts.append('<tr>')
-        for col in columns:
-            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
-            white_space = "pre-wrap" if col == "内容" else "nowrap"
-            html_parts.append(
-                f'<td style="border:1px solid #e5e7eb; padding:8px; '
-                f'vertical-align:top; min-width:{widths[col]}px; '
-                f'white-space:{white_space};">{value}</td>'
-            )
-        html_parts.append('</tr>')
-    html_parts.append('</tbody></table></div>')
+        label = str(row.get("項目", ""))
+        content = escape(str(row.get("内容", ""))).replace("\n", "<br>")
+        days = row.get("日数", "")
+        day_text = f"{escape(str(days))}日" if isinstance(days, int) else escape(str(days))
+        s = style_for(label)
+        count_html = (
+            f'<span style="font-size:13px; color:{s["text"]}; font-weight:800; '
+            f'white-space:nowrap;">{day_text}</span>'
+            if day_text else ""
+        )
+        html_parts.append(
+            f'''
+            <div style="
+                background:{s["card"]};
+                border:1px solid {s["border"]};
+                border-radius:8px;
+                padding:10px 12px;
+                max-width:100%;
+                box-sizing:border-box;
+            ">
+              <div style="display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap;">
+                <span style="
+                    display:inline-flex;
+                    align-items:center;
+                    border-radius:999px;
+                    background:{s["badge"]};
+                    color:{s["badge_text"]};
+                    padding:5px 10px;
+                    font-size:14px;
+                    font-weight:800;
+                    line-height:1.2;
+                ">{escape(label)}</span>
+                {count_html}
+              </div>
+              <div style="
+                  margin-top:8px;
+                  color:#111827;
+                  font-size:14px;
+                  line-height:1.65;
+                  overflow-wrap:anywhere;
+                  word-break:break-word;
+              ">{content}</div>
+            </div>
+            '''
+        )
+    html_parts.append("</div>")
     st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
