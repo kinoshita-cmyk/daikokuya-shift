@@ -5442,12 +5442,14 @@ elif mode == "👤 従業員ビュー":
                 min-width: 0 !important;
                 padding: 0 !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
-                flex: 1 1 0 !important;
-                width: auto !important;
-                min-width: 82px !important;
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has(.employee-day-label) {
+                flex: 0 0 88px !important;
+                width: 88px !important;
+                min-width: 88px !important;
+                max-width: 88px !important;
+                overflow: visible !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:not(:first-child) {
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has([class*="st-key-pref_"]) {
                 flex: 0 0 40px !important;
                 width: 40px !important;
                 min-width: 40px !important;
@@ -5471,10 +5473,13 @@ elif mode == "👤 従業員ビュー":
             [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] {
                 gap: 3px !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:first-child {
-                min-width: 76px !important;
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has(.employee-day-label) {
+                flex-basis: 82px !important;
+                width: 82px !important;
+                min-width: 82px !important;
+                max-width: 82px !important;
             }
-            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:not(:first-child) {
+            [class*="st-key-employee_answer_grid"] div[data-testid="stHorizontalBlock"] > div[data-testid="column"]:has([class*="st-key-pref_"]) {
                 flex-basis: 38px !important;
                 width: 38px !important;
                 min-width: 38px !important;
