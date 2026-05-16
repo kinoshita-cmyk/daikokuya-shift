@@ -28,7 +28,6 @@ sys.path.insert(0, str(_PROJECT_ROOT))   # for: from prototype.X import Y
 sys.path.insert(0, str(_THIS_DIR))       # for: from auth import Z
 
 import streamlit as st
-import streamlit.components.v1 as components
 import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
@@ -5266,7 +5265,6 @@ elif mode == "👤 従業員ビュー":
     paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
     done_key = f"pref_done_{selected}_{target_year}_{target_month}"
-    review_scroll_key = f"pref_review_scroll_top_{selected}_{target_year}_{target_month}"
 
     if "user_prefs" not in st.session_state:
         st.session_state.user_prefs = {}
@@ -5620,29 +5618,7 @@ elif mode == "👤 従業員ビュー":
             pass
         return save_path
 
-    if st.session_state.get(review_key):
-        if st.session_state.pop(review_scroll_key, False):
-            components.html(
-                """
-                <script>
-                const scrollToTop = () => {
-                  try {
-                    const doc = window.parent.document;
-                    const main = doc.querySelector('section.main') || doc.querySelector('[data-testid="stAppViewContainer"]');
-                    if (main) {
-                      main.scrollTo({ top: 0, behavior: 'auto' });
-                    }
-                    window.parent.scrollTo({ top: 0, behavior: 'auto' });
-                  } catch (e) {
-                    window.scrollTo({ top: 0, behavior: 'auto' });
-                  }
-                };
-                requestAnimationFrame(scrollToTop);
-                setTimeout(scrollToTop, 80);
-                </script>
-                """,
-                height=0,
-            )
+    def _render_employee_review() -> None:
         paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
         free_text_review = st.session_state.get(free_text_key, "")
         x_days = [d for d, m in prefs.items() if m == "×"]
@@ -5682,7 +5658,6 @@ elif mode == "👤 従業員ビュー":
                 }
                 st.session_state.pop(edit_existing_key, None)
                 st.rerun()
-        st.stop()
 
     # ここはStreamlitボタンで描画する。リンクではないため別タブ遷移は発生しない。
     with st.container(border=True, key="employee_answer_grid"):
@@ -5853,13 +5828,16 @@ elif mode == "👤 従業員ビュー":
         key=free_text_key,
     )
 
+    if st.session_state.get(review_key):
+        _render_employee_review()
+        st.stop()
+
     if st.button(
         f"確認画面へ進む",
         type="primary",
         width="stretch",
     ):
         st.session_state[review_key] = True
-        st.session_state[review_scroll_key] = True
         st.rerun()
 
 
