@@ -800,15 +800,16 @@ def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
 def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) -> str:
     """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
     count_text = employee_work_target_text(shift, name)
+    nowrap_count_text = count_text.replace("/", "\u2060/\u2060") if count_text else ""
     if html:
         if count_text:
             return (
                 f'<span style="display:block; font-weight:800;">{escape(name)}</span>'
                 f'<span style="display:block; font-size:11px; line-height:1.1; '
-                f'color:#dbeafe; white-space:nowrap;">{escape(count_text)}</span>'
+                f'color:#dbeafe; white-space:nowrap;">{escape(nowrap_count_text)}</span>'
             )
         return escape(name)
-    return f"{name}\n{count_text}" if count_text else name
+    return f"{name}\n{nowrap_count_text}" if count_text else name
 
 
 def render_shift_table(
@@ -1289,12 +1290,12 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 48,
-            "minWidth": 42,
+            "width": 56,
+            "minWidth": 52,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
-            "wrapHeaderText": True,
-            "autoHeaderHeight": True,
+            "wrapHeaderText": False,
+            "autoHeaderHeight": False,
         })
     column_defs.append({
         "field": "人数少",
@@ -1344,7 +1345,7 @@ def render_colored_shift_editor(
         "suppressRowClickSelection": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
-        "headerHeight": 48,
+        "headerHeight": 54,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
