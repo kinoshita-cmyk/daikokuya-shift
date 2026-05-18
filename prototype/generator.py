@@ -36,8 +36,7 @@ from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
-    OFF_MAIN_STORE_MINIMUMS, CONSTRAINT_EXCLUDED,
-    STORE_ROTATION_MINIMUMS,
+    CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
 )
@@ -388,18 +387,24 @@ def generate_shift(
     absolute_allowed_stores = {
         "土井": {Store.HIGASHIGUCHI},
         "下地": {Store.OMIYA},
+        "板倉": {Store.AKABANE},
+        "野澤": {Store.SUZURAN},
         "南": {Store.AKABANE, Store.OMIYA, Store.SUZURAN},
     }
     for e in main_employees:
         for s in main_stores:
             affinity_none = e.affinities.get(s) == Affinity.NONE
             fixed_allowed = absolute_allowed_stores.get(e.name)
+            makino_nishi_exception = (
+                e.name == "牧野"
+                and s == Store.NISHIGUCHI
+            )
             hard_forbidden = (
                 fixed_allowed is not None and s not in fixed_allowed
             ) or (
                 getattr(e, "only_on_request_days", False) and affinity_none
             ) or (
-                affinity_none and not historical_reconciliation_mode
+                affinity_none and not makino_nishi_exception
             )
             if hard_forbidden:
                 for d in days:
@@ -407,9 +412,9 @@ def generate_shift(
             elif affinity_none:
                 affinity_none_assignments.extend(x[e.name][d][s] for d in days)
 
-    # 牧野さんは赤羽東口店・大宮西口店の単独勤務NG。
-    # 大宮西口店は、月別ルールで「牧野さんの西口研修」が明示された月だけ、
-    # 楯君と同じ日に同じ店舗へ入る形で許可する。
+    # 牧野さんは赤羽東口店NG。
+    # 大宮西口店は強い回避目標。月別ルールで研修を明示した月は、
+    # 楯君と同じ日に同じ店舗へ入る形を目標にする。
     if "牧野" in main_employee_names:
         makino_nishi_training_enabled = _monthly_rule_allows_employee_store(
             monthly_store_count_rules,
@@ -426,8 +431,6 @@ def generate_shift(
                     x["牧野"][d][Store.NISHIGUCHI]
                     <= x[MAKINO_NISHIGUCHI_TRAINING_PARTNER][d][Store.NISHIGUCHI]
                 )
-            else:
-                model.Add(x["牧野"][d][Store.NISHIGUCHI] == 0)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -743,22 +746,7 @@ def generate_shift(
         if year == 2026 and month == 5:
             model.Add(sum(1 - off["大塚"][d] for d in days) == 10)
 
-    # ============================================================
-    # 制約 13: 楯・春山・長尾は月3日以上、メイン店舗以外で勤務
-    # ============================================================
-    for name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
-        if name not in main_employee_names:
-            continue
-        outside_main = [
-            x[name][d][s]
-            for d in days
-            for s in main_stores
-            if s != main_store
-        ]
-        if outside_main:
-            model.Add(sum(outside_main) >= int(min_count))
-
-    # 制約 13.5: 固定しすぎを避ける巡回配置
+    # 制約 13: 月内の最低巡回条件
     for name, rules in STORE_ROTATION_MINIMUMS.items():
         if name not in main_employee_names:
             continue

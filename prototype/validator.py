@@ -18,7 +18,7 @@ from typing import Optional
 
 from .models import (
     MonthlyShift, Store, Skill, OperationMode,
-    PreferenceMark, PreviousMonthCarryover,
+    PreferenceMark, PreviousMonthCarryover, Affinity,
 )
 from .employees import ALL_EMPLOYEES, get_employee
 from .rules import (
@@ -26,8 +26,7 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, CONSEC_WORK_CHECK_APPLIES,
-    get_capacity, OFF_MAIN_STORE_MINIMUMS,
-    STORE_ROTATION_MINIMUMS,
+    get_capacity, STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER,
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
@@ -177,19 +176,21 @@ def validate(
     # 7. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
 
-    # 8. 出勤希望チェック
+    # 8. 絶対配置不可チェック
+    _check_absolute_forbidden_assignments(
+        shift, result, days_in_month, monthly_store_count_rules,
+    )
+
+    # 9. 出勤希望チェック
     _check_work_requests(shift, result, work_requests, off_requests)
 
-    # 9. 大宮アンカースタッフ（春山・下地）チェック
+    # 10. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 10. 東口の月曜休店チェック
+    # 11. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 11. 楯・春山・長尾のメイン店舗外勤務チェック
-    _check_required_off_main_store_days(shift, result)
-
-    # 12. 標準巡回配置チェック
+    # 12. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
 
     # 13. 月別の追加配置ルールチェック
@@ -257,7 +258,7 @@ def _check_daily_staffing_limit(
                 message=(
                     f"全体の出勤人数が{total}名です"
                     f"（標準{GLOBAL_DAILY_STAFFING_LIMIT.standard_total}名、"
-                    f"通常許容13名、例外{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名まで）"
+                    f"最大{GLOBAL_DAILY_STAFFING_LIMIT.max_total}名まで）"
                     f"／出勤者: {worker_str}"
                 ),
             ))
@@ -703,6 +704,57 @@ def _check_off_requests(
                 ))
 
 
+def _check_absolute_forbidden_assignments(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    monthly_store_count_rules: list[dict],
+) -> None:
+    """従業員マスタで絶対配置不可になっている店舗への配置を検出する。"""
+    absolute_allowed_stores = {
+        "土井": {Store.HIGASHIGUCHI},
+        "下地": {Store.OMIYA},
+        "板倉": {Store.AKABANE},
+        "野澤": {Store.SUZURAN},
+        "南": {Store.AKABANE, Store.OMIYA, Store.SUZURAN},
+    }
+    for day in range(1, days + 1):
+        for assignment in shift.get_day_assignments(day):
+            if assignment.store == Store.OFF:
+                continue
+            try:
+                emp = get_employee(assignment.employee)
+            except KeyError:
+                continue
+
+            allowed_stores = absolute_allowed_stores.get(emp.name)
+            if allowed_stores is not None and assignment.store not in allowed_stores:
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="絶対配置不可",
+                    day=day,
+                    employee=emp.name,
+                    message=f"{assignment.store.display_name}には配置できません",
+                ))
+                continue
+
+            is_makino_nishi_exception = (
+                emp.name == "牧野"
+                and assignment.store == Store.NISHIGUCHI
+            )
+            if is_makino_nishi_exception:
+                continue
+
+            if emp.affinities.get(assignment.store) == Affinity.NONE:
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="絶対配置不可",
+                    day=day,
+                    employee=emp.name,
+                    message=f"{assignment.store.display_name}には配置できません",
+                ))
+
+
 def _check_work_requests(
     shift: MonthlyShift, result: ValidationResult,
     work_requests: list,
@@ -779,33 +831,10 @@ def _check_higashiguchi_monday_closed(
             ))
 
 
-def _check_required_off_main_store_days(
-    shift: MonthlyShift, result: ValidationResult,
-) -> None:
-    """指定スタッフが月3日以上メイン店舗以外で勤務しているか。"""
-    for emp_name, (main_store, min_count) in OFF_MAIN_STORE_MINIMUMS.items():
-        outside_days = [
-            a.day for a in shift.assignments
-            if a.employee == emp_name
-            and a.store not in (Store.OFF, main_store)
-        ]
-        if len(outside_days) < min_count:
-            result.issues.append(Issue(
-                severity="ERROR",
-                category="メイン店舗外勤務",
-                day=None,
-                employee=emp_name,
-                message=(
-                    f"メイン店舗（{main_store.display_name}）以外の勤務が"
-                    f"{len(outside_days)}日です。最低{min_count}日必要です。"
-                ),
-            ))
-
-
 def _check_store_rotation_minimums(
     shift: MonthlyShift, result: ValidationResult,
 ) -> None:
-    """固定しすぎを避けるための巡回配置が最低限入っているか。"""
+    """月内の最低巡回条件が満たされているか。"""
     for emp_name, rules in STORE_ROTATION_MINIMUMS.items():
         for stores, min_count in rules:
             days = [
@@ -905,23 +934,24 @@ def _check_makino_training_rules(
             continue
         if not nishi_training_enabled:
             result.issues.append(Issue(
-                severity="ERROR",
+                severity="WARNING",
                 category="牧野研修ルール",
                 day=day,
                 employee="牧野",
                 message=(
-                    "牧野さんの大宮西口店勤務は、月別ルールで研修を明示した月だけ許可します"
+                    "牧野さんの大宮西口店勤務は通常避けます。"
+                    "研修として入れる場合は月別ルールに明示してください"
                     f"／配属: {', '.join(nishi_workers)}"
                 ),
             ))
         elif MAKINO_NISHIGUCHI_TRAINING_PARTNER not in nishi_workers:
             result.issues.append(Issue(
-                severity="ERROR",
+                severity="WARNING",
                 category="牧野研修ルール",
                 day=day,
                 employee="牧野",
                 message=(
-                    "牧野さんの大宮西口店勤務は楯君との研修時のみです。"
+                    "牧野さんの大宮西口店勤務は楯君との研修時を優先します。"
                     f"楯君と同時配置してください／配属: {', '.join(nishi_workers)}"
                 ),
             ))

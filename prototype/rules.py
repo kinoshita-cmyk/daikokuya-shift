@@ -82,24 +82,24 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
 # 店舗ごとの標準人数・最大人数。
 # 月間目標勤務日数よりも、まず店舗ごとの上限を守る。
 STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
-    # 5名は原則NG。4名は例外的な増員として許容。
-    Store.AKABANE: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=900),
+    # 増員優先順位は 西口 → すずらん → 大宮 → 赤羽。
+    # 赤羽は標準3名、4名は必要時のみ。
+    Store.AKABANE: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1400),
     # 赤羽東口店は原則1名のみ。
     Store.HIGASHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=1, over_standard_penalty=3000),
-    # 大宮駅前店は3名を標準にし、4名は強く抑制。5名はNG。
-    Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=2400),
+    # 大宮駅前店は3名を標準にし、4名は赤羽より優先して許容。
+    Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1100),
     # 大宮西口店は原則1名、研修などで2名まで。
-    Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=900),
+    Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=600),
     # すずらんは3名標準、状況により4名まで。
-    Store.SUZURAN: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=900),
+    Store.SUZURAN: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=800),
 }
 
 # 1日全体の人数上限。
-# 通常は11人体制。13人までを通常の許容範囲、14人は過去実績上の例外として扱う。
-# 15人以上は受け入れ不可。
+# 通常は11人体制。最大15名までを受け入れ上限として扱う。
 GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
     standard_total=11,
-    max_total=14,
+    max_total=15,
     over_standard_penalty=900,
 )
 
@@ -228,22 +228,11 @@ MAKINO_SOLO_NG_STORES: tuple[Store, ...] = (
 )
 MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 
-# メイン店舗以外への月内勤務必須回数。
+# 月内の最低巡回条件。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
-OFF_MAIN_STORE_MINIMUMS: dict[str, tuple[Store, int]] = {
-    "今津": (Store.AKABANE, 3),
-    "楯": (Store.NISHIGUCHI, 3),
-    "春山": (Store.OMIYA, 3),
-    "長尾": (Store.SUZURAN, 3),
-}
-
-# 固定しすぎを避けるための標準巡回ルール。
-# 固定店長・専属者を除き、実績で許容されている店舗へ月に数回は回す。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {
-    "今津": [((Store.HIGASHIGUCHI,), 1), ((Store.SUZURAN,), 1)],
     "黒澤": [((Store.SUZURAN,), 2)],
-    "牧野": [((Store.AKABANE, Store.SUZURAN), 3)],
-    "長尾": [((Store.HIGASHIGUCHI,), 1), ((Store.NISHIGUCHI,), 1)],
+    "牧野": [((Store.AKABANE,), 3), ((Store.SUZURAN,), 3)],
     "下田": [((Store.AKABANE,), 1), ((Store.OMIYA,), 1)],
 }
 
