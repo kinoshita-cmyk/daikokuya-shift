@@ -39,6 +39,7 @@ from .rules import (
     CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
+    FORBIDDEN_SAME_STORE_PAIRINGS,
 )
 
 
@@ -430,6 +431,19 @@ def generate_shift(
                 model.Add(
                     x["牧野"][d][Store.NISHIGUCHI]
                     <= x[MAKINO_NISHIGUCHI_TRAINING_PARTNER][d][Store.NISHIGUCHI]
+                )
+
+    # エコメンバーの同店舗同勤務NG。
+    # 例: 大宮に下地さんがいる日は、指定メンバーを同じ大宮へ配置しない。
+    for store, anchor_name, blocked_names in FORBIDDEN_SAME_STORE_PAIRINGS:
+        if anchor_name not in main_employee_names:
+            continue
+        for blocked_name in blocked_names:
+            if blocked_name not in main_employee_names:
+                continue
+            for d in days:
+                model.Add(
+                    x[anchor_name][d][store] + x[blocked_name][d][store] <= 1
                 )
 
     # ============================================================

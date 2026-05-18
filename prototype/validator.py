@@ -31,6 +31,7 @@ from .rules import (
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
     get_monthly_work_target,
+    FORBIDDEN_SAME_STORE_PAIRINGS,
 )
 
 
@@ -181,28 +182,31 @@ def validate(
         shift, result, days_in_month, monthly_store_count_rules,
     )
 
-    # 9. 出勤希望チェック
+    # 9. エコメンバー同店舗同勤務NGチェック
+    _check_forbidden_same_store_pairings(shift, result, days_in_month)
+
+    # 10. 出勤希望チェック
     _check_work_requests(shift, result, work_requests, off_requests)
 
-    # 10. 大宮アンカースタッフ（春山・下地）チェック
+    # 11. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 11. 東口の月曜休店チェック
+    # 12. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 12. 月内の最低巡回条件チェック
+    # 13. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
 
-    # 13. 月別の追加配置ルールチェック
+    # 14. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 14. 牧野さんの東口・西口研修ルールチェック
+    # 15. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 15. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 16. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 16. 統計情報の集計
+    # 17. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -753,6 +757,39 @@ def _check_absolute_forbidden_assignments(
                     employee=emp.name,
                     message=f"{assignment.store.display_name}には配置できません",
                 ))
+
+
+def _check_forbidden_same_store_pairings(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """同じ店舗で一緒に勤務してはいけない組み合わせを検出する。"""
+    for day in range(1, days + 1):
+        day_assignments = shift.get_day_assignments(day)
+        for store, anchor_name, blocked_names in FORBIDDEN_SAME_STORE_PAIRINGS:
+            store_workers = {
+                a.employee for a in day_assignments
+                if a.store == store
+            }
+            if anchor_name not in store_workers:
+                continue
+            blocked_present = [
+                name for name in blocked_names
+                if name in store_workers
+            ]
+            if not blocked_present:
+                continue
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="同勤務NG",
+                day=day,
+                employee=anchor_name,
+                message=(
+                    f"{store.display_name}で{anchor_name}さんと同時勤務NGのメンバーがいます"
+                    f"／対象: {', '.join(blocked_present)}"
+                ),
+            ))
 
 
 def _check_work_requests(

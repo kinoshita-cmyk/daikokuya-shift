@@ -203,6 +203,7 @@ HARD_CONSTRAINTS = {
     "no_eco_zero_at_any_store": True,      # エコ0NG（全店舗）
     "higashiguchi_eco_required": True,     # 東口は必ずエコ1名
     "nishiguchi_eco_required": True,       # 西口は必ずエコ1名
+    "forbidden_same_store_pairings": True, # 指定メンバー同士の同店舗勤務NG
     "no_ticket_zero_at": [                 # チケット0NG店舗
         Store.AKABANE, Store.OMIYA, Store.SUZURAN
     ],
@@ -235,6 +236,13 @@ STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {
     "牧野": [((Store.AKABANE,), 3), ((Store.SUZURAN,), 3)],
     "下田": [((Store.AKABANE,), 1), ((Store.OMIYA,), 1)],
 }
+
+# エコメンバーの同店舗同勤務NGルール。
+# 指定店舗に anchor がいる日は、blocked_members を同じ店舗に配置しない。
+FORBIDDEN_SAME_STORE_PAIRINGS: tuple[tuple[Store, str, tuple[str, ...]], ...] = (
+    (Store.OMIYA, "下地", ("今津", "長尾", "楯", "土井")),
+    (Store.NISHIGUCHI, "楯", ("下地", "春山", "長尾", "今津", "土井")),
+)
 
 # すずらん不在時の補填要員（野澤がいない日のチケット担当）
 SUZURAN_BACKUP_TICKET: tuple[str, ...] = ("岩野", "大類")
