@@ -806,7 +806,7 @@ def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
 def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) -> str:
     """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
     count_text = employee_work_target_text(shift, name)
-    nowrap_count_text = count_text.replace("/", "\u2060/\u2060") if count_text else ""
+    nowrap_count_text = "\u2060".join(count_text) if count_text else ""
     if html:
         if count_text:
             return (
@@ -1216,7 +1216,7 @@ def render_colored_shift_editor(
             const base = {
                 textAlign: 'center',
                 fontWeight: '800',
-                fontSize: '15px',
+                fontSize: '14px',
                 borderRight: '1px solid #cbd5e1',
                 borderBottom: '1px solid #e5e7eb'
             };
@@ -1269,8 +1269,8 @@ def render_colored_shift_editor(
             "field": "日",
             "editable": False,
             "pinned": "left",
-            "width": 48,
-            "minWidth": 44,
+            "width": 42,
+            "minWidth": 38,
             "cellStyle": {
                 "textAlign": "center",
                 "fontWeight": "800",
@@ -1281,8 +1281,8 @@ def render_colored_shift_editor(
             "field": "曜",
             "editable": False,
             "pinned": "left",
-            "width": 36,
-            "minWidth": 34,
+            "width": 30,
+            "minWidth": 30,
             "cellStyle": {
                 "textAlign": "center",
                 "fontWeight": "700",
@@ -1298,8 +1298,8 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 56,
-            "minWidth": 52,
+            "width": 48,
+            "minWidth": 44,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
             "wrapHeaderText": True,
@@ -1310,8 +1310,8 @@ def render_colored_shift_editor(
         "headerName": "少",
         "editable": False,
         "pinned": "right",
-        "width": 50,
-        "minWidth": 46,
+        "width": 42,
+        "minWidth": 40,
         "wrapText": True,
         "cellStyle": {
             "textAlign": "center",
@@ -1327,8 +1327,8 @@ def render_colored_shift_editor(
         "field": "鍵",
         "editable": False,
         "pinned": "right",
-        "width": 58,
-        "minWidth": 52,
+        "width": 50,
+        "minWidth": 46,
         "wrapText": True,
         "cellStyle": {
             "textAlign": "center",
@@ -1371,7 +1371,7 @@ def render_colored_shift_editor(
         "key": grid_key,
         "height": 650,
         "width": "100%",
-        "fit_columns_on_grid_load": False,
+        "fit_columns_on_grid_load": True,
         "allow_unsafe_jscode": True,
         "theme": "streamlit",
         "reload_data": True,
