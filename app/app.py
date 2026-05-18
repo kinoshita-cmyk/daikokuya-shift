@@ -368,6 +368,7 @@ from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employ
 from prototype.generator import generate_shift, determine_operation_modes
 from prototype.validator import validate
 from prototype.backup import ShiftBackup
+from prototype.carryover import load_locked_previous_month_carryover
 from prototype.excel_loader import load_shift_from_excel
 from prototype.excel_exporter import export_shift_to_excel, EXPORT_COLUMN_ORDER
 from prototype.pdf_exporter import export_shift_to_pdf
@@ -1687,13 +1688,15 @@ def restore_validation_context_for_month(
             )
             exact_holiday_days[emp_name] = requested_days_int
 
+    carryover_result = load_locked_previous_month_carryover(int(year), int(month))
+
     context = {
         "ym": f"{int(year):04d}-{int(month):02d}",
         "off_requests": off_requests,
         "work_requests": work_requests,
         "preferred_work_requests": preferred_work_requests,
         "preferred_work_groups": preferred_work_groups,
-        "prev_month": [],
+        "prev_month": list(carryover_result.carryover),
         "holiday_overrides": holiday_overrides,
         "exact_holiday_days": exact_holiday_days,
         "employee_max_consecutive_work": dict(
@@ -3442,7 +3445,6 @@ if mode == "📊 経営者ビュー":
                                     int(requested_days),
                                 )
                                 use_exact_holiday_days[emp_name] = int(requested_days)
-                        # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -3504,6 +3506,19 @@ if mode == "📊 経営者ビュー":
                             f"{_saved_target_year}年{_saved_target_month}月のシフトを生成しました。"
                             "本番では従業員から希望が届いた後に生成してください。"
                         )
+
+                    if not is_test_may_2026:
+                        carryover_result = load_locked_previous_month_carryover(
+                            _saved_target_year,
+                            _saved_target_month,
+                            backup=backup_mgr,
+                            lock_mgr=lock_mgr,
+                        )
+                        use_prev_month = list(carryover_result.carryover)
+                        if carryover_result.loaded:
+                            data_source_msg += "\n" + carryover_result.message
+                        else:
+                            data_source_msg += "\n⚠ " + carryover_result.message
 
                     progress_area.info(
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
@@ -3719,6 +3734,7 @@ if mode == "📊 経営者ビュー":
                     "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                    "previous_month_carryover_count": len(use_prev_month),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
                     "relaxed_advisor_limit": bool(relaxed_advisor_limit),
                     "advisor_auto_assignment": False,
@@ -6597,10 +6613,10 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "連勤・休日", "前月末から月初の連勤",
-                "前月末の連勤日数を当月月初に引き継いで判定。",
-                "一部反映", "一部反映", "検証結果に表示",
-                "データ連携待ち", "一部反映",
-                "2026年5月サンプルでは反映。本番提出データでは前月データ取得が未整備。",
+                "ロック済み前月シフトから、月末の連勤日数を当月月初に引き継いで判定。",
+                "反映中", "反映中", "生成・検証結果に反映",
+                "前月シフトのロックで自動反映", "反映中",
+                "前月が未ロックの場合は、生成時に未反映の注意を表示します。",
             ),
             _rule_row(
                 "連勤・休日", "既定の月内最低休日数",
