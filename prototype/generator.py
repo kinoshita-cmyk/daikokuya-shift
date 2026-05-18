@@ -39,6 +39,7 @@ from .rules import (
     CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
+    get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS, WORK_TARGET_WARNING_DIFF_DAYS,
@@ -734,7 +735,16 @@ def generate_shift(
             and e.name not in exact_holiday_days
         ):
             continue
-        required_off = holiday_overrides.get(e.name, default_holidays)
+        required_off = holiday_overrides.get(
+            e.name,
+            get_monthly_required_holiday_days(
+                e.name,
+                month,
+                days_in_month,
+                e.annual_target_days,
+                default_holidays,
+            ),
+        )
         off_total = sum(off[e.name][d] for d in days)
         if e.name in exact_holiday_days:
             model.Add(off_total == int(exact_holiday_days[e.name]))

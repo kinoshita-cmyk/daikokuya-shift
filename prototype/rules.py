@@ -169,6 +169,20 @@ def get_monthly_work_target(
         return None
     return round(int(annual_target_days) / 12)
 
+
+def get_monthly_required_holiday_days(
+    employee_name: str,
+    month: int,
+    days_in_month: int,
+    annual_target_days: Optional[int],
+    default_holidays: int,
+) -> int:
+    """月別基準出勤日数から、その月に必要な休日数を返す。"""
+    target = get_monthly_work_target(employee_name, month, annual_target_days)
+    if target is None:
+        return int(default_holidays)
+    return max(0, int(days_in_month) - int(target))
+
 # 省人員モード（GW・お盆・SW等）
 REDUCED_CAPACITY: dict[Store, StoreCapacity] = {
     Store.AKABANE: StoreCapacity(eco_min=1, ticket_min=1),

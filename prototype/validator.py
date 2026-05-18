@@ -31,6 +31,7 @@ from .rules import (
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
     get_monthly_work_target,
+    get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     WORK_TARGET_WARNING_DIFF_DAYS,
@@ -606,7 +607,16 @@ def _check_holiday_days(
         ):
             continue
 
-        required = overrides.get(emp.name, default_days)
+        required = overrides.get(
+            emp.name,
+            get_monthly_required_holiday_days(
+                emp.name,
+                shift.month,
+                days,
+                emp.annual_target_days,
+                default_days,
+            ),
+        )
         actual_off = sum(
             1 for day in range(1, days + 1)
             if (a := shift.get_assignment(emp.name, day)) is None or a.store == Store.OFF
