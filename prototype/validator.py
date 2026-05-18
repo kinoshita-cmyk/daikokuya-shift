@@ -760,6 +760,11 @@ def _check_absolute_forbidden_assignments(
         "野澤": {Store.SUZURAN},
         "南": {Store.AKABANE, Store.OMIYA, Store.SUZURAN},
     }
+    makino_nishi_training_enabled = _monthly_rule_allows_employee_store(
+        monthly_store_count_rules,
+        "牧野",
+        Store.NISHIGUCHI,
+    )
     for day in range(1, days + 1):
         for assignment in shift.get_day_assignments(day):
             if assignment.store == Store.OFF:
@@ -783,6 +788,7 @@ def _check_absolute_forbidden_assignments(
             is_makino_nishi_exception = (
                 emp.name == "牧野"
                 and assignment.store == Store.NISHIGUCHI
+                and makino_nishi_training_enabled
             )
             if is_makino_nishi_exception:
                 continue
@@ -1110,17 +1116,7 @@ def _check_makino_training_rules(
         if "牧野" not in nishi_workers:
             continue
         if not nishi_training_enabled:
-            result.issues.append(Issue(
-                severity="WARNING",
-                category="牧野研修ルール",
-                day=day,
-                employee="牧野",
-                message=(
-                    "牧野さんの大宮西口店勤務は通常避けます。"
-                    "研修として入れる場合は月別ルールに明示してください"
-                    f"／配属: {', '.join(nishi_workers)}"
-                ),
-            ))
+            continue
         elif MAKINO_NISHIGUCHI_TRAINING_PARTNER not in nishi_workers:
             result.issues.append(Issue(
                 severity="WARNING",

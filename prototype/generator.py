@@ -428,6 +428,14 @@ def generate_shift(
         "野澤": {Store.SUZURAN},
         "南": {Store.AKABANE, Store.OMIYA, Store.SUZURAN},
     }
+    makino_nishi_training_enabled = (
+        "牧野" in main_employee_names
+        and _monthly_rule_allows_employee_store(
+            monthly_store_count_rules,
+            "牧野",
+            Store.NISHIGUCHI,
+        )
+    )
     for e in main_employees:
         for s in main_stores:
             affinity_none = e.affinities.get(s) == Affinity.NONE
@@ -435,6 +443,7 @@ def generate_shift(
             makino_nishi_exception = (
                 e.name == "牧野"
                 and s == Store.NISHIGUCHI
+                and makino_nishi_training_enabled
             )
             hard_forbidden = (
                 fixed_allowed is not None and s not in fixed_allowed
@@ -449,15 +458,10 @@ def generate_shift(
             elif affinity_none:
                 affinity_none_assignments.extend(x[e.name][d][s] for d in days)
 
-    # 牧野さんは赤羽東口店NG。
-    # 大宮西口店は強い回避目標。月別ルールで研修を明示した月は、
-    # 楯君と同じ日に同じ店舗へ入る形を目標にする。
+    # 牧野さんは赤羽東口店・大宮西口店NG。
+    # 大宮西口店は月別ルールで研修を明示した月だけ、
+    # 楯君と同じ日に同じ店舗へ入る形で例外許可する。
     if "牧野" in main_employee_names:
-        makino_nishi_training_enabled = _monthly_rule_allows_employee_store(
-            monthly_store_count_rules,
-            "牧野",
-            Store.NISHIGUCHI,
-        )
         for d in days:
             model.Add(x["牧野"][d][Store.HIGASHIGUCHI] == 0)
             if (

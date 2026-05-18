@@ -81,14 +81,14 @@ ECO_STAFF: list[Employee] = [
         skill=Skill.ECO,
         station_type=StationType.FLEXIBLE,
         affinities={
-            Store.OMIYA: Affinity.STRONG,
+            Store.SUZURAN: Affinity.STRONG,
+            Store.AKABANE: Affinity.MEDIUM,
+            Store.OMIYA: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 当面、東口1名体制は不可
-            Store.NISHIGUCHI: Affinity.WEAK,      # 月次ルールで研修配置する候補
-            Store.AKABANE: Affinity.WEAK,         # 巡回・応援で少数あり
-            Store.SUZURAN: Affinity.WEAK,         # 巡回・応援で少数あり
+            Store.NISHIGUCHI: Affinity.NONE,      # 通常不可。月次ルールの研修例外のみ
         },
         annual_target_days=268,
-        notes="大宮強。赤羽・すずらん巡回あり。東口単独NG。西口は月次ルールで楯との研修時のみ",
+        notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽3回以上・すずらん3回以上。研修として楯と西口に入ることがある。",
     ),
     Employee(
         name="春山",
