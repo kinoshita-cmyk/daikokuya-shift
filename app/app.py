@@ -1556,6 +1556,8 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
     if inputs.get("ym") != ym:
         return {
             "work_requests": [],
+            "preferred_work_requests": [],
+            "preferred_work_groups": [],
             "off_requests": {},
             "prev_month": [],
             "holiday_overrides": {},
@@ -3585,7 +3587,9 @@ if mode == "📊 経営者ビュー":
                     if shift is not None:
                         candidate_validation = run_shift_validation(
                             shift=shift,
-                            work_requests=list(use_work_requests) + list(use_preferred_work_requests),
+                            work_requests=list(use_work_requests),
+                            preferred_work_requests=list(use_preferred_work_requests),
+                            preferred_work_groups=list(use_preferred_work_groups),
                             off_requests=use_off_requests,
                             prev_month=use_prev_month,
                             holiday_overrides=use_holiday_overrides,
@@ -4222,6 +4226,8 @@ if mode == "📊 経営者ビュー":
                 inline_result = run_shift_validation(
                     shift=inline_display_shift,
                     work_requests=_table_validation_context.get("work_requests", []),
+                    preferred_work_requests=_table_validation_context.get("preferred_work_requests", []),
+                    preferred_work_groups=_table_validation_context.get("preferred_work_groups", []),
                     off_requests=_table_validation_context.get("off_requests", {}),
                     prev_month=_table_validation_context.get("prev_month", []),
                     holiday_overrides=_table_validation_context.get("holiday_overrides", {}),
@@ -4565,6 +4571,8 @@ if mode == "📊 経営者ビュー":
             edit_result = run_shift_validation(
                 shift=edited_shift,
                 work_requests=validation_context.get("work_requests", []),
+                preferred_work_requests=validation_context.get("preferred_work_requests", []),
+                preferred_work_groups=validation_context.get("preferred_work_groups", []),
                 off_requests=validation_context.get("off_requests", {}),
                 prev_month=validation_context.get("prev_month", []),
                 holiday_overrides=validation_context.get("holiday_overrides", {}),
@@ -4754,6 +4762,8 @@ if mode == "📊 経営者ビュー":
             # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
             _validation_context = get_validation_context_for_shift(shift)
             _v_work = _validation_context.get("work_requests", [])
+            _v_preferred_work = _validation_context.get("preferred_work_requests", [])
+            _v_preferred_groups = _validation_context.get("preferred_work_groups", [])
             _v_off = _validation_context.get("off_requests", {})
             _v_prev = _validation_context.get("prev_month", [])
             _v_holiday = _validation_context.get("holiday_overrides", {})
@@ -4762,6 +4772,8 @@ if mode == "📊 経営者ビュー":
             _v_max_off = _validation_context.get("employee_max_consecutive_off", {})
             result = run_shift_validation(
                 shift=shift, work_requests=_v_work,
+                preferred_work_requests=_v_preferred_work,
+                preferred_work_groups=_v_preferred_groups,
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
                 exact_holiday_days=_v_exact_holiday,
@@ -5063,6 +5075,8 @@ if mode == "📊 経営者ビュー":
                 )
                 if _cv_match:
                     _cv_work = _cv_inputs.get("work_requests", [])
+                    _cv_preferred_work = _cv_inputs.get("preferred_work_requests", [])
+                    _cv_preferred_groups = _cv_inputs.get("preferred_work_groups", [])
                     _cv_off = _cv_inputs.get("off_requests", {})
                     _cv_prev = _cv_inputs.get("prev_month", [])
                     _cv_holiday = _cv_inputs.get("holiday_overrides", {})
@@ -5072,6 +5086,8 @@ if mode == "📊 経営者ビュー":
                     _cv_monthly_rules = _cv_inputs.get("monthly_store_count_rules", [])
                 else:
                     _cv_work = []
+                    _cv_preferred_work = []
+                    _cv_preferred_groups = []
                     _cv_off = {}
                     _cv_prev = []
                     _cv_holiday = {}
@@ -5081,6 +5097,8 @@ if mode == "📊 経営者ビュー":
                     _cv_monthly_rules = []
                 chat_result = run_shift_validation(
                     shift=display_shift, work_requests=_cv_work,
+                    preferred_work_requests=_cv_preferred_work,
+                    preferred_work_groups=_cv_preferred_groups,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
                     exact_holiday_days=_cv_exact_holiday,
