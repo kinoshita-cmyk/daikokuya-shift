@@ -1373,7 +1373,7 @@ def render_colored_shift_editor(
     aggrid_kwargs = {
         "gridOptions": grid_options,
         "key": grid_key,
-        "height": 560,
+        "height": 640,
         "width": "100%",
         "fit_columns_on_grid_load": False,
         "allow_unsafe_jscode": True,
