@@ -428,12 +428,13 @@ st.markdown("""
         justify-content: center !important;
     }
     .ag-header-cell-text {
-        white-space: pre-line !important;
+        white-space: pre !important;
         word-break: keep-all !important;
         overflow-wrap: normal !important;
         overflow: visible !important;
         text-overflow: clip !important;
         text-align: center !important;
+        font-size: 13px !important;
         line-height: 1.15 !important;
     }
 </style>
@@ -1254,11 +1255,12 @@ def render_colored_shift_editor(
                 color: '#ffffff',
                 fontWeight: '800',
                 textAlign: 'center',
-                whiteSpace: 'pre-line',
+                whiteSpace: 'pre',
                 wordBreak: 'keep-all',
                 overflowWrap: 'normal',
                 overflow: 'visible',
                 textOverflow: 'clip',
+                fontSize: '13px',
                 lineHeight: '1.15'
             };
         }
