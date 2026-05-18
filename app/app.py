@@ -1304,8 +1304,8 @@ def render_colored_shift_editor(
             "minWidth": 44,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
-            "wrapHeaderText": True,
-            "autoHeaderHeight": True,
+            "wrapHeaderText": False,
+            "autoHeaderHeight": False,
         })
     column_defs.append({
         "field": "人数少",
@@ -1377,6 +1377,25 @@ def render_colored_shift_editor(
         "allow_unsafe_jscode": True,
         "theme": "streamlit",
         "reload_data": True,
+        "custom_css": {
+            ".shift-grid-header": {
+                "padding-left": "2px !important",
+                "padding-right": "2px !important",
+            },
+            ".shift-grid-header .ag-header-cell-label": {
+                "justify-content": "center !important",
+            },
+            ".shift-grid-header .ag-header-cell-text": {
+                "white-space": "pre !important",
+                "word-break": "keep-all !important",
+                "overflow-wrap": "normal !important",
+                "overflow": "visible !important",
+                "text-overflow": "clip !important",
+                "text-align": "center !important",
+                "font-size": "12px !important",
+                "line-height": "1.12 !important",
+            },
+        },
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
