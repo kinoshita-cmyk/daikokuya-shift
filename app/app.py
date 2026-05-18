@@ -424,10 +424,16 @@ st.markdown("""
     .shift-cell-nishi { background: #fce7f3; }
     .shift-cell-suzuran { background: #e0e7ff; }
     .shift-cell-off { background: #f3f4f6; color: #6b7280; }
+    .ag-header-cell-label {
+        justify-content: center !important;
+    }
     .ag-header-cell-text {
-        white-space: pre !important;
+        white-space: pre-line !important;
         word-break: keep-all !important;
         overflow-wrap: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        text-align: center !important;
         line-height: 1.15 !important;
     }
 </style>
@@ -1248,9 +1254,11 @@ def render_colored_shift_editor(
                 color: '#ffffff',
                 fontWeight: '800',
                 textAlign: 'center',
-                whiteSpace: 'pre',
+                whiteSpace: 'pre-line',
                 wordBreak: 'keep-all',
                 overflowWrap: 'normal',
+                overflow: 'visible',
+                textOverflow: 'clip',
                 lineHeight: '1.15'
             };
         }
@@ -1290,12 +1298,12 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 56,
-            "minWidth": 52,
+            "width": 62,
+            "minWidth": 58,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
-            "wrapHeaderText": False,
-            "autoHeaderHeight": False,
+            "wrapHeaderText": True,
+            "autoHeaderHeight": True,
         })
     column_defs.append({
         "field": "人数少",
@@ -1345,7 +1353,7 @@ def render_colored_shift_editor(
         "suppressRowClickSelection": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
-        "headerHeight": 54,
+        "headerHeight": 58,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
