@@ -623,7 +623,10 @@ def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, s
     return warnings_by_store
 
 
-def format_key_warning_summary_for_day(statuses: dict[Store, str]) -> str:
+def format_key_warning_summary_for_day(
+    statuses: dict[Store, str],
+    include_store_names: bool = False,
+) -> str:
     """編集グリッド内の鍵欄に入れる短いテキスト。"""
     if not statuses:
         return ""
@@ -637,7 +640,10 @@ def format_key_warning_summary_for_day(statuses: dict[Store, str]) -> str:
             store, (store.value, store.display_name, "#64748b", "#f8fafc")
         )
         prefix = "応援" if statuses[store] == "support" else "鍵"
-        labels.append(f"{prefix}{mark}{name}")
+        if include_store_names:
+            labels.append(f"{prefix}{mark}{name}")
+        else:
+            labels.append(f"{'応' if statuses[store] == 'support' else '鍵'}{mark}")
     return "・".join(labels)
 
 
@@ -649,7 +655,10 @@ def format_key_warning_summary(
     key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
     parts = []
     for day in sorted(key_warnings_by_store):
-        day_text = format_key_warning_summary_for_day(key_warnings_by_store[day])
+        day_text = format_key_warning_summary_for_day(
+            key_warnings_by_store[day],
+            include_store_names=True,
+        )
         if day_text:
             parts.append(f"{shift.month}/{day}（{day_text}）")
     return ", ".join(parts)
@@ -691,11 +700,14 @@ def render_short_staff_marks(stores: set[Store]) -> str:
         mark, name, color, bg = SHORT_STAFF_STORE_LABELS.get(
             store, (store.value, store.display_name, "#64748b", "#f8fafc")
         )
+        title = escape(f"{name} 人員少")
         chips.append(
             f'<span style="display:inline-flex; align-items:center; gap:2px; '
-            f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
+            f'justify-content:center; min-width:22px; height:22px; '
+            f'margin:1px 1px; padding:0 2px; border-radius:4px; '
             f'background:{bg}; color:{color}; border:1px solid {color}; '
-            f'font-size:12px; font-weight:700; white-space:nowrap;">{mark}{name}</span>'
+            f'font-size:12px; font-weight:800; white-space:nowrap;" '
+            f'title="{title}">{mark}</span>'
         )
     return "".join(chips)
 
@@ -710,19 +722,21 @@ def render_key_warning_marks(statuses: dict[Store, str]) -> str:
         statuses,
         key=lambda s: store_order.index(s) if s in store_order else len(store_order),
     ):
-        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+        mark, _name, _, _ = SHORT_STAFF_STORE_LABELS.get(
             store, (store.value, store.display_name, "#64748b", "#f8fafc")
         )
         is_support = statuses[store] == "support"
-        prefix = "応援" if is_support else "鍵"
+        prefix = "応" if is_support else "鍵"
         color = "#2563eb" if is_support else "#b45309"
         bg = "#eff6ff" if is_support else "#fff7ed"
+        title = escape(f"{'すずらん鍵応援' if is_support else '鍵担当不在'}: {name}")
         chips.append(
             f'<span style="display:inline-flex; align-items:center; gap:2px; '
-            f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
+            f'justify-content:center; min-width:30px; height:22px; '
+            f'margin:1px 1px; padding:0 3px; border-radius:4px; '
             f'background:{bg}; color:{color}; border:1px solid {color}; '
-            f'font-size:12px; font-weight:700; white-space:nowrap;">'
-            f'{prefix}{mark}{name}</span>'
+            f'font-size:12px; font-weight:800; white-space:nowrap;" '
+            f'title="{title}">{prefix}{mark}</span>'
         )
     return "".join(chips)
 
@@ -823,10 +837,10 @@ def render_shift_table(
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 2
     wrapper_style = (
-        "max-height:400px; overflow:auto; border:1px solid #cbd5e1; "
+        "max-height:70vh; overflow:auto; border:1px solid #cbd5e1; "
         "border-radius:6px; background:white;"
         if sticky else
-        "overflow-x:auto;"
+        "max-width:100%; overflow:auto;"
     )
     table_style = (
         "border-collapse:separate; border-spacing:0; font-family:sans-serif; "
@@ -842,16 +856,16 @@ def render_shift_table(
         if sticky else ""
     )
     left_date_style = (
-        "position:sticky; left:0; z-index:6; min-width:70px; width:70px;"
-        if sticky else "min-width:70px; width:70px;"
+        "position:sticky; left:0; z-index:6; min-width:58px; width:58px;"
+        if sticky else "min-width:58px; width:58px;"
     )
     left_weekday_style = (
-        "position:sticky; left:70px; z-index:6; min-width:46px; width:46px;"
-        if sticky else "min-width:46px; width:46px;"
+        "position:sticky; left:58px; z-index:6; min-width:38px; width:38px;"
+        if sticky else "min-width:38px; width:38px;"
     )
-    employee_header_style = "min-width:62px; line-height:1.15;"
-    short_header_style = "min-width:190px; width:190px;"
-    key_header_style = "min-width:150px; width:150px;"
+    employee_header_style = "min-width:50px; width:50px; line-height:1.12; font-size:12px;"
+    short_header_style = "min-width:48px; width:48px; max-width:48px;"
+    key_header_style = "min-width:64px; width:64px; max-width:64px;"
     html = (
         f'<div style="{wrapper_style}">'
         f'<table style="{table_style}">'
@@ -881,7 +895,7 @@ def render_shift_table(
         )
     html += (
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
-        f'{header_style} {short_header_style}">人員少</th>'
+        f'{header_style} {short_header_style}" title="人員少">少</th>'
     )
     html += (
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
@@ -963,15 +977,19 @@ def render_shift_table(
         short_mark = render_short_staff_marks(short_staff_by_store.get(d, set()))
         short_bg = "#fff3cd" if is_short else "white"
         html += (
-            f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:190px; '
-            f'text-align:center; background:{short_bg}; '
+            f'<td style="padding:3px 2px; border:1px solid #ccc; '
+            f'min-width:48px; width:48px; max-width:48px; '
+            f'text-align:center; background:{short_bg}; white-space:normal; '
+            f'line-height:1.15; '
             f'font-weight:bold; color:#92400e;">{short_mark}</td>'
         )
         key_mark = render_key_warning_marks(key_warnings_by_store.get(d, {}))
         key_bg = "#fff7ed" if key_mark else "white"
         html += (
-            f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:150px; '
-            f'text-align:center; background:{key_bg}; '
+            f'<td style="padding:3px 2px; border:1px solid #ccc; '
+            f'min-width:64px; width:64px; max-width:64px; '
+            f'text-align:center; background:{key_bg}; white-space:normal; '
+            f'line-height:1.15; '
             f'font-weight:bold; color:#b45309;">{key_mark}</td>'
         )
         html += '</tr>'
@@ -1149,10 +1167,10 @@ def format_short_staff_summary_for_day(stores: set[Store]) -> str:
         stores,
         key=lambda s: store_order.index(s) if s in store_order else len(store_order),
     ):
-        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+        mark, _name, _, _ = SHORT_STAFF_STORE_LABELS.get(
             store, (store.value, store.display_name, "#64748b", "#f8fafc")
         )
-        labels.append(f"{mark}{name}")
+        labels.append(mark)
     return "・".join(labels)
 
 
@@ -1232,7 +1250,8 @@ def render_colored_shift_editor(
             "field": "日",
             "editable": False,
             "pinned": "left",
-            "width": 72,
+            "width": 48,
+            "minWidth": 44,
             "cellStyle": {
                 "textAlign": "center",
                 "fontWeight": "800",
@@ -1243,7 +1262,8 @@ def render_colored_shift_editor(
             "field": "曜",
             "editable": False,
             "pinned": "left",
-            "width": 56,
+            "width": 36,
+            "minWidth": 34,
             "cellStyle": {
                 "textAlign": "center",
                 "fontWeight": "700",
@@ -1259,7 +1279,8 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 66,
+            "width": 48,
+            "minWidth": 42,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
             "wrapHeaderText": True,
@@ -1267,28 +1288,37 @@ def render_colored_shift_editor(
         })
     column_defs.append({
         "field": "人数少",
+        "headerName": "少",
         "editable": False,
         "pinned": "right",
-        "width": 170,
+        "width": 50,
+        "minWidth": 46,
+        "wrapText": True,
         "cellStyle": {
             "textAlign": "center",
             "fontWeight": "800",
             "backgroundColor": "#fff3cd",
             "color": "#92400e",
             "borderLeft": "1px solid #cbd5e1",
+            "whiteSpace": "normal",
+            "lineHeight": "1.15",
         },
     })
     column_defs.append({
         "field": "鍵",
         "editable": False,
         "pinned": "right",
-        "width": 150,
+        "width": 58,
+        "minWidth": 52,
+        "wrapText": True,
         "cellStyle": {
             "textAlign": "center",
             "fontWeight": "800",
             "backgroundColor": "#fff7ed",
             "color": "#b45309",
             "borderLeft": "1px solid #cbd5e1",
+            "whiteSpace": "normal",
+            "lineHeight": "1.15",
         },
     })
     grid_options = {
@@ -1303,8 +1333,8 @@ def render_colored_shift_editor(
         "stopEditingWhenCellsLoseFocus": True,
         "suppressRowClickSelection": True,
         "ensureDomOrder": True,
-        "rowHeight": 34,
-        "headerHeight": 54,
+        "rowHeight": 32,
+        "headerHeight": 48,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
@@ -4012,6 +4042,8 @@ if mode == "📊 経営者ビュー":
                         width="small",
                         help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                     )
+                column_config["人数少"] = st.column_config.TextColumn("少", width="small")
+                column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
                 disabled_columns = ["日", "曜", "人数少", "鍵"]
                 if lock_info is not None:
                     disabled_columns = editor_columns
@@ -4407,6 +4439,8 @@ if mode == "📊 経営者ビュー":
                     width="small",
                     help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                 )
+            column_config["人数少"] = st.column_config.TextColumn("少", width="small")
+            column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
             disabled_columns = ["日", "曜", "人数少", "鍵"]
             if lock_info is not None:
                 disabled_columns = editor_columns
@@ -6081,48 +6115,48 @@ elif mode == "⚙️ 設定":
                 with lc3:
                     st.metric("月間有給合計", f"{total_paid_leave} 日")
 
-                    # 従業員別テーブル
-                    table_data = []
-                    for emp, info in sorted(month_data.items()):
-                        table_data.append({
-                            "氏名": emp,
-                            "本人希望": info.get("submitted_paid_leave_days", 0),
-                            "管理者調整": info.get("admin_paid_leave_days", 0),
-                            "有給合計": info["paid_leave_days"],
-                            "調整日": format_day_list(info.get("admin_paid_leave_dates", [])),
-                            "基準勤務日数": info.get("monthly_target_workdays") or "-",
-                            "基準休日数": info.get("base_holidays") or "-",
-                            "希望休日合計": (
-                                (info.get("base_holidays") or 0) + info["paid_leave_days"]
-                                if info.get("base_holidays") is not None else "-"
-                            ),
-                            "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
-                        })
-                    st.dataframe(table_data, width="stretch", hide_index=True)
+                # 従業員別テーブル
+                table_data = []
+                for emp, info in sorted(month_data.items()):
+                    table_data.append({
+                        "氏名": emp,
+                        "本人希望": info.get("submitted_paid_leave_days", 0),
+                        "管理者調整": info.get("admin_paid_leave_days", 0),
+                        "有給合計": info["paid_leave_days"],
+                        "調整日": format_day_list(info.get("admin_paid_leave_dates", [])),
+                        "基準勤務日数": info.get("monthly_target_workdays") or "-",
+                        "基準休日数": info.get("base_holidays") or "-",
+                        "希望休日合計": (
+                            (info.get("base_holidays") or 0) + info["paid_leave_days"]
+                            if info.get("base_holidays") is not None else "-"
+                        ),
+                        "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
+                    })
+                st.dataframe(table_data, width="stretch", hide_index=True)
 
-                    # 有給を申請している人だけ強調表示
-                    applicants = [
-                        (emp, info) for emp, info in month_data.items()
-                        if info["paid_leave_days"] > 0
-                    ]
-                    if applicants:
-                        st.markdown("**🏖 有給申請者の詳細**")
-                        for emp, info in applicants:
-                            admin_note = ""
-                            if info.get("admin_paid_leave_days", 0):
-                                date_label = format_day_list(info.get("admin_paid_leave_dates", []))
-                                admin_note = f" / 管理者調整 {info['admin_paid_leave_days']}日"
-                                if date_label:
-                                    admin_note += f"（{date_label}）"
-                            st.markdown(
-                                f'<div style="background:#fef3c7; padding:8px 12px; '
-                                f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
-                                f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日{admin_note} '
-                                f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
-                                f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
-                                f'</div>',
-                                unsafe_allow_html=True,
-                            )
+                # 有給を申請している人だけ強調表示
+                applicants = [
+                    (emp, info) for emp, info in month_data.items()
+                    if info["paid_leave_days"] > 0
+                ]
+                if applicants:
+                    st.markdown("**🏖 有給申請者の詳細**")
+                    for emp, info in applicants:
+                        admin_note = ""
+                        if info.get("admin_paid_leave_days", 0):
+                            date_label = format_day_list(info.get("admin_paid_leave_dates", []))
+                            admin_note = f" / 管理者調整 {info['admin_paid_leave_days']}日"
+                            if date_label:
+                                admin_note += f"（{date_label}）"
+                        st.markdown(
+                            f'<div style="background:#fef3c7; padding:8px 12px; '
+                            f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
+                            f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日{admin_note} '
+                            f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
+                            f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
+                            f'</div>',
+                            unsafe_allow_html=True,
+                        )
 
                 st.markdown("---")
 
