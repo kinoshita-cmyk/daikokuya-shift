@@ -437,6 +437,27 @@ st.markdown("""
         font-size: 13px !important;
         line-height: 1.15 !important;
     }
+    .shift-editor-fixed-head-cell {
+        min-height: 48px;
+        padding: 4px 2px;
+        border-right: 1px solid #cbd5e1;
+        border-bottom: 1px solid #cbd5e1;
+        color: #6b7280;
+        font-size: 11px;
+        line-height: 1.12;
+        font-weight: 800;
+        text-align: center;
+        box-sizing: border-box;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: clip;
+        background: #f8fafc;
+    }
+    .shift-editor-fixed-employee span {
+        overflow: visible !important;
+        text-overflow: clip !important;
+        white-space: nowrap !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -817,6 +838,37 @@ def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) ->
             )
         return escape(name)
     return f"{name}\n{nowrap_count_text}" if count_text else name
+
+
+def render_shift_editor_fixed_header(shift: MonthlyShift) -> None:
+    """直接編集グリッドの外側に、固定表示用の名前ヘッダーを描画する。"""
+    employee_width = 48
+    grid_columns = (
+        "42px 30px "
+        + " ".join([f"{employee_width}px"] * len(EXPORT_COLUMN_ORDER))
+        + " 42px 50px"
+    )
+    cells = [
+        '<div class="shift-editor-fixed-head-cell">日</div>',
+        '<div class="shift-editor-fixed-head-cell">曜</div>',
+    ]
+    for name in EXPORT_COLUMN_ORDER:
+        cells.append(
+            '<div class="shift-editor-fixed-head-cell shift-editor-fixed-employee">'
+            f'{employee_header_label(shift, name, html=True)}'
+            '</div>'
+        )
+    cells.append('<div class="shift-editor-fixed-head-cell">少</div>')
+    cells.append('<div class="shift-editor-fixed-head-cell">鍵</div>')
+    html = (
+        '<div style="position:sticky; top:0; z-index:60; background:#f8fafc; '
+        'overflow-x:auto; border-left:1px solid #cbd5e1; border-right:1px solid #cbd5e1;">'
+        f'<div style="display:grid; grid-template-columns:{grid_columns}; '
+        'min-width:max-content; border-top:1px solid #cbd5e1;">'
+        + "".join(cells)
+        + '</div></div>'
+    )
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def render_shift_table(
@@ -1357,7 +1409,7 @@ def render_colored_shift_editor(
         "suppressScrollOnNewData": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
-        "headerHeight": 58,
+        "headerHeight": 0,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
@@ -1373,32 +1425,13 @@ def render_colored_shift_editor(
     aggrid_kwargs = {
         "gridOptions": grid_options,
         "key": grid_key,
-        "height": 640,
+        "height": 560,
         "width": "100%",
         "fit_columns_on_grid_load": False,
         "allow_unsafe_jscode": True,
         "theme": "streamlit",
         "reload_data": True,
         "custom_css": {
-            ".ag-root": {
-                "height": "100% !important",
-            },
-            ".ag-root-wrapper": {
-                "height": "100% !important",
-                "overflow": "hidden !important",
-            },
-            ".ag-body-viewport": {
-                "overflow-y": "auto !important",
-            },
-            ".ag-header": {
-                "position": "sticky !important",
-                "top": "0 !important",
-                "z-index": "20 !important",
-                "background": "#f8fafc !important",
-            },
-            ".ag-header-viewport": {
-                "background": "#f8fafc !important",
-            },
             ".shift-grid-header": {
                 "padding-left": "2px !important",
                 "padding-right": "2px !important",
@@ -1420,6 +1453,7 @@ def render_colored_shift_editor(
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
+    render_shift_editor_fixed_header(shift)
     return AgGrid(editor_df, **aggrid_kwargs)
 
 
