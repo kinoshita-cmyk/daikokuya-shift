@@ -1409,7 +1409,7 @@ def render_colored_shift_editor(
         "suppressScrollOnNewData": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
-        "headerHeight": 0,
+        "headerHeight": 58,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
@@ -1425,7 +1425,7 @@ def render_colored_shift_editor(
     aggrid_kwargs = {
         "gridOptions": grid_options,
         "key": grid_key,
-        "height": 560,
+        "height": 460,
         "width": "100%",
         "fit_columns_on_grid_load": False,
         "allow_unsafe_jscode": True,
@@ -1446,6 +1446,8 @@ def render_colored_shift_editor(
                 "overflow": "visible !important",
                 "text-overflow": "clip !important",
                 "text-align": "center !important",
+                "color": "#374151 !important",
+                "font-weight": "800 !important",
                 "font-size": "11px !important",
                 "line-height": "1.12 !important",
             },
@@ -1453,7 +1455,6 @@ def render_colored_shift_editor(
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
-    render_shift_editor_fixed_header(shift)
     return AgGrid(editor_df, **aggrid_kwargs)
 
 
