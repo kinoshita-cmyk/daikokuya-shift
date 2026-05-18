@@ -1216,7 +1216,7 @@ def render_colored_shift_editor(
             const base = {
                 textAlign: 'center',
                 fontWeight: '800',
-                fontSize: '16px',
+                fontSize: '15px',
                 borderRight: '1px solid #cbd5e1',
                 borderBottom: '1px solid #e5e7eb'
             };
@@ -1298,8 +1298,8 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 62,
-            "minWidth": 58,
+            "width": 56,
+            "minWidth": 52,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
             "wrapHeaderText": True,
