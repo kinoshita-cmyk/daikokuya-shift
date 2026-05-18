@@ -39,7 +39,8 @@ from .rules import (
     CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
-    FORBIDDEN_SAME_STORE_PAIRINGS,
+    FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
+    MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
 )
 
 
@@ -359,10 +360,25 @@ def generate_shift(
     # 本人の × 休み希望だけをハード制約にし、出勤希望は目的関数で強く優先する。
     # 出勤希望日のみ稼働する人（例: 南さん）は、希望日以外には配置しない。
     request_allowed_days_by_employee: dict[str, set[int]] = {}
+    mandatory_single_work_days_by_employee: dict[str, set[int]] = {}
+    off_days_by_employee: dict[str, set[int]] = {
+        name: {int(d) for d in days_}
+        for name, days_ in off_requests.items()
+    }
     for name, d, _store in work_requests:
         request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
+        if (
+            name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES
+            and int(d) not in off_days_by_employee.get(name, set())
+        ):
+            mandatory_single_work_days_by_employee.setdefault(name, set()).add(int(d))
     for name, d, _store in preferred_work_requests:
         request_allowed_days_by_employee.setdefault(name, set()).add(int(d))
+        if (
+            name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES
+            and int(d) not in off_days_by_employee.get(name, set())
+        ):
+            mandatory_single_work_days_by_employee.setdefault(name, set()).add(int(d))
     for name, candidate_days, _required, _store in preferred_work_groups:
         request_allowed_days_by_employee.setdefault(name, set()).update(int(d) for d in candidate_days)
     for e in main_employees:
@@ -372,6 +388,22 @@ def generate_shift(
         for d in days:
             if d not in allowed_days:
                 model.Add(off[e.name][d] == 1)
+        if e.name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES:
+            for d in sorted(mandatory_single_work_days_by_employee.get(e.name, set())):
+                model.Add(off[e.name][d] == 0)
+            for name, candidate_days, required_count, _store in preferred_work_groups:
+                if name != e.name:
+                    continue
+                safe_candidates = [
+                    int(d) for d in candidate_days
+                    if int(d) in allowed_days
+                    and int(d) not in off_days_by_employee.get(e.name, set())
+                ]
+                if safe_candidates and required_count > 0:
+                    model.Add(
+                        sum(1 - off[e.name][d] for d in safe_candidates)
+                        >= int(required_count)
+                    )
 
     # ============================================================
     # 制約 4: 柔軟休み希望（候補日のうち N 日を休みに）
@@ -434,7 +466,7 @@ def generate_shift(
                 )
 
     # エコメンバーの同店舗同勤務NG。
-    # 例: 大宮に下地さんがいる日は、指定メンバーを同じ大宮へ配置しない。
+    # 指定グループ内のメンバー同士は同じ日に同じ店舗へ配置しない。
     for store, anchor_name, blocked_names in FORBIDDEN_SAME_STORE_PAIRINGS:
         if anchor_name not in main_employee_names:
             continue
@@ -445,6 +477,15 @@ def generate_shift(
                 model.Add(
                     x[anchor_name][d][store] + x[blocked_name][d][store] <= 1
                 )
+    for group in FORBIDDEN_SAME_STORE_GROUPS:
+        available_members = [name for name in group if name in main_employee_names]
+        for idx, first_name in enumerate(available_members):
+            for second_name in available_members[idx + 1:]:
+                for d in days:
+                    for store in main_stores:
+                        model.Add(
+                            x[first_name][d][store] + x[second_name][d][store] <= 1
+                        )
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数

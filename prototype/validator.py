@@ -31,7 +31,8 @@ from .rules import (
     STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     STORE_STAFFING_LIMITS, GLOBAL_DAILY_STAFFING_LIMIT,
     get_monthly_work_target,
-    FORBIDDEN_SAME_STORE_PAIRINGS,
+    FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
+    MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
 )
 
 
@@ -121,6 +122,8 @@ def validate(
     max_consec: Optional[int] = None,
     allow_omiya_short: bool = True,
     monthly_store_count_rules: Optional[list[dict]] = None,
+    preferred_work_requests: Optional[list] = None,
+    preferred_work_groups: Optional[list] = None,
 ) -> ValidationResult:
     """
     シフトを検証して問題リストを返す。
@@ -128,6 +131,8 @@ def validate(
     Args:
         shift: 検証対象の1ヶ月シフト
         work_requests: [(name, day, store_or_none), ...] 出勤希望
+        preferred_work_requests: [(name, day, store_or_none), ...] 自由記載から抽出した単日出勤希望
+        preferred_work_groups: [(name, [day, ...], required_count, store_or_none), ...] 自由記載の候補日出勤希望
         off_requests: {name: [day, ...]} 休み希望
         prev_month: 前月持ち越しデータ
         holiday_overrides: その月の個別休日日数指定
@@ -135,6 +140,8 @@ def validate(
     """
     result = ValidationResult()
     work_requests = work_requests or []
+    preferred_work_requests = preferred_work_requests or []
+    preferred_work_groups = preferred_work_groups or []
     off_requests = off_requests or {}
     prev_month = prev_month or []
     holiday_overrides = holiday_overrides or {}
@@ -185,28 +192,38 @@ def validate(
     # 9. エコメンバー同店舗同勤務NGチェック
     _check_forbidden_same_store_pairings(shift, result, days_in_month)
 
-    # 10. 出勤希望チェック
+    # 10. 南さんなど、出勤希望日が絶対出勤扱いのスタッフ
+    _check_mandatory_work_on_request(
+        shift,
+        result,
+        work_requests,
+        preferred_work_requests,
+        preferred_work_groups,
+        off_requests,
+    )
+
+    # 11. 出勤希望チェック
     _check_work_requests(shift, result, work_requests, off_requests)
 
-    # 11. 大宮アンカースタッフ（春山・下地）チェック
+    # 12. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 12. 東口の月曜休店チェック
+    # 13. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 13. 月内の最低巡回条件チェック
+    # 14. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
 
-    # 14. 月別の追加配置ルールチェック
+    # 15. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 15. 牧野さんの東口・西口研修ルールチェック
+    # 16. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 16. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 17. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 17. 統計情報の集計
+    # 18. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -790,6 +807,106 @@ def _check_forbidden_same_store_pairings(
                     f"／対象: {', '.join(blocked_present)}"
                 ),
             ))
+        for group in FORBIDDEN_SAME_STORE_GROUPS:
+            group_members = set(group)
+            for store in (s for s in Store if s != Store.OFF):
+                store_group_workers = [
+                    a.employee for a in day_assignments
+                    if a.store == store and a.employee in group_members
+                ]
+                if len(store_group_workers) <= 1:
+                    continue
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="同勤務NG",
+                    day=day,
+                    employee=None,
+                    message=(
+                        f"{store.display_name}で同日に同じ店舗NGのメンバーが重複しています"
+                        f"／対象: {', '.join(store_group_workers)}"
+                    ),
+                ))
+
+
+def _check_mandatory_work_on_request(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    work_requests: list,
+    preferred_work_requests: list,
+    preferred_work_groups: list,
+    off_requests: dict[str, list[int]],
+) -> None:
+    """出勤希望日を必ず出勤扱いにする従業員の未充足を検出する。"""
+    mandatory_names = set(MANDATORY_WORK_ON_REQUEST_EMPLOYEES)
+    off_sets = {
+        name: {int(day) for day in days}
+        for name, days in (off_requests or {}).items()
+    }
+    single_day_requests: dict[str, set[int]] = {}
+    for name, day, _store in list(work_requests or []) + list(preferred_work_requests or []):
+        if name not in mandatory_names:
+            continue
+        try:
+            day_int = int(day)
+        except (TypeError, ValueError):
+            continue
+        if day_int in off_sets.get(name, set()):
+            continue
+        single_day_requests.setdefault(name, set()).add(day_int)
+
+    for name, requested_days in single_day_requests.items():
+        for day in sorted(requested_days):
+            assignment = shift.get_assignment(name, day)
+            if assignment is not None and assignment.store != Store.OFF:
+                continue
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="出勤希望未充足",
+                day=day,
+                employee=name,
+                message="出勤希望日なので必ず出勤にしてください",
+            ))
+
+    for name, candidate_days, required_count, _store in preferred_work_groups or []:
+        if name not in mandatory_names:
+            continue
+        try:
+            required = int(required_count)
+        except (TypeError, ValueError):
+            continue
+        if required <= 0:
+            continue
+        safe_days = []
+        for day in candidate_days or []:
+            try:
+                day_int = int(day)
+            except (TypeError, ValueError):
+                continue
+            if day_int in off_sets.get(name, set()):
+                continue
+            safe_days.append(day_int)
+        if not safe_days:
+            continue
+        worked_count = sum(
+            1
+            for day in set(safe_days)
+            if (
+                (assignment := shift.get_assignment(name, day)) is not None
+                and assignment.store != Store.OFF
+            )
+        )
+        if worked_count >= required:
+            continue
+        result.issues.append(Issue(
+            severity="ERROR",
+            category="出勤希望未充足",
+            day=None,
+            employee=name,
+            message=(
+                f"候補日のうち{required}日以上の出勤希望に対し、"
+                f"実績{worked_count}日です"
+            ),
+        ))
 
 
 def _check_work_requests(
@@ -808,6 +925,8 @@ def _check_work_requests(
             continue
         a = shift.get_assignment(name, day)
         if a is None or a.store == Store.OFF:
+            if name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES:
+                continue
             result.issues.append(Issue(
                 severity="INFO",
                 category="出勤希望未反映",
