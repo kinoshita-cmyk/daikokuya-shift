@@ -14,8 +14,11 @@
 
 import sys
 import os
+import json
+import inspect
 from pathlib import Path
 from typing import Optional
+from html import escape
 
 # パス設定: プロジェクトルートと app ディレクトリの両方を Python パスに追加
 # これにより `from prototype.X` と `from auth` 両方の形式が動く
@@ -25,11 +28,23 @@ sys.path.insert(0, str(_PROJECT_ROOT))   # for: from prototype.X import Y
 sys.path.insert(0, str(_THIS_DIR))       # for: from auth import Z
 
 import streamlit as st
+import pandas as pd
 from datetime import date, datetime
 from calendar import monthrange
+from urllib.parse import quote, unquote
+
+try:
+    from st_aggrid import AgGrid, JsCode
+    try:
+        from st_aggrid import GridUpdateMode
+    except Exception:
+        GridUpdateMode = None
+    HAS_AGGRID = True
+except Exception:
+    HAS_AGGRID = False
 
 from prototype.paths import (
-    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, MAY_2026_SHIFT_XLSX,
+    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, MAY_2026_SHIFT_XLSX,
 )
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
@@ -65,8 +80,291 @@ def get_anthropic_api_key() -> Optional[str]:
     if source == "session":
         return st.session_state.get("api_key")
     return None
+
+
+ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
+RULE_LEDGER_FILE = CONFIG_DIR / "rule_ledger_v1_0.json"
+
+
+def load_rule_ledger_v1() -> dict:
+    """ルール台帳 v1.0 を読み込む。壊れている場合は空の台帳を返す。"""
+    fallback = {
+        "version": "1.0",
+        "title": "大黒屋シフト作成ルール台帳",
+        "rules": [],
+        "employee_store_suitability": [],
+        "numeric_parameters": [],
+    }
+    if not RULE_LEDGER_FILE.exists():
+        return fallback
+    try:
+        with open(RULE_LEDGER_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return fallback
+    if not isinstance(data, dict):
+        return fallback
+    return {**fallback, **data}
+
+
+def build_employee_suitability_rows_from_master() -> list[dict]:
+    """台帳の店舗適性欄が空の場合、現在の従業員マスターから表示用に作る。"""
+    try:
+        from prototype.employee_config import get_all_employees_including_retired
+        from prototype.models import Affinity, Role, Store
+    except Exception:
+        return []
+
+    store_order = [
+        Store.AKABANE,
+        Store.HIGASHIGUCHI,
+        Store.OMIYA,
+        Store.NISHIGUCHI,
+        Store.SUZURAN,
+    ]
+    affinity_bucket = {
+        Affinity.STRONG: "強",
+        Affinity.MEDIUM: "中",
+        Affinity.WEAK: "弱",
+        Affinity.NONE: "不可",
+    }
+    rows = []
+    try:
+        employees = get_all_employees_including_retired()
+    except Exception:
+        return []
+
+    for emp in employees:
+        if getattr(emp, "role", None) in (Role.REPRESENTATIVE, Role.ADVISOR):
+            continue
+        if getattr(emp, "is_auxiliary", False):
+            continue
+        grouped = {"強": [], "中": [], "弱": [], "不可": []}
+        affinities = getattr(emp, "affinities", {}) or {}
+        for store in store_order:
+            bucket = affinity_bucket.get(affinities.get(store, Affinity.NONE), "不可")
+            grouped[bucket].append(store.display_name)
+        home_store = getattr(emp, "home_store", None)
+        fixed_to_home = (
+            home_store is not None
+            and all(
+                store == home_store or affinities.get(store, Affinity.NONE) == Affinity.NONE
+                for store in store_order
+            )
+        )
+        rows.append({
+            "氏名": getattr(emp, "name", ""),
+            "絶対担当": home_store.display_name if fixed_to_home else "-",
+            "主担当": "-" if fixed_to_home else ("、".join(grouped["強"]) or "-"),
+            "通常対応可": "、".join(grouped["中"]) or "-",
+            "応援・巡回可": "、".join(grouped["弱"]) or "-",
+            "絶対配置不可": "、".join(grouped["不可"]) or "-",
+            "月内の最低巡回条件": "-",
+            "備考": getattr(emp, "notes", "") or "",
+        })
+    return rows
+
+
+def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
+    """台帳の数値基準欄が空の場合、現在の本設定から表示用に作る。"""
+    return [
+        {
+            "分類": "絶対条件",
+            "項目": "最大連勤日数",
+            "現在値": str(parameters.get("max_consec_work", 5)),
+            "備考": "この日数を超える連勤はエラー扱い。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "推奨連勤上限",
+            "現在値": str(parameters.get("soft_consec_threshold", 4)),
+            "備考": "この日数を超えると、生成時にできるだけ避ける。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "既定の月内最低休日数",
+            "現在値": str(parameters.get("default_holiday_days", 8)),
+            "備考": "個別指定がない従業員の基本休日数。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "2連休 月内最低回数",
+            "現在値": str(parameters.get("min_2off_per_month", 1)),
+            "備考": "原則として月内に確保したい2連休の最低回数。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "2連休 月内最大回数",
+            "現在値": str(parameters.get("max_2off_per_month", 2)),
+            "備考": "取りすぎ確認用の目安。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "店舗標準人数",
+            "現在値": "赤羽3 / 東口1 / 大宮3 / すずらん3 / 西口1",
+            "備考": "生成時は標準人数に寄せる。研修や不足時は例外あり。",
+        },
+        {
+            "分類": "絶対条件",
+            "項目": "店舗最大人数",
+            "現在値": "赤羽4 / 東口1 / 大宮4 / すずらん4 / 西口2",
+            "備考": "赤羽・大宮の5名は原則NG。4月3日などの特殊日は月別例外で扱う。",
+        },
+        {
+            "分類": "絶対条件",
+            "項目": "1日全体人数上限",
+            "現在値": "最大15名",
+            "備考": "通常は11名体制。増員優先順位は西口、すずらん、大宮、赤羽。",
+        },
+        {
+            "分類": "運用設定",
+            "項目": "ソルバー最大実行時間",
+            "現在値": f"{parameters.get('solver_time_limit_seconds', 180)}秒",
+            "備考": "シフト自動生成に使う最大時間。",
+        },
+        {
+            "分類": "運用設定",
+            "項目": "ソルバーシード",
+            "現在値": str(parameters.get("solver_seed", 42)),
+            "備考": "同じ入力で同じ結果に近づけるための値。",
+        },
+    ]
+
+
+def load_admin_paid_leave_data() -> dict:
+    """管理者が後から付けた有給調整を読み込む。"""
+    if not ADMIN_PAID_LEAVE_FILE.exists():
+        return {"version": 1, "adjustments": []}
+    try:
+        with open(ADMIN_PAID_LEAVE_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"version": 1, "adjustments": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "adjustments": []}
+    adjustments = data.get("adjustments", [])
+    if not isinstance(adjustments, list):
+        adjustments = []
+    data["version"] = int(data.get("version", 1) or 1)
+    data["adjustments"] = adjustments
+    return data
+
+
+def save_admin_paid_leave_data(data: dict, actor: str = "管理者") -> Path:
+    """管理者有給調整を保存する。"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now().isoformat(),
+        "updated_by": actor,
+        "adjustments": data.get("adjustments", []),
+    }
+    with open(ADMIN_PAID_LEAVE_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    return ADMIN_PAID_LEAVE_FILE
+
+
+def push_admin_paid_leave_to_github() -> None:
+    """設定済みなら管理者有給調整をGitHubへ保存する。"""
+    try:
+        from prototype.github_backup import push_local_file_to_github
+
+        push_local_file_to_github(
+            ADMIN_PAID_LEAVE_FILE,
+            "config/admin_paid_leave_adjustments.json",
+            "Update admin paid leave adjustments",
+        )
+    except Exception:
+        pass
+
+
+def parse_day_list_text(text: str, days_in_month: int) -> list[int]:
+    """「26」や「5, 26」から月内の日付を取り出す。"""
+    days = []
+    for raw in str(text or "").replace("、", ",").replace("・", ",").split(","):
+        raw = raw.strip().replace("日", "")
+        if not raw.isdigit():
+            continue
+        day = int(raw)
+        if 1 <= day <= days_in_month:
+            days.append(day)
+    return sorted(set(days))
+
+
+def admin_paid_leave_adjustments_for_month(year: int, month: int) -> list[dict]:
+    """指定年月の管理者有給調整だけを返す。"""
+    data = load_admin_paid_leave_data()
+    return [
+        adj for adj in data.get("adjustments", [])
+        if int(adj.get("year", 0) or 0) == int(year)
+        and int(adj.get("month", 0) or 0) == int(month)
+    ]
+
+
+def admin_paid_leave_days_for_month(year: int, month: int) -> dict[str, int]:
+    """管理者調整分の有給日数を従業員別に合算する。"""
+    totals: dict[str, int] = {}
+    for adj in admin_paid_leave_adjustments_for_month(year, month):
+        employee = str(adj.get("employee", "")).strip()
+        if not employee:
+            continue
+        totals[employee] = totals.get(employee, 0) + int(adj.get("days", 0) or 0)
+    return totals
+
+
+def admin_paid_leave_dates_for_month(year: int, month: int) -> dict[str, set[int]]:
+    """管理者調整分の有給日付を従業員別に返す。"""
+    dates_by_employee: dict[str, set[int]] = {}
+    for adj in admin_paid_leave_adjustments_for_month(year, month):
+        employee = str(adj.get("employee", "")).strip()
+        if not employee:
+            continue
+        dates_by_employee.setdefault(employee, set()).update(
+            int(d) for d in adj.get("dates", []) if str(d).isdigit()
+        )
+    return dates_by_employee
+
+
+def combined_paid_leave_days(
+    submitted_paid_leave_days: dict[str, int],
+    year: int,
+    month: int,
+) -> dict[str, int]:
+    """本人申請分と管理者調整分を合算する。"""
+    combined = {
+        emp: int(days or 0)
+        for emp, days in (submitted_paid_leave_days or {}).items()
+    }
+    for emp, days in admin_paid_leave_days_for_month(year, month).items():
+        combined[emp] = int(combined.get(emp, 0) or 0) + int(days or 0)
+    return {emp: days for emp, days in combined.items() if days > 0}
+
+
+def add_admin_paid_leave_adjustment(
+    year: int,
+    month: int,
+    employee: str,
+    days: int,
+    dates: Optional[list[int]] = None,
+    reason: str = "",
+    actor: str = "管理者",
+) -> None:
+    """管理者側の有給調整を1件追加する。"""
+    data = load_admin_paid_leave_data()
+    data.setdefault("adjustments", []).append({
+        "year": int(year),
+        "month": int(month),
+        "employee": str(employee),
+        "days": int(days),
+        "dates": sorted(set(int(d) for d in (dates or []) if int(d) > 0)),
+        "reason": reason,
+        "created_at": datetime.now().isoformat(),
+        "created_by": actor,
+    })
+    save_admin_paid_leave_data(data, actor=actor)
+    push_admin_paid_leave_to_github()
 from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
-from prototype.employees import ALL_EMPLOYEES, shift_active_employees
+from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
 from prototype.generator import generate_shift, determine_operation_modes
 from prototype.validator import validate
 from prototype.backup import ShiftBackup
@@ -83,7 +381,12 @@ from prototype.models import EmploymentStatus, Skill, Role, Store, StationType, 
 from prototype.may_2026_data import (
     OFF_REQUESTS, WORK_REQUESTS, PREVIOUS_MONTH_CARRYOVER, FLEXIBLE_OFF_REQUESTS,
 )
-from prototype.rules import MAY_2026_HOLIDAY_OVERRIDES
+from prototype.rules import (
+    MAY_2026_HOLIDAY_OVERRIDES,
+    STORE_KEYHOLDERS,
+    SUZURAN_KEY_SUPPORT_FROM_OMIYA,
+    get_monthly_work_target,
+)
 
 
 # ============================================================
@@ -121,6 +424,19 @@ st.markdown("""
     .shift-cell-nishi { background: #fce7f3; }
     .shift-cell-suzuran { background: #e0e7ff; }
     .shift-cell-off { background: #f3f4f6; color: #6b7280; }
+    .ag-header-cell-label {
+        justify-content: center !important;
+    }
+    .ag-header-cell-text {
+        white-space: pre !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
+        overflow: visible !important;
+        text-overflow: clip !important;
+        text-align: center !important;
+        font-size: 13px !important;
+        line-height: 1.15 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -191,8 +507,8 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
     """
     人員不足を日付・店舗別に検出する（Validatorと同じ判定ロジックを使用）。
     判定基準:
-    - 大宮駅前店のエコが1名のみ（NORMAL モードで本来2名必要）
-    - 各店舗のエコ/チケット人数が必要数（モード別）を下回る
+    - 人員少マークは「人数が足りない日」を示す
+    - スキル構成の注意は検証結果側で表示する
     """
     from prototype.rules import get_capacity
     from prototype.employees import get_employee
@@ -225,12 +541,6 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
             else:
                 store_ticket[a.store] = store_ticket.get(a.store, 0) + 1
 
-        # 大宮 1名体制チェック（NORMAL モードのみ）
-        if mode == OperationMode.NORMAL:
-            omiya_eco = store_eco.get(Store.OMIYA, 0)
-            if omiya_eco < 2:
-                short_by_store.setdefault(d, set()).add(Store.OMIYA)
-
         # 各店舗の最低人数チェック
         for store, store_cap in cap.items():
             weekday = date(shift.year, shift.month, d).weekday()
@@ -238,13 +548,45 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
                 continue
             eco_count = store_eco.get(store, 0)
             ticket_count = store_ticket.get(store, 0)
+            total_count = eco_count + ticket_count
 
-            # すずらんは「エコ1+チケット2」または「エコ2+チケット1」を許容
-            if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if eco_count >= 1 and ticket_count >= 1 and eco_count + ticket_count >= 3:
+            if store == Store.HIGASHIGUCHI:
+                if not (eco_count == 1 and ticket_count == 0 and total_count == 1):
+                    short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if store == Store.AKABANE and mode == OperationMode.NORMAL:
+                yamamoto_present = any(
+                    a.employee == "山本" and a.store == Store.AKABANE
+                    for a in day_assigns
+                )
+                effective_ticket = ticket_count + max(0, eco_count - 1)
+                if yamamoto_present:
+                    effective_ticket += 1
+                if eco_count < 1 or effective_ticket < 2:
+                    short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if store == Store.OMIYA and mode == OperationMode.NORMAL:
+                if eco_count >= 1 and total_count >= 3:
                     continue
+                if total_count == 2 and eco_count >= 1:
+                    short_by_store.setdefault(d, set()).add(store)
+                    continue
+                short_by_store.setdefault(d, set()).add(store)
+                continue
 
-            if eco_count < store_cap.eco_min or ticket_count < store_cap.ticket_min:
+            # 人員少マークでは人数不足のみを見る。スキル構成は検証結果側で確認する。
+            if store == Store.SUZURAN and mode == OperationMode.NORMAL:
+                if eco_count >= 1 and total_count >= 3:
+                    continue
+                short_by_store.setdefault(d, set()).add(store)
+                continue
+
+            if (
+                eco_count < store_cap.eco_min
+                or total_count < store_cap.eco_min + store_cap.ticket_min
+            ):
                 short_by_store.setdefault(d, set()).add(store)
 
     return short_by_store
@@ -253,6 +595,86 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
 def detect_short_staff_days(shift: MonthlyShift) -> set[int]:
     """人員不足がある日付だけを返す（既存処理との互換用）。"""
     return set(detect_short_staff_by_store(shift).keys())
+
+
+def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, str]]:
+    """鍵担当がいない店舗を日付・店舗別に検出する。"""
+    from prototype.rules import get_capacity
+
+    warnings_by_store: dict[int, dict[Store, str]] = {}
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    for d in range(1, days_in_month + 1):
+        mode = shift.operation_modes.get(d, OperationMode.NORMAL)
+        if mode == OperationMode.CLOSED:
+            continue
+        capacity_map = get_capacity(mode)
+        weekday = date(shift.year, shift.month, d).weekday()
+        day_assignments = shift.get_day_assignments(d)
+        for store, keyholders in STORE_KEYHOLDERS.items():
+            cap = capacity_map.get(store)
+            if cap is None:
+                continue
+            if weekday in cap.closed_dow:
+                continue
+            workers = [
+                a.employee for a in day_assignments
+                if a.store == store
+            ]
+            if not workers:
+                continue
+            if any(name in keyholders for name in workers):
+                continue
+            status = "missing"
+            if store == Store.SUZURAN:
+                omiya_workers = [
+                    a.employee for a in day_assignments
+                    if a.store == Store.OMIYA
+                ]
+                if any(name in SUZURAN_KEY_SUPPORT_FROM_OMIYA for name in omiya_workers):
+                    status = "support"
+            warnings_by_store.setdefault(d, {})[store] = status
+    return warnings_by_store
+
+
+def format_key_warning_summary_for_day(
+    statuses: dict[Store, str],
+    include_store_names: bool = False,
+) -> str:
+    """編集グリッド内の鍵欄に入れる短いテキスト。"""
+    if not statuses:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    labels = []
+    for store in sorted(
+        statuses,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        prefix = "応援" if statuses[store] == "support" else "鍵"
+        if include_store_names:
+            labels.append(f"{prefix}{mark}{name}")
+        else:
+            labels.append(f"{'応' if statuses[store] == 'support' else '鍵'}{mark}")
+    return "・".join(labels)
+
+
+def format_key_warning_summary(
+    shift: MonthlyShift,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
+) -> str:
+    """鍵確認日を短く表示する。"""
+    key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
+    parts = []
+    for day in sorted(key_warnings_by_store):
+        day_text = format_key_warning_summary_for_day(
+            key_warnings_by_store[day],
+            include_store_names=True,
+        )
+        if day_text:
+            parts.append(f"{shift.month}/{day}（{day_text}）")
+    return ", ".join(parts)
 
 
 def format_short_staff_summary(
@@ -291,11 +713,43 @@ def render_short_staff_marks(stores: set[Store]) -> str:
         mark, name, color, bg = SHORT_STAFF_STORE_LABELS.get(
             store, (store.value, store.display_name, "#64748b", "#f8fafc")
         )
+        title = escape(f"{name} 人員少")
         chips.append(
             f'<span style="display:inline-flex; align-items:center; gap:2px; '
-            f'margin:1px 2px; padding:2px 5px; border-radius:4px; '
+            f'justify-content:center; min-width:22px; height:22px; '
+            f'margin:1px 1px; padding:0 2px; border-radius:4px; '
             f'background:{bg}; color:{color}; border:1px solid {color}; '
-            f'font-size:12px; font-weight:700; white-space:nowrap;">{mark}{name}</span>'
+            f'font-size:12px; font-weight:800; white-space:nowrap;" '
+            f'title="{title}">{mark}</span>'
+        )
+    return "".join(chips)
+
+
+def render_key_warning_marks(statuses: dict[Store, str]) -> str:
+    """鍵欄に表示する店舗別マークHTML。"""
+    if not statuses:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    chips = []
+    for store in sorted(
+        statuses,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, _name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        is_support = statuses[store] == "support"
+        prefix = "応" if is_support else "鍵"
+        color = "#2563eb" if is_support else "#b45309"
+        bg = "#eff6ff" if is_support else "#fff7ed"
+        title = escape(f"{'すずらん鍵応援' if is_support else '鍵担当不在'}: {name}")
+        chips.append(
+            f'<span style="display:inline-flex; align-items:center; gap:2px; '
+            f'justify-content:center; min-width:30px; height:22px; '
+            f'margin:1px 1px; padding:0 3px; border-radius:4px; '
+            f'background:{bg}; color:{color}; border:1px solid {color}; '
+            f'font-size:12px; font-weight:800; white-space:nowrap;" '
+            f'title="{title}">{prefix}{mark}</span>'
         )
     return "".join(chips)
 
@@ -328,12 +782,54 @@ def render_shift_legend() -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
+def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
+    """シフト表ヘッダーに出す「実績/基準」表示を返す。"""
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    work_days = sum(
+        1
+        for d in range(1, days_in_month + 1)
+        if (a := shift.get_assignment(name, d)) and a.store != Store.OFF
+    )
+    try:
+        employee = get_employee(name)
+        target = get_monthly_work_target(
+            employee.name,
+            shift.month,
+            employee.annual_target_days,
+        )
+    except Exception:
+        target = None
+    if target is None:
+        return str(work_days) if work_days else ""
+    return f"{work_days}/{target}"
+
+
+def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) -> str:
+    """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
+    count_text = employee_work_target_text(shift, name)
+    nowrap_count_text = "\u2060".join(count_text) if count_text else ""
+    if html:
+        if count_text:
+            return (
+                f'<span style="display:block; font-weight:800;">{escape(name)}</span>'
+                f'<span style="display:block; font-size:11px; line-height:1.1; '
+                f'color:#dbeafe; white-space:nowrap;">{escape(nowrap_count_text)}</span>'
+            )
+        return escape(name)
+    return f"{name}\n{nowrap_count_text}" if count_text else name
+
+
 def render_shift_table(
     shift: MonthlyShift,
     short_staff_days: Optional[set[int]] = None,
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
+    key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
     sticky: bool = False,
     changed_cells: Optional[set[tuple[str, int]]] = None,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
+    changed_cell_color: str = "#f97316",
+    selectable_cells: bool = False,
+    selected_cell: Optional[tuple[str, int]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -346,15 +842,19 @@ def render_shift_table(
         short_staff_days = set(short_staff_by_store.keys())
     else:
         short_staff_days = set(short_staff_days) | set(short_staff_by_store.keys())
+    if key_warnings_by_store is None:
+        key_warnings_by_store = detect_key_warnings_by_store(shift)
     changed_cells = changed_cells or set()
+    off_request_cells = off_request_cells or set()
+    selected_cell = selected_cell or ("", 0)
 
     # ヘッダー
-    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 1
+    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 2
     wrapper_style = (
-        "max-height:400px; overflow:auto; border:1px solid #cbd5e1; "
+        "max-height:70vh; overflow:auto; border:1px solid #cbd5e1; "
         "border-radius:6px; background:white;"
         if sticky else
-        "overflow-x:auto;"
+        "max-width:100%; overflow:auto;"
     )
     table_style = (
         "border-collapse:separate; border-spacing:0; font-family:sans-serif; "
@@ -370,15 +870,16 @@ def render_shift_table(
         if sticky else ""
     )
     left_date_style = (
-        "position:sticky; left:0; z-index:6; min-width:70px; width:70px;"
-        if sticky else "min-width:70px; width:70px;"
+        "position:sticky; left:0; z-index:6; min-width:58px; width:58px;"
+        if sticky else "min-width:58px; width:58px;"
     )
     left_weekday_style = (
-        "position:sticky; left:70px; z-index:6; min-width:46px; width:46px;"
-        if sticky else "min-width:46px; width:46px;"
+        "position:sticky; left:58px; z-index:6; min-width:38px; width:38px;"
+        if sticky else "min-width:38px; width:38px;"
     )
-    employee_header_style = "min-width:52px;"
-    short_header_style = "min-width:190px; width:190px;"
+    employee_header_style = "min-width:50px; width:50px; line-height:1.12; font-size:12px;"
+    short_header_style = "min-width:48px; width:48px; max-width:48px;"
+    key_header_style = "min-width:64px; width:64px; max-width:64px;"
     html = (
         f'<div style="{wrapper_style}">'
         f'<table style="{table_style}">'
@@ -401,13 +902,18 @@ def render_shift_table(
         f'{header_style} {left_weekday_style}">曜</th>'
     )
     for name in EXPORT_COLUMN_ORDER:
+        header_label = employee_header_label(shift, name, html=True)
         html += (
             f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
-            f'{header_style} {employee_header_style}">{name}</th>'
+            f'{header_style} {employee_header_style}">{header_label}</th>'
         )
     html += (
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
-        f'{header_style} {short_header_style}">人員少</th>'
+        f'{header_style} {short_header_style}" title="人員少">少</th>'
+    )
+    html += (
+        f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+        f'{header_style} {key_header_style}">鍵</th>'
     )
     html += '</tr></thead><tbody>'
 
@@ -452,22 +958,53 @@ def render_shift_table(
                 cell_text = a.store.value
                 cell_bg = color_map.get(cell_text, "white")
             changed_style = (
-                "box-shadow:inset 0 0 0 3px #f97316; font-weight:bold;"
+                f"box-shadow:inset 0 0 0 3px {changed_cell_color}; font-weight:bold;"
                 if (name, d) in changed_cells else ""
             )
+            selected_style = (
+                "box-shadow:inset 0 0 0 3px #2563eb; font-weight:bold;"
+                if (name, d) == selected_cell else ""
+            )
+            off_request_style = (
+                "outline:2px solid #dc2626; outline-offset:-3px; "
+                "font-weight:900; color:#991b1b;"
+                if (name, d) in off_request_cells and cell_text == "×" else ""
+            )
+            cell_body = cell_text
+            if selectable_cells:
+                ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+                href = (
+                    f"?edit_ym={ym}&edit_day={d}"
+                    f"&edit_employee={quote(name)}"
+                )
+                cell_body = (
+                    f'<a href="{href}" style="display:block; min-width:28px; '
+                    f'color:inherit; text-decoration:none;">{cell_text or "&nbsp;"}</a>'
+                )
             html += (
                 f'<td style="padding:6px; border:1px solid #ccc; '
                 f'text-align:center; background:{cell_bg}; font-size:16px; '
-                f'{changed_style}">{cell_text}</td>'
+                f'{changed_style} {selected_style} {off_request_style}">{cell_body}</td>'
             )
 
         # 人員少マーク
         short_mark = render_short_staff_marks(short_staff_by_store.get(d, set()))
         short_bg = "#fff3cd" if is_short else "white"
         html += (
-            f'<td style="padding:4px 6px; border:1px solid #ccc; min-width:190px; '
-            f'text-align:center; background:{short_bg}; '
+            f'<td style="padding:3px 2px; border:1px solid #ccc; '
+            f'min-width:48px; width:48px; max-width:48px; '
+            f'text-align:center; background:{short_bg}; white-space:normal; '
+            f'line-height:1.15; '
             f'font-weight:bold; color:#92400e;">{short_mark}</td>'
+        )
+        key_mark = render_key_warning_marks(key_warnings_by_store.get(d, {}))
+        key_bg = "#fff7ed" if key_mark else "white"
+        html += (
+            f'<td style="padding:3px 2px; border:1px solid #ccc; '
+            f'min-width:64px; width:64px; max-width:64px; '
+            f'text-align:center; background:{key_bg}; white-space:normal; '
+            f'line-height:1.15; '
+            f'font-weight:bold; color:#b45309;">{key_mark}</td>'
         )
         html += '</tr>'
 
@@ -480,9 +1017,1486 @@ def get_session_shift() -> Optional[MonthlyShift]:
     return st.session_state.get("current_shift")
 
 
+def shift_session_key(year: int, month: int) -> str:
+    """年月ごとのシフト保存キー。"""
+    return f"{int(year):04d}-{int(month):02d}"
+
+
+def get_session_shift_for_month(year: int, month: int) -> Optional[MonthlyShift]:
+    """指定年月のシフトをセッションから取得する。"""
+    shifts_by_month = st.session_state.get("shifts_by_month", {})
+    shift = shifts_by_month.get(shift_session_key(year, month))
+    if shift is not None:
+        return shift
+    current_shift = get_session_shift()
+    if (
+        current_shift is not None
+        and int(current_shift.year) == int(year)
+        and int(current_shift.month) == int(month)
+    ):
+        return current_shift
+    return None
+
+
 def save_session_shift(shift: MonthlyShift) -> None:
     """シフトをセッションに保存"""
     st.session_state["current_shift"] = shift
+    shifts_by_month = dict(st.session_state.get("shifts_by_month", {}))
+    shifts_by_month[shift_session_key(shift.year, shift.month)] = shift
+    st.session_state["shifts_by_month"] = shifts_by_month
+
+
+STORE_SYMBOL_OPTIONS = ["", "×", "○", "□", "△", "☆", "◆"]
+STORE_SYMBOL_TO_STORE = {
+    "×": Store.OFF,
+    "○": Store.AKABANE,
+    "□": Store.HIGASHIGUCHI,
+    "△": Store.OMIYA,
+    "☆": Store.NISHIGUCHI,
+    "◆": Store.SUZURAN,
+}
+NO_HOME_STORE_LABEL = "（なし）"
+
+
+def store_select_label(option: str) -> str:
+    """店舗選択の内部値を、日本語の店舗名で表示する。"""
+    if option == NO_HOME_STORE_LABEL:
+        return option
+    try:
+        return Store[option].display_name
+    except Exception:
+        return str(option)
+
+
+def clone_monthly_shift(shift: MonthlyShift) -> MonthlyShift:
+    """シフトを編集履歴用にコピーする。"""
+    return MonthlyShift(
+        year=shift.year,
+        month=shift.month,
+        assignments=[
+            ShiftAssignment(
+                employee=a.employee,
+                day=a.day,
+                store=a.store,
+                is_paid_leave=a.is_paid_leave,
+            )
+            for a in shift.assignments
+        ],
+        operation_modes=dict(shift.operation_modes),
+    )
+
+
+def assignment_to_symbol(assignment: Optional[ShiftAssignment]) -> str:
+    """配属を表の記号に変換する。"""
+    if assignment is None:
+        return ""
+    return assignment.store.value
+
+
+def normalize_store_symbol(value) -> str:
+    """編集表の値を安全な店舗記号に丸める。"""
+    if value is None:
+        return ""
+    symbol = str(value).strip()
+    return symbol if symbol in STORE_SYMBOL_OPTIONS else ""
+
+
+def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
+    """シフトを編集表用の行データに変換する。"""
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    short_staff_by_store = detect_short_staff_by_store(shift)
+    key_warnings_by_store = detect_key_warnings_by_store(shift)
+    rows = []
+    for day in range(1, days_in_month + 1):
+        row = {
+            "日": day,
+            "曜": weekday_jp[date(shift.year, shift.month, day).weekday()],
+        }
+        for name in EXPORT_COLUMN_ORDER:
+            row[name] = assignment_to_symbol(shift.get_assignment(name, day))
+        row["人数少"] = format_short_staff_summary_for_day(short_staff_by_store.get(day, set()))
+        row["鍵"] = format_key_warning_summary_for_day(key_warnings_by_store.get(day, {}))
+        rows.append(row)
+    return rows
+
+
+def normalize_editor_records(rows: list[dict]) -> list[dict]:
+    """編集部品から返った行データを、シフト表の標準形式に揃える。"""
+    normalized = []
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        normalized_row = {
+            "日": day,
+            "曜": str(row.get("曜") or ""),
+        }
+        for name in EXPORT_COLUMN_ORDER:
+            normalized_row[name] = normalize_store_symbol(row.get(name, ""))
+        normalized_row["人数少"] = str(row.get("人数少") or "")
+        normalized_row["鍵"] = str(row.get("鍵") or "")
+        normalized.append(normalized_row)
+    return normalized
+
+
+def editor_symbol_signature(rows: list[dict]) -> str:
+    """編集行の勤務記号だけを比較するための署名。"""
+    payload = []
+    for row in normalize_editor_records(rows):
+        payload.append([
+            int(row["日"]),
+            [row.get(name, "") for name in EXPORT_COLUMN_ORDER],
+        ])
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def refresh_editor_short_staff_column(
+    base_shift: MonthlyShift,
+    rows: list[dict],
+) -> list[dict]:
+    """未確定編集を反映した人員少欄に更新する。"""
+    normalized = normalize_editor_records(rows)
+    preview_shift = editor_rows_to_shift(base_shift, normalized)
+    short_staff_by_store = detect_short_staff_by_store(preview_shift)
+    key_warnings_by_store = detect_key_warnings_by_store(preview_shift)
+    for row in normalized:
+        row["人数少"] = format_short_staff_summary_for_day(
+            short_staff_by_store.get(int(row["日"]), set())
+        )
+        row["鍵"] = format_key_warning_summary_for_day(
+            key_warnings_by_store.get(int(row["日"]), {})
+        )
+    return normalized
+
+
+def format_short_staff_summary_for_day(stores: set[Store]) -> str:
+    """編集グリッド内の人員少欄に入れる短いテキスト。"""
+    if not stores:
+        return ""
+    store_order = list(SHORT_STAFF_STORE_LABELS)
+    labels = []
+    for store in sorted(
+        stores,
+        key=lambda s: store_order.index(s) if s in store_order else len(store_order),
+    ):
+        mark, _name, _, _ = SHORT_STAFF_STORE_LABELS.get(
+            store, (store.value, store.display_name, "#64748b", "#f8fafc")
+        )
+        labels.append(mark)
+    return "・".join(labels)
+
+
+def render_colored_shift_editor(
+    shift: MonthlyShift,
+    editor_df: pd.DataFrame,
+    grid_key: str,
+    locked: bool = False,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
+    changed_cells: Optional[set[tuple[str, int]]] = None,
+):
+    """色付きセルのまま編集できるシフト表を表示する。"""
+    off_request_keys = json.dumps(
+        sorted(f"{employee}|{int(day)}" for employee, day in (off_request_cells or set())),
+        ensure_ascii=False,
+    )
+    changed_cell_keys = json.dumps(
+        sorted(f"{employee}|{int(day)}" for employee, day in (changed_cells or set())),
+        ensure_ascii=False,
+    )
+    cell_style = JsCode(
+        """
+        function(params) {
+            const value = params.value;
+            const fixedOffCells = new Set(__OFF_REQUEST_KEYS__);
+            const changedCells = new Set(__CHANGED_CELL_KEYS__);
+            const cellKey = String(params.colDef.field) + '|' + String(params.data['日']);
+            const isFixedOff = fixedOffCells.has(cellKey);
+            const isChanged = changedCells.has(cellKey);
+            const base = {
+                textAlign: 'center',
+                fontWeight: '800',
+                fontSize: '14px',
+                borderRight: '1px solid #cbd5e1',
+                borderBottom: '1px solid #e5e7eb'
+            };
+            function withMarkers(style) {
+                if (isFixedOff && isChanged) {
+                    style.boxShadow = 'inset 0 0 0 2px #dc2626, inset 0 0 0 5px #16a34a';
+                    style.color = '#991b1b';
+                    style.fontWeight = '900';
+                } else if (isFixedOff) {
+                    style.boxShadow = 'inset 0 0 0 3px #dc2626';
+                    style.color = '#991b1b';
+                    style.fontWeight = '900';
+                } else if (isChanged) {
+                    style.boxShadow = 'inset 0 0 0 3px #16a34a';
+                    style.fontWeight = '900';
+                }
+                return style;
+            }
+            if (value === '○') { return withMarkers({...base, backgroundColor: '#fef3c7', color: '#92400e'}); }
+            if (value === '□') { return withMarkers({...base, backgroundColor: '#dbeafe', color: '#1d4ed8'}); }
+            if (value === '△') { return withMarkers({...base, backgroundColor: '#d1fae5', color: '#047857'}); }
+            if (value === '☆') { return withMarkers({...base, backgroundColor: '#fce7f3', color: '#be185d'}); }
+            if (value === '◆') { return withMarkers({...base, backgroundColor: '#e0e7ff', color: '#4338ca'}); }
+            if (value === '×') { return withMarkers({...base, backgroundColor: '#f3f4f6', color: '#4b5563'}); }
+            return withMarkers({...base, backgroundColor: '#ffffff', color: '#111827'});
+        }
+        """.replace("__OFF_REQUEST_KEYS__", off_request_keys)
+        .replace("__CHANGED_CELL_KEYS__", changed_cell_keys)
+    )
+    header_style = JsCode(
+        """
+        function(params) {
+            return {
+                backgroundColor: '#1e3a8a',
+                color: '#ffffff',
+                fontWeight: '800',
+                textAlign: 'center',
+                whiteSpace: 'pre',
+                wordBreak: 'keep-all',
+                overflowWrap: 'normal',
+                overflow: 'visible',
+                textOverflow: 'clip',
+                fontSize: '13px',
+                lineHeight: '1.15'
+            };
+        }
+        """
+    )
+    column_defs = [
+        {
+            "field": "日",
+            "editable": False,
+            "pinned": "left",
+            "width": 42,
+            "minWidth": 38,
+            "cellStyle": {
+                "textAlign": "center",
+                "fontWeight": "800",
+                "backgroundColor": "#f8fafc",
+            },
+        },
+        {
+            "field": "曜",
+            "editable": False,
+            "pinned": "left",
+            "width": 30,
+            "minWidth": 30,
+            "cellStyle": {
+                "textAlign": "center",
+                "fontWeight": "700",
+                "backgroundColor": "#f8fafc",
+            },
+        },
+    ]
+    for name in EXPORT_COLUMN_ORDER:
+        column_defs.append({
+            "field": name,
+            "headerName": employee_header_label(shift, name),
+            "editable": not locked,
+            "cellEditor": "agSelectCellEditor",
+            "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
+            "singleClickEdit": True,
+            "width": 48,
+            "minWidth": 46,
+            "cellStyle": cell_style,
+            "headerClass": "shift-grid-header",
+            "wrapHeaderText": False,
+            "autoHeaderHeight": False,
+        })
+    column_defs.append({
+        "field": "人数少",
+        "headerName": "少",
+        "editable": False,
+        "pinned": "right",
+        "width": 42,
+        "minWidth": 40,
+        "wrapText": True,
+        "cellStyle": {
+            "textAlign": "center",
+            "fontWeight": "800",
+            "backgroundColor": "#fff3cd",
+            "color": "#92400e",
+            "borderLeft": "1px solid #cbd5e1",
+            "whiteSpace": "normal",
+            "lineHeight": "1.15",
+        },
+    })
+    column_defs.append({
+        "field": "鍵",
+        "editable": False,
+        "pinned": "right",
+        "width": 50,
+        "minWidth": 46,
+        "wrapText": True,
+        "cellStyle": {
+            "textAlign": "center",
+            "fontWeight": "800",
+            "backgroundColor": "#fff7ed",
+            "color": "#b45309",
+            "borderLeft": "1px solid #cbd5e1",
+            "whiteSpace": "normal",
+            "lineHeight": "1.15",
+        },
+    })
+    grid_options = {
+        "columnDefs": column_defs,
+        "defaultColDef": {
+            "sortable": False,
+            "filter": False,
+            "resizable": True,
+            "suppressMenu": True,
+            "headerClass": "shift-grid-header",
+        },
+        "stopEditingWhenCellsLoseFocus": True,
+        "suppressRowClickSelection": True,
+        "alwaysShowVerticalScroll": True,
+        "suppressScrollOnNewData": True,
+        "ensureDomOrder": True,
+        "rowHeight": 32,
+        "headerHeight": 58,
+        "domLayout": "normal",
+        "getRowStyle": JsCode(
+            """
+            function(params) {
+                const dayLabel = params.data['曜'];
+                if (dayLabel === '日') { return {backgroundColor: '#fee2e2'}; }
+                if (dayLabel === '土') { return {backgroundColor: '#dbeafe'}; }
+                return {backgroundColor: '#ffffff'};
+            }
+            """
+        ),
+    }
+    aggrid_kwargs = {
+        "gridOptions": grid_options,
+        "key": grid_key,
+        "height": 560,
+        "width": "100%",
+        "fit_columns_on_grid_load": False,
+        "allow_unsafe_jscode": True,
+        "theme": "streamlit",
+        "reload_data": True,
+        "custom_css": {
+            ".shift-grid-header": {
+                "padding-left": "2px !important",
+                "padding-right": "2px !important",
+            },
+            ".shift-grid-header .ag-header-cell-label": {
+                "justify-content": "center !important",
+            },
+            ".shift-grid-header .ag-header-cell-text": {
+                "white-space": "pre !important",
+                "word-break": "keep-all !important",
+                "overflow-wrap": "normal !important",
+                "overflow": "visible !important",
+                "text-overflow": "clip !important",
+                "text-align": "center !important",
+                "font-size": "11px !important",
+                "line-height": "1.12 !important",
+            },
+        },
+    }
+    if GridUpdateMode is not None:
+        aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
+    return AgGrid(editor_df, **aggrid_kwargs)
+
+
+def editor_rows_to_records(editor_value) -> list[dict]:
+    """st.data_editor の戻り値を list[dict] に揃える。"""
+    if hasattr(editor_value, "to_dict"):
+        return editor_value.to_dict("records")
+    if isinstance(editor_value, list):
+        return editor_value
+    return []
+
+
+def editor_rows_to_shift(base_shift: MonthlyShift, rows: list[dict]) -> MonthlyShift:
+    """編集表の内容からプレビュー用シフトを作る。"""
+    visible_names = set(EXPORT_COLUMN_ORDER)
+    updated = MonthlyShift(
+        year=base_shift.year,
+        month=base_shift.month,
+        operation_modes=dict(base_shift.operation_modes),
+    )
+    updated.assignments = [
+        ShiftAssignment(
+            employee=a.employee,
+            day=a.day,
+            store=a.store,
+            is_paid_leave=a.is_paid_leave,
+        )
+        for a in base_shift.assignments
+        if a.employee not in visible_names
+    ]
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            symbol = normalize_store_symbol(row.get(name, ""))
+            if not symbol:
+                continue
+            store = STORE_SYMBOL_TO_STORE[symbol]
+            updated.assignments.append(ShiftAssignment(employee=name, day=day, store=store))
+    return updated
+
+
+def set_shift_cell_symbol(
+    shift: MonthlyShift,
+    employee: str,
+    day: int,
+    symbol: str,
+) -> None:
+    """シフト内の1セルを指定記号へ変更する。"""
+    shift.assignments = [
+        a for a in shift.assignments
+        if not (a.employee == employee and a.day == day)
+    ]
+    symbol = normalize_store_symbol(symbol)
+    if symbol:
+        shift.assignments.append(
+            ShiftAssignment(
+                employee=employee,
+                day=day,
+                store=STORE_SYMBOL_TO_STORE[symbol],
+            )
+        )
+
+
+def apply_pending_symbol_changes(
+    base_shift: MonthlyShift,
+    pending_changes: dict[tuple[str, int], str],
+) -> MonthlyShift:
+    """手動修正の未確定変更を反映したプレビュー用シフトを作る。"""
+    preview = clone_monthly_shift(base_shift)
+    for (employee, day), symbol in pending_changes.items():
+        set_shift_cell_symbol(preview, employee, int(day), symbol)
+    return preview
+
+
+def get_editor_changed_cells(base_shift: MonthlyShift, rows: list[dict]) -> set[tuple[str, int]]:
+    """編集表で変更されたセルを返す。"""
+    changed = set()
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            before = assignment_to_symbol(base_shift.get_assignment(name, day))
+            after = normalize_store_symbol(row.get(name, ""))
+            if before != after:
+                changed.add((name, day))
+    return changed
+
+
+def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
+    """生成時に使った希望データを、対象シフトに合う場合だけ返す。"""
+    ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+    inputs_by_month = st.session_state.get("validation_inputs_by_month", {})
+    inputs = inputs_by_month.get(ym) or st.session_state.get("last_validation_inputs", {})
+    if inputs.get("ym") != ym:
+        return {
+            "work_requests": [],
+            "off_requests": {},
+            "prev_month": [],
+            "holiday_overrides": {},
+            "exact_holiday_days": {},
+            "employee_max_consecutive_work": {},
+            "employee_max_consecutive_off": {},
+            "monthly_store_count_rules": [],
+        }
+    return {
+        "work_requests": inputs.get("work_requests", []),
+        "preferred_work_requests": inputs.get("preferred_work_requests", []),
+        "preferred_work_groups": inputs.get("preferred_work_groups", []),
+        "off_requests": inputs.get("off_requests", {}),
+        "prev_month": inputs.get("prev_month", []),
+        "holiday_overrides": inputs.get("holiday_overrides", {}),
+        "exact_holiday_days": inputs.get("exact_holiday_days", {}),
+        "employee_max_consecutive_work": inputs.get("employee_max_consecutive_work", {}),
+        "employee_max_consecutive_off": inputs.get("employee_max_consecutive_off", {}),
+        "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
+    }
+
+
+def save_validation_context(inputs: dict) -> None:
+    """生成時に使った希望データを年月ごとに保存する。"""
+    st.session_state["last_validation_inputs"] = dict(inputs)
+    ym = inputs.get("ym")
+    if not ym:
+        return
+    inputs_by_month = dict(st.session_state.get("validation_inputs_by_month", {}))
+    inputs_by_month[str(ym)] = dict(inputs)
+    st.session_state["validation_inputs_by_month"] = inputs_by_month
+
+
+def restore_validation_context_for_month(
+    year: int,
+    month: int,
+    rule_cfg: RuleConfig,
+) -> dict:
+    """下書き・確定版の復元時に、その月の提出データを検証条件として読み直す。"""
+    from prototype.submission_loader import load_submissions_for_month
+
+    days_in_month = monthrange(int(year), int(month))[1]
+    sub_data = load_submissions_for_month(
+        int(year), int(month), shift_submission_employee_names(),
+    )
+
+    def _valid_days(days_list) -> list[int]:
+        valid = []
+        for day in days_list or []:
+            try:
+                day_int = int(day)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= day_int <= days_in_month:
+                valid.append(day_int)
+        return valid
+
+    off_requests = {
+        emp: _valid_days(days)
+        for emp, days in sub_data.off_requests.items()
+    }
+    off_requests = {emp: days for emp, days in off_requests.items() if days}
+    off_sets = {emp: set(days) for emp, days in off_requests.items()}
+
+    work_requests = [
+        (emp, int(day), store)
+        for emp, day, store in sub_data.work_requests
+        if 1 <= int(day) <= days_in_month and int(day) not in off_sets.get(emp, set())
+    ]
+    preferred_work_requests = [
+        (emp, int(day), store)
+        for emp, day, store in getattr(sub_data, "preferred_work_requests", [])
+        if 1 <= int(day) <= days_in_month and int(day) not in off_sets.get(emp, set())
+    ]
+    for emp, day, store in system_monthly_preferred_work_requests(int(year), int(month)):
+        if int(day) in off_sets.get(emp, set()):
+            continue
+        item = (emp, int(day), store)
+        if item not in preferred_work_requests:
+            preferred_work_requests.append(item)
+
+    preferred_work_groups = []
+    for emp, candidate_days, required_count, store in getattr(
+        sub_data, "preferred_work_groups", []
+    ):
+        filtered = [
+            int(day) for day in candidate_days
+            if 1 <= int(day) <= days_in_month
+            and int(day) not in off_sets.get(emp, set())
+        ]
+        if filtered:
+            preferred_work_groups.append((
+                emp,
+                sorted(set(filtered)),
+                min(int(required_count), len(set(filtered))),
+                store,
+            ))
+
+    holiday_overrides = {}
+    exact_holiday_days = {}
+    effective_paid_leave_days = combined_paid_leave_days(
+        sub_data.paid_leave_days, int(year), int(month),
+    )
+    for emp_name, paid_days in effective_paid_leave_days.items():
+        try:
+            emp = get_employee(emp_name)
+            base_target = get_monthly_work_target(
+                emp.name,
+                int(month),
+                emp.annual_target_days,
+            )
+            if base_target:
+                holiday_overrides[emp_name] = days_in_month - base_target + int(paid_days)
+        except Exception:
+            pass
+    for emp_name, requested_days in getattr(sub_data, "requested_holiday_days", {}).items():
+        try:
+            requested_days_int = int(requested_days)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= requested_days_int <= days_in_month:
+            holiday_overrides[emp_name] = max(
+                int(holiday_overrides.get(emp_name, 0) or 0),
+                requested_days_int,
+            )
+            exact_holiday_days[emp_name] = requested_days_int
+
+    context = {
+        "ym": f"{int(year):04d}-{int(month):02d}",
+        "off_requests": off_requests,
+        "work_requests": work_requests,
+        "preferred_work_requests": preferred_work_requests,
+        "preferred_work_groups": preferred_work_groups,
+        "prev_month": [],
+        "holiday_overrides": holiday_overrides,
+        "exact_holiday_days": exact_holiday_days,
+        "employee_max_consecutive_work": dict(
+            getattr(sub_data, "max_consecutive_work_days", {})
+        ),
+        "employee_max_consecutive_off": dict(
+            getattr(sub_data, "max_consecutive_off_days", {})
+        ),
+        "monthly_store_count_rules": active_monthly_store_count_rules(
+            rule_cfg, int(year), int(month),
+        ),
+    }
+    save_validation_context(context)
+    return context
+
+
+def build_part_time_paid_leave_suggestions(
+    shift: MonthlyShift,
+    validation_context: dict,
+) -> list[dict]:
+    """パートの出勤希望が休みになった日を、有給調整候補として返す。"""
+    off_requests = validation_context.get("off_requests", {}) or {}
+    work_preferences = []
+    work_preferences.extend(validation_context.get("work_requests", []) or [])
+    work_preferences.extend(validation_context.get("preferred_work_requests", []) or [])
+    existing_admin_dates = admin_paid_leave_dates_for_month(shift.year, shift.month)
+    suggestions: list[dict] = []
+    seen: set[tuple[str, int]] = set()
+    for employee, day, requested_store in work_preferences:
+        try:
+            day = int(day)
+            emp = get_employee(str(employee))
+        except Exception:
+            continue
+        if emp.employment_status != EmploymentStatus.PART_TIME:
+            continue
+        if day in set(int(d) for d in off_requests.get(employee, [])):
+            continue
+        if day in existing_admin_dates.get(employee, set()):
+            continue
+        key = (str(employee), day)
+        if key in seen:
+            continue
+        seen.add(key)
+        assignment = shift.get_assignment(str(employee), day)
+        if assignment is not None and assignment.store != Store.OFF:
+            continue
+        suggestions.append({
+            "employee": str(employee),
+            "day": day,
+            "requested_store": requested_store,
+            "reason": "出勤希望日が調整上休みになっています",
+        })
+    return sorted(suggestions, key=lambda x: (x["day"], x["employee"]))
+
+
+def render_part_time_paid_leave_suggestions(
+    shift: MonthlyShift,
+    validation_context: dict,
+    key_prefix: str,
+) -> None:
+    """パート・アルバイトの有給調整候補を画面に出す。"""
+    suggestions = build_part_time_paid_leave_suggestions(shift, validation_context)
+    if not suggestions:
+        return
+    st.info(
+        "パート・アルバイトの出勤希望が休みになっている日があります。"
+        "必要に応じて、管理者調整として有給を付けられます。"
+    )
+    rows = []
+    for item in suggestions:
+        store = item.get("requested_store")
+        rows.append({
+            "氏名": item["employee"],
+            "日付": f"{int(shift.month)}/{int(item['day'])}",
+            "希望店舗": store.display_name if isinstance(store, Store) else "指定なし",
+            "状態": "休み",
+            "候補": "有給調整",
+        })
+    st.dataframe(rows, width="stretch", hide_index=True)
+    with st.expander("有給調整をこの画面で追加", expanded=False):
+        for item in suggestions:
+            label = f"{item['employee']} {int(shift.month)}/{int(item['day'])} を有給1日として記録"
+            if st.button(label, key=f"{key_prefix}_paid_leave_{item['employee']}_{item['day']}"):
+                add_admin_paid_leave_adjustment(
+                    shift.year,
+                    shift.month,
+                    item["employee"],
+                    1,
+                    dates=[int(item["day"])],
+                    reason="出勤希望日を調整上休みにしたため",
+                    actor="管理者",
+                )
+                st.success("管理者有給調整を追加しました。")
+                st.rerun()
+
+
+def run_shift_validation(**kwargs):
+    """Cloud側で古い検証関数が混ざっても落ちないよう、受け取れる引数だけ渡す。"""
+    allowed = inspect.signature(validate).parameters
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    return validate(**safe_kwargs)
+
+
+def call_with_supported_kwargs(func, *args, **kwargs):
+    """Cloud側で古い関数が混ざっても、受け取れる引数だけ渡す。"""
+    allowed = inspect.signature(func).parameters
+    safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
+    return func(*args, **safe_kwargs)
+
+
+def get_fixed_off_edit_violations(
+    rows: list[dict],
+    off_request_cells: set[tuple[str, int]],
+) -> list[str]:
+    """本人の×希望を別記号へ変えていないか確認する。"""
+    violations = []
+    for row in rows:
+        try:
+            day = int(row.get("日"))
+        except (TypeError, ValueError):
+            continue
+        for name in EXPORT_COLUMN_ORDER:
+            if (name, day) not in off_request_cells:
+                continue
+            if normalize_store_symbol(row.get(name, "")) != "×":
+                violations.append(f"{name}さん {day}日")
+    return violations
+
+
+def format_day_list(days) -> str:
+    """日付リストを画面表示用に整える。"""
+    safe_days = sorted({int(d) for d in days if str(d).isdigit()})
+    if not safe_days:
+        return "なし"
+    return "、".join(f"{d}日" for d in safe_days)
+
+
+def render_scrollable_request_table(rows: list[dict]) -> None:
+    """本人提出希望を横スクロール可能な表で表示する。"""
+    if not rows:
+        st.caption("表示する提出データがありません")
+        return
+    columns = [
+        "氏名", "状態", "× 休み希望（絶対）", "△ できれば休み",
+        "出勤希望", "有給", "自由記載から反映", "備考",
+    ]
+    widths = {
+        "氏名": 110,
+        "状態": 110,
+        "× 休み希望（絶対）": 260,
+        "△ できれば休み": 220,
+        "出勤希望": 180,
+        "有給": 90,
+        "自由記載から反映": 220,
+        "備考": 560,
+    }
+    html_parts = [
+        '<div style="overflow:auto; max-height:430px; border:1px solid #e5e7eb; '
+        'border-radius:6px; background:white;">',
+        '<table style="border-collapse:collapse; min-width:1530px; width:max-content; '
+        'font-size:14px;">',
+        '<thead><tr>',
+    ]
+    for col in columns:
+        html_parts.append(
+            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
+            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
+            f'min-width:{widths[col]}px;">{escape(col)}</th>'
+        )
+    html_parts.append('</tr></thead><tbody>')
+    for row in rows:
+        html_parts.append('<tr>')
+        for col in columns:
+            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
+            white_space = "pre-wrap" if col == "備考" else "nowrap"
+            html_parts.append(
+                f'<td style="border:1px solid #e5e7eb; padding:8px; '
+                f'vertical-align:top; min-width:{widths[col]}px; '
+                f'white-space:{white_space};">{value}</td>'
+            )
+        html_parts.append('</tr>')
+    html_parts.append('</tbody></table></div>')
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def render_scrollable_review_table(rows: list[dict]) -> None:
+    """提出内容をスマホでも横スクロールなしで確認できる色付きカードで表示する。"""
+    styles = {
+        "○": {
+            "card": "#f0fdf4",
+            "border": "#86efac",
+            "badge": "#16a34a",
+            "badge_text": "#ffffff",
+            "text": "#166534",
+        },
+        "△": {
+            "card": "#fefce8",
+            "border": "#fde047",
+            "badge": "#facc15",
+            "badge_text": "#713f12",
+            "text": "#854d0e",
+        },
+        "×": {
+            "card": "#fef2f2",
+            "border": "#fca5a5",
+            "badge": "#ef4444",
+            "badge_text": "#ffffff",
+            "text": "#991b1b",
+        },
+        "有給": {
+            "card": "#eff6ff",
+            "border": "#93c5fd",
+            "badge": "#2563eb",
+            "badge_text": "#ffffff",
+            "text": "#1e40af",
+        },
+        "自由": {
+            "card": "#f8fafc",
+            "border": "#cbd5e1",
+            "badge": "#475569",
+            "badge_text": "#ffffff",
+            "text": "#334155",
+        },
+    }
+
+    def style_for(label: str) -> dict:
+        if label.startswith("○"):
+            return styles["○"]
+        if label.startswith("△"):
+            return styles["△"]
+        if label.startswith("×"):
+            return styles["×"]
+        if "有給" in label:
+            return styles["有給"]
+        return styles["自由"]
+
+    html_parts = [
+        '<div style="display:grid; gap:10px; margin:10px 0 14px 0; width:100%; max-width:100%;">',
+    ]
+    for row in rows:
+        label = str(row.get("項目", ""))
+        content = escape(str(row.get("内容", ""))).replace("\n", "<br>")
+        days = row.get("日数", "")
+        day_text = f"{escape(str(days))}日" if isinstance(days, int) else escape(str(days))
+        s = style_for(label)
+        count_html = (
+            f'<span style="font-size:13px; color:{s["text"]}; font-weight:800; '
+            f'white-space:nowrap;">{day_text}</span>'
+            if day_text else ""
+        )
+        html_parts.append(
+            f'<div style="background:{s["card"]}; border:1px solid {s["border"]}; '
+            f'border-radius:8px; padding:10px 12px; max-width:100%; box-sizing:border-box;">'
+            f'<div style="display:flex; align-items:center; justify-content:space-between; '
+            f'gap:8px; flex-wrap:wrap;">'
+            f'<span style="display:inline-flex; align-items:center; border-radius:999px; '
+            f'background:{s["badge"]}; color:{s["badge_text"]}; padding:5px 10px; '
+            f'font-size:14px; font-weight:800; line-height:1.2;">{escape(label)}</span>'
+            f'{count_html}'
+            f'</div>'
+            f'<div style="margin-top:8px; color:#111827; font-size:14px; line-height:1.65; '
+            f'overflow-wrap:anywhere; word-break:break-word;">{content}</div>'
+            f'</div>'
+        )
+    html_parts.append("</div>")
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def render_scrollable_dict_table(
+    rows: list[dict],
+    columns: list[str],
+    widths: dict[str, int],
+    empty_message: str,
+    max_height: int = 360,
+) -> None:
+    """任意の dict 行を横スクロール可能な表で表示する。"""
+    if not rows:
+        st.caption(empty_message)
+        return
+    min_width = sum(widths.get(col, 140) for col in columns)
+    html_parts = [
+        f'<div style="overflow:auto; max-height:{max_height}px; border:1px solid #e5e7eb; '
+        'border-radius:6px; background:white;">',
+        f'<table style="border-collapse:collapse; min-width:{min_width}px; width:max-content; '
+        'font-size:14px;">',
+        '<thead><tr>',
+    ]
+    for col in columns:
+        html_parts.append(
+            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
+            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
+            f'min-width:{widths.get(col, 140)}px;">{escape(col)}</th>'
+        )
+    html_parts.append('</tr></thead><tbody>')
+    for row in rows:
+        html_parts.append('<tr>')
+        for col in columns:
+            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
+            html_parts.append(
+                f'<td style="border:1px solid #e5e7eb; padding:8px; '
+                f'vertical-align:top; min-width:{widths.get(col, 140)}px; '
+                'white-space:pre-wrap;">'
+                f'{value}</td>'
+            )
+        html_parts.append('</tr>')
+    html_parts.append('</tbody></table></div>')
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+
+
+def load_public_shift_for_employee_view(
+    year: int,
+    month: int,
+) -> tuple[Optional[MonthlyShift], str]:
+    """従業員向けに公開できる確定シフトを読み込む。"""
+    lock_mgr = ShiftLockManager()
+    backup = ShiftBackup()
+    lock_info = lock_mgr.get_lock_info(int(year), int(month))
+    if lock_info:
+        snapshot_path = (
+            backup.backup_dir
+            / f"{int(year):04d}-{int(month):02d}"
+            / lock_info.snapshot_file
+        )
+        if snapshot_path.exists():
+            return backup.load_shift(snapshot_path), "ロック済み確定版"
+
+    latest_finalized = backup.get_latest_shift(int(year), int(month), kind="finalized")
+    if latest_finalized is not None:
+        return latest_finalized, "最新の確定保存版"
+    return None, ""
+
+
+def render_employee_confirmed_shift(
+    shift: MonthlyShift,
+    employee_name: str,
+) -> None:
+    """従業員本人向けに、自分の確定シフトだけを表示する。"""
+    rows = []
+    weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
+    for day in range(1, monthrange(int(shift.year), int(shift.month))[1] + 1):
+        assignment = shift.get_assignment(employee_name, day)
+        if assignment is None or assignment.store == Store.OFF:
+            work_text = "有給" if assignment is not None and assignment.is_paid_leave else "休み"
+        else:
+            work_text = f"{assignment.store.value} {assignment.store.display_name}"
+            if assignment.is_paid_leave:
+                work_text += "（有給）"
+        rows.append({
+            "日付": f"{int(shift.month)}/{day}",
+            "曜": weekday_jp[date(int(shift.year), int(shift.month), day).weekday()],
+            "勤務": work_text,
+        })
+
+    render_scrollable_dict_table(
+        rows,
+        columns=["日付", "曜", "勤務"],
+        widths={"日付": 90, "曜": 70, "勤務": 260},
+        empty_message="表示できる確定シフトがありません",
+        max_height=560,
+    )
+
+
+def _safe_preference_days(values) -> list[int]:
+    """希望提出JSONの表記ゆれから日付だけを取り出す。"""
+    days: list[int] = []
+    if values is None:
+        return days
+    if isinstance(values, (str, int)):
+        values = [values]
+    if isinstance(values, dict):
+        values = values.values()
+    for value in values:
+        if isinstance(value, dict):
+            for key in ("day", "日", "date"):
+                if str(value.get(key, "")).isdigit():
+                    days.append(int(value[key]))
+                    break
+            continue
+        if str(value).isdigit():
+            days.append(int(value))
+    return sorted(set(days))
+
+
+def _extract_preference_days(raw, author: str) -> list[int]:
+    """希望提出JSONの name/value/list/dict 形式を吸収して日付を返す。"""
+    if isinstance(raw, dict):
+        if author in raw:
+            return _safe_preference_days(raw.get(author))
+        if "employee" in raw and raw.get("employee") != author:
+            return []
+        for key in ("days", "candidate_days", "off_requests", "work_requests"):
+            if key in raw:
+                return _safe_preference_days(raw.get(key))
+        combined: list[int] = []
+        for value in raw.values():
+            combined.extend(_safe_preference_days(value))
+        return sorted(set(combined))
+    if isinstance(raw, list):
+        days: list[int] = []
+        for item in raw:
+            if isinstance(item, dict):
+                if item.get("employee") and item.get("employee") != author:
+                    continue
+                days.extend(_extract_preference_days(item, author))
+            elif isinstance(item, (list, tuple)) and len(item) >= 2:
+                if item[0] == author:
+                    days.extend(_safe_preference_days(item[1:]))
+            else:
+                days.extend(_safe_preference_days([item]))
+        return sorted(set(days))
+    return _safe_preference_days(raw)
+
+
+def _extract_marked_day_preferences(data: dict, author: str) -> tuple[list[int], list[int], list[int]]:
+    """day_preferences 形式の古い/別形式データから ×・△・出勤希望を拾う。"""
+    off_days: list[int] = []
+    flexible_days: list[int] = []
+    work_days: list[int] = []
+    raw_items = (
+        data.get("day_preferences")
+        or data.get("preferences")
+        or data.get("requests")
+        or data.get("entries")
+        or []
+    )
+    if isinstance(raw_items, dict):
+        raw_items = raw_items.values()
+    if not isinstance(raw_items, list):
+        return off_days, flexible_days, work_days
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("employee") and item.get("employee") != author:
+            continue
+        day = item.get("day") or item.get("日") or item.get("date")
+        if not str(day).isdigit():
+            continue
+        mark = str(item.get("mark") or item.get("希望") or item.get("value") or "")
+        if mark in ("×", "OFF_REQUEST", "休み", "休み希望"):
+            off_days.append(int(day))
+        elif mark in ("△", "PREFER_OFF", "できれば休み"):
+            flexible_days.append(int(day))
+        elif mark.startswith("○") or mark in ("AVAILABLE", "出勤", "出勤希望"):
+            work_days.append(int(day))
+    return sorted(set(off_days)), sorted(set(flexible_days)), sorted(set(work_days))
+
+
+def enrich_submission_days_from_files(
+    backup_mgr: ShiftBackup,
+    year: int,
+    month: int,
+    submission_status: dict,
+) -> dict:
+    """提出済み一覧に日付が入っていない場合、元JSONから補完する。"""
+    month_dir = backup_mgr.backup_dir / f"{year}-{month:02d}"
+    for submitted in submission_status.get("submitted", []):
+        file_name = submitted.get("file")
+        author = submitted.get("employee") or ""
+        if not file_name or not author:
+            continue
+        file_path = month_dir / file_name
+        if not file_path.exists():
+            legacy_path = (
+                backup_mgr.backup_dir.parent
+                / "preferences"
+                / f"{year:04d}-{month:02d}"
+                / file_name
+            )
+            if legacy_path.exists():
+                file_path = legacy_path
+            else:
+                continue
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        off_days = _extract_preference_days(data.get("off_requests", {}), author)
+        flexible_days = _extract_preference_days(data.get("flexible_off", []), author)
+        work_days = _extract_preference_days(data.get("work_requests", []), author)
+        marked_off, marked_flexible, marked_work = _extract_marked_day_preferences(data, author)
+        off_days = sorted(set(off_days) | set(marked_off))
+        flexible_days = sorted(set(flexible_days) | set(marked_flexible))
+        work_days = sorted(set(work_days) | set(marked_work))
+
+        submitted["off_request_days"] = off_days
+        submitted["off_request_count"] = len(off_days)
+        submitted["flexible_off_days"] = flexible_days
+        submitted["flexible_off_count"] = len(flexible_days)
+        submitted["work_request_days"] = work_days
+        submitted["paid_leave_days"] = int(data.get("paid_leave_days", submitted.get("paid_leave_days", 0)) or 0)
+
+        notes = data.get("natural_language_notes", {})
+        note_text = ""
+        if isinstance(notes, dict) and notes.get(author):
+            note_text = notes[author]
+            submitted["note"] = note_text
+            submitted["note_excerpt"] = note_text[:50] + ("..." if len(note_text) > 50 else "")
+            submitted["has_note"] = True
+        try:
+            from prototype.submission_loader import parse_natural_language_note
+            parsed_note = parse_natural_language_note(note_text, year, month)
+            off_days = sorted(set(off_days) | set(parsed_note.off_requests))
+            flexible_extra_days = [
+                day
+                for candidate_days, _ in parsed_note.flexible_off
+                for day in candidate_days
+            ]
+            flexible_days = sorted(set(flexible_days) | set(flexible_extra_days))
+            work_days = sorted(set(work_days) | {day for day, _ in parsed_note.work_requests})
+            if parsed_note.work_groups:
+                group_labels = []
+                for candidate_days, required_count, store in parsed_note.work_groups:
+                    day_label = "・".join(f"{int(day)}日" for day in candidate_days)
+                    store_label = f"（{store.display_name}希望）" if store else ""
+                    group_labels.append(
+                        f"{day_label}のうち{int(required_count)}日出勤希望{store_label}"
+                    )
+                submitted["work_request_group_labels"] = group_labels
+            if parsed_note.paid_leave_days is not None:
+                submitted["paid_leave_days"] = max(
+                    int(submitted.get("paid_leave_days", 0) or 0),
+                    int(parsed_note.paid_leave_days),
+                )
+            if parsed_note.requested_holiday_days is not None:
+                submitted["requested_holiday_days"] = parsed_note.requested_holiday_days
+            if parsed_note.max_consecutive_work_days is not None:
+                submitted["max_consecutive_work_days"] = parsed_note.max_consecutive_work_days
+            if parsed_note.max_consecutive_off_days is not None:
+                submitted["max_consecutive_off_days"] = parsed_note.max_consecutive_off_days
+            if parsed_note.preferred_consecutive_off_days is not None:
+                submitted["preferred_consecutive_off_days"] = parsed_note.preferred_consecutive_off_days
+        except Exception:
+            pass
+        submitted["off_request_days"] = off_days
+        submitted["off_request_count"] = len(off_days)
+        submitted["flexible_off_days"] = flexible_days
+        submitted["flexible_off_count"] = len(flexible_days)
+        submitted["work_request_days"] = work_days
+    return submission_status
+
+
+def build_off_request_cells(off_requests: dict[str, list[int]]) -> set[tuple[str, int]]:
+    """本人が提出した絶対休み（×）のセル集合を作る。"""
+    cells: set[tuple[str, int]] = set()
+    for emp_name, days in (off_requests or {}).items():
+        for day in days:
+            if str(day).isdigit():
+                cells.add((emp_name, int(day)))
+    return cells
+
+
+def shift_submission_employee_names() -> list[str]:
+    """希望提出の対象者リスト。山本さんは補助・特別枠として含める。"""
+    names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+    try:
+        yamamoto = get_employee("山本")
+        if yamamoto.name not in names:
+            names.append(yamamoto.name)
+    except Exception:
+        if "山本" not in names:
+            names.append("山本")
+    return names
+
+
+def save_shift_snapshot_with_github(
+    backup_mgr: ShiftBackup,
+    shift: MonthlyShift,
+    kind: str,
+    author: str,
+    note: str = "",
+) -> Path:
+    """シフトをローカル保存し、設定済みならGitHubにも自動保存する。"""
+    path = backup_mgr.save_shift(shift, kind=kind, author=author, note=note)
+    try:
+        from prototype.github_backup import push_shift_to_github
+        push_shift_to_github(path, int(shift.year), int(shift.month), kind=kind)
+    except Exception:
+        pass
+    return path
+
+
+def push_lock_file_to_github(lock_path: Path, year: int, month: int, action: str) -> None:
+    """ロック情報をGitHubへ自動保存する。"""
+    try:
+        from prototype.github_backup import push_lock_to_github
+        push_lock_to_github(lock_path, int(year), int(month), action=action)
+    except Exception:
+        pass
+
+
+def record_edit_history_with_github(
+    backup_mgr: ShiftBackup,
+    year: int,
+    month: int,
+    before_shift: MonthlyShift,
+    after_shift: MonthlyShift,
+    changed_cells: set[tuple[str, int]],
+    actor: str,
+    reason: str,
+) -> None:
+    """手動編集履歴をローカルとGitHubへ残す。"""
+    if not changed_cells:
+        return
+    for employee, day in sorted(changed_cells, key=lambda x: (x[1], x[0])):
+        before_symbol = assignment_to_symbol(before_shift.get_assignment(employee, int(day))) or "空白"
+        after_symbol = assignment_to_symbol(after_shift.get_assignment(employee, int(day))) or "空白"
+        if before_symbol == after_symbol:
+            continue
+        try:
+            backup_mgr.log_edit(
+                int(year), int(month),
+                employee=employee,
+                day=int(day),
+                before_store=before_symbol,
+                after_store=after_symbol,
+                actor=actor,
+                reason=reason,
+            )
+        except Exception:
+            pass
+    try:
+        from prototype.github_backup import push_edit_log_to_github
+        log_path = (
+            backup_mgr.backup_dir
+            / f"{int(year):04d}-{int(month):02d}"
+            / f"edits_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        )
+        if log_path.exists():
+            push_edit_log_to_github(log_path, int(year), int(month))
+    except Exception:
+        pass
+
+
+def system_monthly_store_count_rules(year: int, month: int) -> list[dict]:
+    """チャットで固まった標準の月次運用ルールを返す。"""
+    rules = []
+    if int(year) == 2026 and int(month) == 5:
+        rules.append({
+            "name": "2026年5月 顧問は最大2日まで",
+            "employee": "顧問",
+            "stores": ["AKABANE", "HIGASHIGUCHI"],
+            "count": 2,
+            "severity": "ERROR",
+            "comparison": "max",
+            "source": "system",
+        })
+    return rules
+
+
+def system_monthly_preferred_work_requests(
+    year: int,
+    month: int,
+) -> list[tuple[str, int, Store]]:
+    """特定月だけ、日付・店舗まで明示されている実運用例外を返す。"""
+    return []
+
+
+def active_monthly_store_count_rules(
+    rule_cfg: RuleConfig,
+    year: int,
+    month: int,
+) -> list[dict]:
+    """対象年月に有効な月別配置ルールだけを生成・検証用に取り出す。"""
+    active_rules = system_monthly_store_count_rules(year, month)
+    for rule in getattr(rule_cfg, "custom_rules", []):
+        if not getattr(rule, "enabled", True):
+            continue
+        if getattr(rule, "rule_type", "note") != "employee_store_count":
+            continue
+        try:
+            target_year = getattr(rule, "target_year", None)
+            target_month = getattr(rule, "target_month", None)
+            if target_year is not None and int(target_year) != int(year):
+                continue
+            if target_month is not None and int(target_month) != int(month):
+                continue
+        except (TypeError, ValueError):
+            continue
+        active_rules.append({
+            "name": rule.name,
+            "employee": getattr(rule, "employee", ""),
+            "stores": list(getattr(rule, "stores", []) or []),
+            "count": int(getattr(rule, "count", 0) or 0),
+            "severity": getattr(rule, "severity", "WARNING"),
+            "comparison": getattr(rule, "comparison", "min"),
+        })
+    return active_rules
+
+
+def active_monthly_custom_rules(
+    rule_cfg: RuleConfig,
+    year: int,
+    month: int,
+) -> list[CustomRule]:
+    """対象年月に有効な、画面で追加された月別ルールを返す。"""
+    active_rules = []
+    for rule in getattr(rule_cfg, "custom_rules", []):
+        if not getattr(rule, "enabled", True):
+            continue
+        try:
+            target_year = getattr(rule, "target_year", None)
+            target_month = getattr(rule, "target_month", None)
+            if target_year is not None and int(target_year) != int(year):
+                continue
+            if target_month is not None and int(target_month) != int(month):
+                continue
+        except (TypeError, ValueError):
+            continue
+        active_rules.append(rule)
+    return active_rules
+
+
+def monthly_rule_store_label(stores: list) -> str:
+    """月別ルールの店舗名を画面表示用に整える。"""
+    labels = []
+    for raw_store in stores or []:
+        try:
+            store = raw_store if isinstance(raw_store, Store) else Store[str(raw_store)]
+        except Exception:
+            store = next(
+                (
+                    s for s in Store
+                    if s.display_name == str(raw_store) or s.value == str(raw_store)
+                ),
+                None,
+            )
+        labels.append(store.display_name if isinstance(store, Store) else str(raw_store))
+    return "・".join(labels) if labels else "店舗指定なし"
+
+
+def monthly_rule_display_text(rule: dict) -> str:
+    """月別ルール1件を自然な日本語にする。"""
+    store_label = monthly_rule_store_label(rule.get("stores") or [])
+    return (
+        f"{rule.get('name', '月別ルール')}: "
+        f"{rule.get('employee') or 'スタッフ指定なし'} / "
+        f"{store_label} / {format_monthly_rule_condition(rule)}"
+    )
+
+
+def advisor_candidate_limit(year: int, month: int) -> int:
+    """顧問を候補として試算する最大日数。自動確定はしない。"""
+    # 2026年5月はGWの希望休集中に加え、牧野さんの東口・西口単独NGを反映すると
+    # 2日候補では下書き自体が出ない。候補表示だけ3日まで広げ、最終確定は手動で行う。
+    if int(year) == 2026 and int(month) == 5:
+        return 3
+    return 2
+
+
+def emergency_advisor_candidate_limit(year: int, month: int) -> int:
+    """通常候補でも解なしの時だけ使う、下書き作成用の緊急候補枠。"""
+    return max(advisor_candidate_limit(year, month), 10)
+
+
+def advisor_candidate_rows_from_shift(shift: Optional[MonthlyShift]) -> list[dict]:
+    """顧問を許可した試算シフトから、顧問投入候補だけ取り出す。"""
+    if shift is None:
+        return []
+    rows = []
+    for assignment in sorted(
+        shift.assignments, key=lambda a: (int(a.day), a.employee),
+    ):
+        if assignment.employee != "顧問" or assignment.store == Store.OFF:
+            continue
+        rows.append({
+            "日付": f"{int(shift.month)}/{int(assignment.day)}",
+            "候補店舗": assignment.store.display_name,
+            "扱い": "候補のみ",
+        })
+    return rows
+
+
+def strip_advisor_assignments(source: MonthlyShift) -> MonthlyShift:
+    """顧問候補入りの試算から、顧問だけ外した確認用下書きを作る。"""
+    shift = MonthlyShift(year=source.year, month=source.month)
+    shift.operation_modes = dict(getattr(source, "operation_modes", {}) or {})
+    shift.comments = list(getattr(source, "comments", []) or [])
+    advisor_days = set()
+    for assignment in source.assignments:
+        if assignment.employee == "顧問":
+            advisor_days.add(int(assignment.day))
+            continue
+        shift.assignments.append(assignment)
+    days_in_month = monthrange(int(source.year), int(source.month))[1]
+    existing_advisor_days = {
+        int(a.day) for a in shift.assignments if a.employee == "顧問"
+    }
+    for day in range(1, days_in_month + 1):
+        if day not in existing_advisor_days:
+            shift.assignments.append(ShiftAssignment(
+                employee="顧問", day=day, store=Store.OFF,
+            ))
+    return shift
+
+
+def advisor_candidate_trigger_issues(validation_result) -> list[dict]:
+    """顧問候補を出すきっかけになる人数系の検証結果を抜き出す。"""
+    rows = []
+    for issue in getattr(validation_result, "issues", []):
+        category = str(getattr(issue, "category", ""))
+        if not (
+            "店舗人数" in category
+            or "人数少" in category
+            or "大宮アンカー" in category
+        ):
+            continue
+        rows.append({
+            "日付": (
+                f"{int(getattr(issue, 'month', 0) or 0)}/{int(issue.day)}"
+                if getattr(issue, "day", None) else ""
+            ),
+            "区分": category,
+            "内容": str(getattr(issue, "message", "")),
+        })
+    return rows
+
+
+def render_advisor_candidate_notice(input_summary: dict) -> None:
+    """直近生成結果に、顧問投入候補を表示する。"""
+    candidates = input_summary.get("advisor_candidates") or []
+    trigger_issues = input_summary.get("advisor_candidate_triggers") or []
+    if not candidates and not trigger_issues:
+        return
+    if input_summary.get("emergency_draft_used"):
+        st.warning(
+            "通常条件では下書きも作れなかったため、緊急用に顧問候補枠を広げて"
+            "確認用下書きを作成しています。顧問は自動確定していません。"
+            "エラー・警告を見ながら手動で調整してください。"
+        )
+    elif input_summary.get("advisor_candidate_base_used"):
+        st.warning(
+            "専務/顧問なしではシフトを確定できないため、"
+            "候補を外した確認用下書きを表示しています。"
+            "候補から手動で入れる店舗を選んでください。"
+        )
+    else:
+        st.warning(
+            "専務/顧問は自動では確定していません。"
+            "人員不足や解なしに近い条件の確認用として、投入候補だけを表示しています。"
+        )
+    if candidates:
+        st.dataframe(candidates, width="stretch", hide_index=True)
+    if trigger_issues:
+        with st.expander("候補表示の理由", expanded=False):
+            st.dataframe(trigger_issues, width="stretch", hide_index=True)
+
+
+def format_monthly_rule_condition(rule: dict) -> str:
+    """月別配置ルールの条件を画面表示用に整える。"""
+    comparison = str(rule.get("comparison") or "min").lower()
+    count = int(rule.get("count") or 0)
+    if comparison == "max":
+        return f"{count}回以下"
+    if comparison == "exact":
+        return f"{count}回ちょうど"
+    if comparison == "forbid":
+        return "配置禁止"
+    return f"{count}回以上"
 
 
 # ============================================================
@@ -752,6 +2766,9 @@ if mode == "📊 経営者ビュー":
                     st.session_state.pop("last_gen_result", None)
                     st.rerun()
 
+            if "input_summary" in _last_gen:
+                render_advisor_candidate_notice(_last_gen["input_summary"])
+
             # 入力データの詳細（成功・失敗どちらでも展開可能）
             if "input_summary" in _last_gen:
                 _isum = _last_gen["input_summary"]
@@ -777,7 +2794,33 @@ if mode == "📊 経営者ビュー":
                             st.write(f"    - {emp}: {n}日{warn}")
                     if _isum.get("paid_leave_days"):
                         st.write(f"- 有給申請: {_isum['paid_leave_days']}")
-                    st.write(f"- 出勤希望: {_isum.get('work_requests_count', 0)}件")
+                    if _isum.get("parsed_note_summaries"):
+                        st.write(
+                            f"- 自由記載から追加反映: "
+                            f"{len(_isum['parsed_note_summaries'])}名分"
+                        )
+                    if _isum.get("requested_holiday_days"):
+                        st.write(f"- 自由記載の休日日数指定: {_isum['requested_holiday_days']}")
+                    if _isum.get("employee_max_consecutive_work"):
+                        st.write(f"- 自由記載の連勤上限: {_isum['employee_max_consecutive_work']}")
+                    if _isum.get("employee_max_consecutive_off"):
+                        st.write(f"- 自由記載の連休上限: {_isum['employee_max_consecutive_off']}")
+                    if _isum.get("preferred_consecutive_off"):
+                        st.write(f"- 自由記載の連休希望: {_isum['preferred_consecutive_off']}")
+                    if _isum.get("monthly_store_count_rules"):
+                        st.write("- 月別ルール:")
+                        for rule in _isum["monthly_store_count_rules"]:
+                            st.write(f"    - {monthly_rule_display_text(rule)}")
+                    render_advisor_candidate_notice(_isum)
+                    st.write(f"- 出勤希望（希望扱い）: {_isum.get('work_requests_count', 0)}件")
+                    st.write(
+                        f"- 自由記載の出勤希望（優先反映）: "
+                        f"{_isum.get('preferred_work_requests_count', 0)}件"
+                    )
+                    st.write(
+                        f"- 自由記載の選択式出勤希望: "
+                        f"{_isum.get('preferred_work_groups_count', 0)}件"
+                    )
                     st.write(f"- 柔軟休み: {_isum.get('flexible_off_count', 0)}件")
             if _last_gen.get("error_detail"):
                 with st.expander("🔧 技術者向け: 例外スタックトレース", expanded=False):
@@ -786,13 +2829,24 @@ if mode == "📊 経営者ビュー":
     # ============================================================
     # 希望シフト提出状況（リアルタイム）
     # ============================================================
-    expected_employees = [
-        e.name for e in shift_active_employees() if not e.is_auxiliary
-    ]
+    expected_employees = shift_submission_employee_names()
     submission_status = backup_mgr.get_submission_status(
         int(target_year), int(target_month), expected_employees,
     )
+    submission_status = enrich_submission_days_from_files(
+        backup_mgr, int(target_year), int(target_month), submission_status,
+    )
     summary = submission_status["summary"]
+    current_ym_label = f"{int(target_year):04d}-{int(target_month):02d}"
+    available_preference_months: list[str] = []
+    try:
+        available_preference_months = [
+            p.name
+            for p in sorted(backup_mgr.backup_dir.iterdir())
+            if p.is_dir() and any(p.glob("preferences_*.json"))
+        ]
+    except Exception:
+        available_preference_months = []
 
     # 診断: 各月に保存されている提出ファイル数（デバッグ表示）
     with st.expander("🔧 診断: 各月の保存データ件数（クリックで展開）", expanded=False):
@@ -849,6 +2903,17 @@ if mode == "📊 経営者ビュー":
             f'</div></div>',
             unsafe_allow_html=True,
         )
+        other_months = [
+            ym for ym in available_preference_months if ym != current_ym_label
+        ]
+        if other_months:
+            st.info(
+                "保存済みの希望提出データは "
+                + "、".join(other_months)
+                + " にあります。現在の表示対象は "
+                + current_ym_label
+                + " です。過去月を確認する場合は、上部の対象年月を切り替えてください。"
+            )
     else:
         # 一部提出済み
         st.markdown(
@@ -862,7 +2927,7 @@ if mode == "📊 経営者ビュー":
             f'</div>'
             f'<div style="font-size:13px; color:#92400e;">'
             f'⏳ 未提出 {summary["total_pending"]}名: <strong>{", ".join(submission_status["not_submitted"])}</strong>'
-            f'<br>✨ 一部提出のままでもシフト生成できます。未提出者は希望未指定として自由配置されます。'
+            f'<br>📝 原則として全員提出後に生成してください。急ぎの場合のみ、操作欄で確認して生成できます。'
             f'<br>📝 長期欠勤の場合は「⚙️ 設定 → 👥 従業員マスタ」で雇用形態を「休職中」に変更してください（シフト対象外になります）。'
             f'</div></div>',
             unsafe_allow_html=True,
@@ -886,8 +2951,9 @@ if mode == "📊 経営者ビュー":
                     submitted_data.append({
                         "氏名": s["employee"],
                         "提出日時": s["submitted_at"][:19].replace("T", " "),
-                        "休み希望": f"{s['off_request_count']}日",
-                        "△希望": f"{s['flexible_off_count']}件",
+                        "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
+                        "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
+                        "有給": f"{s.get('paid_leave_days', 0)}日",
                         "備考": "📝 あり" if s["has_note"] else "",
                     })
                 st.dataframe(submitted_data, width="stretch", hide_index=True)
@@ -935,21 +3001,240 @@ if mode == "📊 経営者ビュー":
         if st.button("🔄 提出状況を更新", key="refresh_submissions"):
             st.rerun()
 
+    with st.expander("🧾 本人提出希望の一覧（調整時の確認用）", expanded=summary["total_submitted"] > 0):
+        st.caption(
+            "×は本人が提出した絶対休みです。シフト作成・AI対話・手動調整でも勤務にしない前提で扱います。"
+        )
+        submitted_by_name = {
+            s["employee"]: s for s in submission_status["submitted"]
+        }
+        admin_leave_by_employee = admin_paid_leave_days_for_month(
+            int(target_year), int(target_month),
+        )
+        monthly_custom_by_employee: dict[str, list[str]] = {}
+        for rule in active_monthly_custom_rules(rule_cfg, int(target_year), int(target_month)):
+            employee = getattr(rule, "employee", "") or ""
+            if not employee:
+                continue
+            if getattr(rule, "rule_type", "note") == "employee_store_count":
+                label = monthly_rule_display_text({
+                    "name": rule.name,
+                    "employee": rule.employee,
+                    "stores": list(rule.stores),
+                    "count": rule.count,
+                    "comparison": getattr(rule, "comparison", "min"),
+                })
+            else:
+                label = f"月別メモ: {rule.name}"
+            monthly_custom_by_employee.setdefault(employee, []).append(label)
+
+        request_rows = []
+        for emp_name in expected_employees:
+            s = submitted_by_name.get(emp_name)
+            if s:
+                submitted_leave = int(s.get("paid_leave_days", 0) or 0)
+                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
+                leave_label = f"{submitted_leave + admin_leave}日"
+                if admin_leave:
+                    leave_label += f"（管理者+{admin_leave}日）"
+                note_applied = []
+                if s.get("requested_holiday_days"):
+                    note_applied.append(f"休み計{s['requested_holiday_days']}日")
+                if s.get("max_consecutive_work_days"):
+                    note_applied.append(f"{s['max_consecutive_work_days']}連勤まで")
+                if s.get("max_consecutive_off_days"):
+                    note_applied.append(f"{s['max_consecutive_off_days']}連休まで")
+                if s.get("preferred_consecutive_off_days"):
+                    note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
+                note_applied.extend(s.get("work_request_group_labels", []))
+                note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
+                request_rows.append({
+                    "氏名": emp_name,
+                    "状態": "提出済み",
+                    "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
+                    "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
+                    "出勤希望": format_day_list(s.get("work_request_days", [])),
+                    "有給": leave_label,
+                    "自由記載から反映": " / ".join(note_applied),
+                    "備考": s.get("note", "") or s.get("note_excerpt", ""),
+                })
+            else:
+                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
+                request_rows.append({
+                    "氏名": emp_name,
+                    "状態": "未提出",
+                    "× 休み希望（絶対）": "",
+                    "△ できれば休み": "",
+                    "出勤希望": "",
+                    "有給": f"管理者+{admin_leave}日" if admin_leave else "",
+                    "自由記載から反映": " / ".join(monthly_custom_by_employee.get(emp_name, [])),
+                    "備考": "",
+                })
+        render_scrollable_request_table(request_rows)
+
     st.markdown("---")
+
+    with st.expander("📌 今月だけの特別ルール", expanded=False):
+        current_month_rules = active_monthly_store_count_rules(
+            rule_cfg, int(target_year), int(target_month),
+        )
+        current_custom_rules = active_monthly_custom_rules(
+            rule_cfg, int(target_year), int(target_month),
+        )
+        st.caption(
+            "基本ルールは「設定 → ルール設定」と従業員マスタで管理しています。"
+            "ここには、その月だけの例外・研修・一時的な配置条件だけを表示します。"
+        )
+
+        display_rows = []
+        for rule in current_month_rules:
+            display_rows.append({
+                "種類": "システム月別例外" if rule.get("source") == "system" else "月別配置",
+                "内容": monthly_rule_display_text(rule),
+                "重要度": rule.get("severity", "WARNING"),
+            })
+        for rule in current_custom_rules:
+            if getattr(rule, "rule_type", "note") == "employee_store_count":
+                continue
+            display_rows.append({
+                "種類": "月別メモ",
+                "内容": f"{rule.name}: {rule.description}",
+                "重要度": rule.severity,
+            })
+        if display_rows:
+            st.dataframe(display_rows, width="stretch", hide_index=True)
+        else:
+            st.caption("この月だけの追加ルールは未設定です。")
+
+        with st.form(
+            f"quick_monthly_rule_form_{int(target_year)}_{int(target_month)}",
+            clear_on_submit=True,
+        ):
+            st.markdown("##### 特別ルールを追加")
+            rule_mode = st.radio(
+                "反映方法",
+                ["メモとして残す", "生成にも反映する"],
+                horizontal=True,
+                help=(
+                    "生成にも反映する場合、スタッフ・店舗・回数の条件をシフト計算に渡します。"
+                    "文章の細かい条件は備考として残ります。"
+                ),
+            )
+            quick_rule_name = st.text_input(
+                "見出し",
+                placeholder="例: 牧野さんの西口研修",
+            )
+            quick_rule_desc = st.text_area(
+                "内容",
+                placeholder="例: 牧野さんを研修のため、楯さんが西口勤務の時に一緒に3回だけ入れる",
+                height=80,
+            )
+            employee_options = ["指定なし"] + shift_submission_employee_names()
+            quick_employee = st.selectbox("対象スタッフ", employee_options)
+            quick_stores = []
+            quick_count = 0
+            quick_comparison = "min"
+            if rule_mode == "生成にも反映する":
+                store_options = [s.name for s in Store if s != Store.OFF]
+                store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
+                quick_stores = st.multiselect(
+                    "対象店舗",
+                    options=store_options,
+                    format_func=lambda name: store_labels.get(name, name),
+                )
+                comparison_label = st.selectbox(
+                    "条件",
+                    ["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
+                )
+                quick_comparison = {
+                    "最低回数": "min",
+                    "最大回数": "max",
+                    "ちょうど回数": "exact",
+                    "配置禁止": "forbid",
+                }[comparison_label]
+                quick_count = int(st.number_input(
+                    "月内回数",
+                    min_value=0 if quick_comparison == "forbid" else 1,
+                    max_value=31,
+                    value=0 if quick_comparison == "forbid" else 3,
+                    disabled=quick_comparison == "forbid",
+                ))
+            quick_severity = st.selectbox(
+                "重要度",
+                ["WARNING", "ERROR"],
+                help="ERRORは必ず守る条件、WARNINGはできるだけ守る条件です。",
+            )
+            submitted_quick_rule = st.form_submit_button("この月の特別ルールに追加")
+            if submitted_quick_rule:
+                is_structured = rule_mode == "生成にも反映する"
+                missing_structured = (
+                    is_structured
+                    and (
+                        quick_employee == "指定なし"
+                        or not quick_stores
+                        or (quick_comparison != "forbid" and quick_count <= 0)
+                    )
+                )
+                if not quick_rule_name or not quick_rule_desc:
+                    st.error("見出しと内容を入力してください。")
+                elif missing_structured:
+                    st.error("生成にも反映する場合は、スタッフ・店舗・回数を入力してください。")
+                else:
+                    new_rule = CustomRule(
+                        id=f"monthly_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        name=quick_rule_name,
+                        description=quick_rule_desc,
+                        enabled=True,
+                        severity=quick_severity,
+                        created_at=datetime.now().isoformat(),
+                        created_by="管理者",
+                        target_year=int(target_year),
+                        target_month=int(target_month),
+                        rule_type="employee_store_count" if is_structured else "note",
+                        employee="" if quick_employee == "指定なし" else quick_employee,
+                        stores=quick_stores,
+                        count=0 if quick_comparison == "forbid" else quick_count,
+                        comparison=quick_comparison,
+                    )
+                    next_cfg = RuleConfig(
+                        enabled_checks=dict(rule_cfg.enabled_checks),
+                        parameters=dict(rule_cfg.parameters),
+                        custom_rules=list(rule_cfg.custom_rules) + [new_rule],
+                    )
+                    rule_mgr.save(
+                        next_cfg,
+                        actor="管理者",
+                        note=f"{int(target_year)}年{int(target_month)}月の特別ルール追加",
+                    )
+                    st.success("この月の特別ルールに追加しました。")
+                    st.rerun()
 
     # 操作ボタン群
     st.markdown("##### 操作")
+    allow_partial_generation = summary["total_pending"] == 0
+    if summary["total_pending"] > 0:
+        st.warning(
+            f"未提出者が {summary['total_pending']}名います。"
+            "本人の×希望を守るため、原則は全員提出後に生成してください。"
+        )
+        allow_partial_generation = st.checkbox(
+            "未提出者を希望未指定として生成する（緊急時のみ）",
+            key=f"allow_partial_generation_{int(target_year)}_{int(target_month)}",
+        )
     bcol1, bcol2, bcol3, bcol4 = st.columns(4)
 
     with bcol1:
         # 生成ボタン: ロック中は無効、未提出者がいれば警告
-        gen_disabled = lock_info is not None
+        gen_disabled = lock_info is not None or not allow_partial_generation
         if gen_disabled:
-            gen_help = "ロック解除してから再生成してください"
+            if lock_info is not None:
+                gen_help = "ロック解除してから再生成してください"
+            else:
+                gen_help = "未提出者がいるため、緊急時の確認チェックを入れるまで生成できません"
         elif summary["total_pending"] > 0:
             gen_help = f"⚠ {summary['total_pending']}名 未提出です。それでも生成しますか？"
         else:
-            gen_help = "AIが希望データから新規シフトを作成します"
+            gen_help = "シフト計算エンジンが希望データから新規シフトを作成します"
 
         # 一部提出でも生成可能（未提出者は自由配置）
         gen_button_label = "🔄 シフトを自動生成"
@@ -986,11 +3271,15 @@ if mode == "📊 経営者ビュー":
             try:
                 from calendar import monthrange as _mr
                 days_in_m = _mr(_saved_target_year, _saved_target_month)[1]
+                solver_limit_seconds = max(
+                    180,
+                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 180)),
+                )
 
                 progress_area.info(
                     f"⏳ ステップ 1/4: {_saved_target_year}年{_saved_target_month}月の提出データを読み込み中..."
                 )
-                with st.spinner(f"AIがシフト案を生成中... (最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"):
+                with st.spinner(f"シフト案を生成中... (最大{solver_limit_seconds}秒)"):
                     # 実際の提出データを読み込む
                     from prototype.submission_loader import load_submissions_for_month
                     sub_data = load_submissions_for_month(
@@ -1010,7 +3299,6 @@ if mode == "📊 経営者ビュー":
                         _saved_target_year == 2026 and _saved_target_month == 5
                         and sub_data.submission_count == 0
                     )
-
                     # 提出があればそれを使い、なければテストデータにフォールバック
                     if sub_data.submission_count > 0:
                         # 実データで生成（任意の月で動く）
@@ -1025,7 +3313,30 @@ if mode == "📊 経営者ビュー":
                         use_work_requests = [
                             (emp, d, store) for (emp, d, store) in sub_data.work_requests
                             if 1 <= d <= days_in_m
+                            and d not in set(use_off_requests.get(emp, []))
                         ]
+                        use_preferred_work_requests = [
+                            (emp, d, store)
+                            for (emp, d, store) in getattr(sub_data, "preferred_work_requests", [])
+                            if 1 <= d <= days_in_m
+                            and d not in set(use_off_requests.get(emp, []))
+                        ]
+                        use_preferred_work_groups = []
+                        for emp, candidate_days, required_count, store in getattr(
+                            sub_data, "preferred_work_groups", []
+                        ):
+                            filtered_candidates = [
+                                int(d) for d in candidate_days
+                                if 1 <= int(d) <= days_in_m
+                                and int(d) not in set(use_off_requests.get(emp, []))
+                            ]
+                            if filtered_candidates:
+                                use_preferred_work_groups.append((
+                                    emp,
+                                    sorted(set(filtered_candidates)),
+                                    min(int(required_count), len(set(filtered_candidates))),
+                                    store,
+                                ))
                         use_flexible_off = []
                         for fo in sub_data.flexible_off:
                             if isinstance(fo, tuple) and len(fo) >= 3:
@@ -1034,36 +3345,83 @@ if mode == "📊 経営者ビュー":
                                 if cands:
                                     use_flexible_off.append((emp, cands, n))
                         use_holiday_overrides = {}
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = dict(
+                            getattr(sub_data, "max_consecutive_work_days", {})
+                        )
+                        use_employee_max_consecutive_off = dict(
+                            getattr(sub_data, "max_consecutive_off_days", {})
+                        )
+                        use_preferred_consecutive_off = list(
+                            getattr(sub_data, "preferred_consecutive_off", [])
+                        )
+                        effective_paid_leave_days = combined_paid_leave_days(
+                            sub_data.paid_leave_days,
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
                         # 有給日数を holiday_overrides に反映（基準＋有給日数）
-                        for emp_name, paid_days in sub_data.paid_leave_days.items():
+                        for emp_name, paid_days in effective_paid_leave_days.items():
                             try:
                                 from prototype.employees import get_employee
                                 emp = get_employee(emp_name)
-                                if emp.annual_target_days:
-                                    base_target = round(emp.annual_target_days / 12)
+                                base_target = get_monthly_work_target(
+                                    emp.name,
+                                    _saved_target_month,
+                                    emp.annual_target_days,
+                                )
+                                if base_target:
                                     base_holidays = days_in_m - base_target
                                     use_holiday_overrides[emp_name] = base_holidays + paid_days
                             except Exception:
                                 pass
+                        for emp_name, requested_days in getattr(
+                            sub_data, "requested_holiday_days", {}
+                        ).items():
+                            if 0 <= int(requested_days) <= days_in_m:
+                                use_holiday_overrides[emp_name] = max(
+                                    int(use_holiday_overrides.get(emp_name, 0) or 0),
+                                    int(requested_days),
+                                )
+                                use_exact_holiday_days[emp_name] = int(requested_days)
                         # 実データ使用時は前月持ち越し・特例なし（過去状態が不明）
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
                             f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                         )
+                        parsed_note_summaries = getattr(sub_data, "parsed_note_summaries", {})
+                        if parsed_note_summaries:
+                            data_source_msg += (
+                                f"\n自由記載から "
+                                f"{len(parsed_note_summaries)}名分の希望も反映しました。"
+                            )
                         if sub_data.pending_employees:
                             data_source_msg += (
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
                                 f"{', '.join(sub_data.pending_employees[:5])}"
                                 f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
-                                "は希望未指定として自由配置）"
+                                    "は希望未指定として自由配置）"
+                                )
+                        admin_leave_days = admin_paid_leave_days_for_month(
+                            _saved_target_year, _saved_target_month,
+                        )
+                        if admin_leave_days:
+                            data_source_msg += (
+                                "\n管理者が追加した有給調整も集計に含めました。"
                             )
                     elif is_test_may_2026:
                         # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                         use_off_requests = OFF_REQUESTS
                         use_work_requests = WORK_REQUESTS
+                        use_preferred_work_requests = []
+                        use_preferred_work_groups = []
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
                         use_holiday_overrides = MAY_2026_HOLIDAY_OVERRIDES
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = {}
+                        use_employee_max_consecutive_off = {}
+                        use_preferred_consecutive_off = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
                         data_source_msg = (
@@ -1073,8 +3431,14 @@ if mode == "📊 経営者ビュー":
                         # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
                         use_off_requests = {}
                         use_work_requests = []
+                        use_preferred_work_requests = []
+                        use_preferred_work_groups = []
                         use_flexible_off = []
                         use_holiday_overrides = {}
+                        use_exact_holiday_days = {}
+                        use_employee_max_consecutive_work = {}
+                        use_employee_max_consecutive_off = {}
+                        use_preferred_consecutive_off = []
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -1087,26 +3451,171 @@ if mode == "📊 経営者ビュー":
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
                     )
                     modes = determine_operation_modes(_saved_target_year, _saved_target_month)
+                    use_monthly_store_count_rules = active_monthly_store_count_rules(
+                        rule_cfg, _saved_target_year, _saved_target_month,
+                    )
+                    for _emp, _day, _store in system_monthly_preferred_work_requests(
+                        _saved_target_year, _saved_target_month,
+                    ):
+                        if _day in set(use_off_requests.get(_emp, [])):
+                            continue
+                        _item = (_emp, int(_day), _store)
+                        if _item not in use_preferred_work_requests:
+                            use_preferred_work_requests.append(_item)
 
                     progress_area.info(
-                        f"⏳ ステップ 4/4: AIソルバー実行中... "
-                        f"(最大{rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒)"
+                        f"⏳ ステップ 4/4: シフト計算エンジン実行中... "
+                        f"(最大{solver_limit_seconds}秒)"
                     )
-                    shift = generate_shift(
-                        year=_saved_target_year,
-                        month=_saved_target_month,
-                        off_requests=use_off_requests,
-                        work_requests=use_work_requests,
-                        prev_month=use_prev_month,
-                        flexible_off=use_flexible_off,
-                        holiday_overrides=use_holiday_overrides,
-                        operation_modes=modes,
-                        consec_exceptions=use_consec_exceptions,
-                        max_consec_override=rule_cfg.parameters.get("max_consec_work", 5),
-                        time_limit_seconds=rule_cfg.parameters.get("solver_time_limit_seconds", 30),
-                        random_seed=rule_cfg.parameters.get("solver_seed", 42),
-                        verbose=False,
-                    )
+                    generation_kwargs = {
+                        "year": _saved_target_year,
+                        "month": _saved_target_month,
+                        "off_requests": use_off_requests,
+                        "work_requests": use_work_requests,
+                        "prev_month": use_prev_month,
+                        "flexible_off": use_flexible_off,
+                        "holiday_overrides": use_holiday_overrides,
+                        "operation_modes": modes,
+                        "consec_exceptions": use_consec_exceptions,
+                        "default_holidays": rule_cfg.parameters.get("default_holiday_days", 8),
+                        "max_consec_override": rule_cfg.parameters.get("max_consec_work", 5),
+                        "time_limit_seconds": solver_limit_seconds,
+                        "random_seed": rule_cfg.parameters.get("solver_seed", 42),
+                        "verbose": False,
+                    }
+                    generator_params = inspect.signature(generate_shift).parameters
+                    if "preferred_work_requests" in generator_params:
+                        generation_kwargs["preferred_work_requests"] = use_preferred_work_requests
+                    if "preferred_work_groups" in generator_params:
+                        generation_kwargs["preferred_work_groups"] = use_preferred_work_groups
+                    if "preferred_consecutive_off" in generator_params:
+                        generation_kwargs["preferred_consecutive_off"] = use_preferred_consecutive_off
+                    if "exact_holiday_days" in generator_params:
+                        generation_kwargs["exact_holiday_days"] = use_exact_holiday_days
+                    if "employee_max_consecutive_work" in generator_params:
+                        generation_kwargs["employee_max_consecutive_work"] = use_employee_max_consecutive_work
+                    if "employee_max_consecutive_off" in generator_params:
+                        generation_kwargs["employee_max_consecutive_off"] = use_employee_max_consecutive_off
+                    if "monthly_store_count_rules" in generator_params:
+                        generation_kwargs["monthly_store_count_rules"] = use_monthly_store_count_rules
+                    if "strict_warning_constraints" in generator_params:
+                        generation_kwargs["strict_warning_constraints"] = True
+                    if "advisor_max_days" in generator_params:
+                        # 顧問は自動では確定しない。必要時だけ候補試算として別途確認する。
+                        generation_kwargs["advisor_max_days"] = 0
+                        data_source_msg += (
+                            "\n顧問は自動配置せず、必要な場合だけ候補として表示します。"
+                        )
+                    shift = generate_shift(**generation_kwargs)
+                    relaxed_warning_constraints = False
+                    relaxed_advisor_limit = False
+                    if shift is None and "strict_warning_constraints" in generator_params:
+                        progress_area.info(
+                            "⏳ 厳しめ条件では解が見つからなかったため、"
+                            "警告候補だけを緩めて再探索しています..."
+                        )
+                        relaxed_kwargs = dict(generation_kwargs)
+                        relaxed_kwargs["strict_warning_constraints"] = False
+                        shift = generate_shift(**relaxed_kwargs)
+                        relaxed_warning_constraints = shift is not None
+                    if relaxed_warning_constraints:
+                        data_source_msg += (
+                            "\n※警告が出ない条件では解が見つからなかったため、"
+                            "一部の警告条件だけ緩めて生成しました。"
+                        )
+
+                    advisor_candidates = []
+                    advisor_candidate_triggers = []
+                    advisor_candidate_base_used = False
+                    emergency_draft_used = False
+                    if shift is not None:
+                        candidate_validation = run_shift_validation(
+                            shift=shift,
+                            work_requests=list(use_work_requests) + list(use_preferred_work_requests),
+                            off_requests=use_off_requests,
+                            prev_month=use_prev_month,
+                            holiday_overrides=use_holiday_overrides,
+                            exact_holiday_days=use_exact_holiday_days,
+                            employee_max_consecutive_work=use_employee_max_consecutive_work,
+                            employee_max_consecutive_off=use_employee_max_consecutive_off,
+                            default_holidays=rule_cfg.parameters.get("default_holiday_days", 8),
+                            max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                            monthly_store_count_rules=use_monthly_store_count_rules,
+                        )
+                        advisor_candidate_triggers = advisor_candidate_trigger_issues(
+                            candidate_validation
+                        )
+
+                    if shift is None or advisor_candidate_triggers:
+                        advisor_probe_kwargs = dict(generation_kwargs)
+                        if "advisor_max_days" in generator_params:
+                            advisor_probe_kwargs["advisor_max_days"] = advisor_candidate_limit(
+                                _saved_target_year, _saved_target_month,
+                            )
+                        advisor_probe_shift = generate_shift(**advisor_probe_kwargs)
+                        if (
+                            advisor_probe_shift is None
+                            and "strict_warning_constraints" in advisor_probe_kwargs
+                        ):
+                            relaxed_probe_kwargs = dict(advisor_probe_kwargs)
+                            relaxed_probe_kwargs["strict_warning_constraints"] = False
+                            advisor_probe_shift = generate_shift(**relaxed_probe_kwargs)
+                        advisor_candidates = advisor_candidate_rows_from_shift(
+                            advisor_probe_shift
+                        )
+                        if shift is None and not advisor_candidate_triggers:
+                            advisor_candidate_triggers = [{
+                                "日付": "",
+                                "区分": "解なし",
+                                "内容": "顧問なしでは条件を満たすシフトを見つけられませんでした。",
+                            }]
+
+                        if shift is None and advisor_probe_shift is not None:
+                            shift = strip_advisor_assignments(advisor_probe_shift)
+                            advisor_candidate_base_used = True
+                            data_source_msg += (
+                                "\n顧問なしでは解が見つからなかったため、"
+                                "顧問候補を外した確認用下書きを表示します。"
+                                "候補を手動で入れるか、条件を調整してください。"
+                            )
+
+                    if shift is None and "advisor_max_days" in generator_params:
+                        emergency_limit = emergency_advisor_candidate_limit(
+                            _saved_target_year, _saved_target_month,
+                        )
+                        if emergency_limit > advisor_candidate_limit(
+                            _saved_target_year, _saved_target_month,
+                        ):
+                            progress_area.info(
+                                "⏳ 通常の候補枠でも下書きが出ないため、"
+                                "緊急用の仮下書きを作成しています..."
+                            )
+                            emergency_probe_kwargs = dict(generation_kwargs)
+                            emergency_probe_kwargs["advisor_max_days"] = emergency_limit
+                            if "strict_warning_constraints" in emergency_probe_kwargs:
+                                emergency_probe_kwargs["strict_warning_constraints"] = False
+                            emergency_probe_shift = generate_shift(**emergency_probe_kwargs)
+                            if emergency_probe_shift is not None:
+                                shift = strip_advisor_assignments(emergency_probe_shift)
+                                advisor_candidates = advisor_candidate_rows_from_shift(
+                                    emergency_probe_shift
+                                )
+                                advisor_candidate_base_used = True
+                                emergency_draft_used = True
+                                if not advisor_candidate_triggers:
+                                    advisor_candidate_triggers = [{
+                                        "日付": "",
+                                        "区分": "緊急下書き",
+                                        "内容": (
+                                            "通常の候補枠では下書きが出ないため、"
+                                            "顧問候補枠を一時的に広げて仮案を作成しました。"
+                                        ),
+                                    }]
+                                data_source_msg += (
+                                    "\n通常の候補枠でも解が見つからなかったため、"
+                                    "緊急用に顧問候補枠を広げた確認用下書きを表示します。"
+                                    "顧問は自動確定していません。エラーを見ながら手動で調整してください。"
+                                )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
@@ -1124,9 +3633,46 @@ if mode == "📊 経営者ビュー":
                         emp: list(days) for emp, days in use_off_requests.items()
                     },
                     "work_requests_count": len(use_work_requests),
+                    "preferred_work_requests_count": len(use_preferred_work_requests),
+                    "preferred_work_groups_count": len(use_preferred_work_groups),
                     "flexible_off_count": len(use_flexible_off),
                     "holiday_overrides": dict(use_holiday_overrides),
-                    "paid_leave_days": dict(sub_data.paid_leave_days),
+                    "paid_leave_days": dict(
+                        combined_paid_leave_days(
+                            sub_data.paid_leave_days,
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
+                    ),
+                    "submitted_paid_leave_days": dict(sub_data.paid_leave_days),
+                    "admin_paid_leave_days": dict(
+                        admin_paid_leave_days_for_month(
+                            _saved_target_year,
+                            _saved_target_month,
+                        )
+                    ),
+                    "requested_holiday_days": dict(
+                        getattr(sub_data, "requested_holiday_days", {})
+                    ),
+                    "exact_holiday_days": dict(use_exact_holiday_days),
+                    "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
+                    "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
+                    "preferred_consecutive_off": list(use_preferred_consecutive_off),
+                    "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                    "relaxed_warning_constraints": bool(relaxed_warning_constraints),
+                    "relaxed_advisor_limit": bool(relaxed_advisor_limit),
+                    "advisor_auto_assignment": False,
+                    "advisor_candidate_limit": advisor_candidate_limit(
+                        _saved_target_year, _saved_target_month,
+                    ),
+                    "advisor_candidates": list(advisor_candidates),
+                    "advisor_candidate_triggers": list(advisor_candidate_triggers),
+                    "advisor_candidate_base_used": bool(advisor_candidate_base_used),
+                    "emergency_draft_used": bool(emergency_draft_used),
+                    "solver_limit_seconds": int(solver_limit_seconds),
+                    "parsed_note_summaries": dict(
+                        getattr(sub_data, "parsed_note_summaries", {})
+                    ),
                     "days_in_month": days_in_m,
                     "total_off_days_requested": sum(
                         len(v) for v in use_off_requests.values()
@@ -1136,7 +3682,8 @@ if mode == "📊 経営者ビュー":
                 if shift is not None:
                     save_session_shift(shift)
                     try:
-                        backup_mgr.save_shift(
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
                             shift,
                             kind="draft",
                             author="自動保存",
@@ -1145,13 +3692,19 @@ if mode == "📊 経営者ビュー":
                     except Exception:
                         pass
                     # 検証で使うために、実際に使った制約も保存
-                    st.session_state["last_validation_inputs"] = {
+                    save_validation_context({
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "off_requests": dict(use_off_requests),
                         "work_requests": list(use_work_requests),
+                        "preferred_work_requests": list(use_preferred_work_requests),
+                        "preferred_work_groups": list(use_preferred_work_groups),
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
-                    }
+                        "exact_holiday_days": dict(use_exact_holiday_days),
+                        "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
+                        "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
+                        "monthly_store_count_rules": list(use_monthly_store_count_rules),
+                    })
                     progress_area.empty()
                     st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                     st.session_state[_gen_result_key] = {
@@ -1167,7 +3720,7 @@ if mode == "📊 経営者ビュー":
                     diag_lines = [
                         "❌ **シフトを生成できませんでした**",
                         "",
-                        f"ソルバーが {rule_cfg.parameters.get('solver_time_limit_seconds', 30)}秒以内に "
+                        f"ソルバーが {solver_limit_seconds}秒以内に "
                         "制約を全て満たすシフトを見つけられませんでした。",
                         "",
                         "**考えられる原因:**",
@@ -1200,7 +3753,7 @@ if mode == "📊 経営者ビュー":
                         "2. 矛盾する希望があれば該当従業員に再提出を依頼",
                         "3. 「⚙️ 設定 → 🔧 ルール設定」で",
                         "   - 「最大連勤日数」を 5→6 や 7 に増やす",
-                        "   - 「ソルバー最大実行時間」を 30→60 秒に増やす",
+                        "   - 「ソルバー最大実行時間」を 120→180 秒に増やす",
                         "4. 長期欠勤者は「⚙️ 設定 → 👥 従業員マスタ」で「休職中」に変更",
                     ])
                     st.error("\n".join(diag_lines))
@@ -1259,6 +3812,12 @@ if mode == "📊 経営者ビュー":
                 if snapshot_path.exists():
                     loaded = backup_mgr.load_shift(snapshot_path)
                     save_session_shift(loaded)
+                    try:
+                        restore_validation_context_for_month(
+                            int(target_year), int(target_month), rule_cfg,
+                        )
+                    except Exception:
+                        pass
                     st.success("✅ 確定版を読み込みました")
                     st.rerun()
                 else:
@@ -1332,16 +3891,20 @@ if mode == "📊 経営者ビュー":
                 cancel_lock = st.form_submit_button("キャンセル", width="stretch")
             if submit_lock and current_shift is not None:
                 # バックアップ保存
-                snapshot_path = backup_mgr.save_shift(
+                snapshot_path = save_shift_snapshot_with_github(
+                    backup_mgr,
                     current_shift, kind="finalized",
                     author=lock_author, note=lock_note,
                 )
                 # ロック登録
-                lock_mgr.lock(
+                lock_path = lock_mgr.lock(
                     year=int(target_year), month=int(target_month),
                     locked_by=lock_author,
                     snapshot_file=snapshot_path.name,
                     note=lock_note,
+                )
+                push_lock_file_to_github(
+                    lock_path, int(target_year), int(target_month), "lock",
                 )
                 st.success(f"✅ {int(target_year)}年{int(target_month)}月をロックしました")
                 st.session_state["show_lock_dialog"] = False
@@ -1363,7 +3926,23 @@ if mode == "📊 経営者ビュー":
             with col_b:
                 cancel_unlock = st.form_submit_button("キャンセル", width="stretch")
             if submit_unlock:
-                lock_mgr.unlock(int(target_year), int(target_month))
+                if lock_mgr.unlock(int(target_year), int(target_month)):
+                    try:
+                        archive_dir = lock_mgr.lock_dir / "archive"
+                        pattern = f"{int(target_year):04d}-{int(target_month):02d}_unlocked_*.json"
+                        archive_files = sorted(
+                            archive_dir.glob(pattern),
+                            key=lambda p: p.stat().st_mtime,
+                        )
+                        if archive_files:
+                            push_lock_file_to_github(
+                                archive_files[-1],
+                                int(target_year),
+                                int(target_month),
+                                "unlock",
+                            )
+                    except Exception:
+                        pass
                 st.success(f"✅ ロックを解除しました")
                 st.session_state["show_unlock_dialog"] = False
                 st.rerun()
@@ -1374,7 +3953,7 @@ if mode == "📊 経営者ビュー":
     st.markdown("---")
 
     # シフト表示
-    shift = get_session_shift()
+    shift = get_session_shift_for_month(int(target_year), int(target_month))
     if shift is None:
         st.info("👆 上のボタンを押してシフトを生成してください")
         try:
@@ -1389,26 +3968,19 @@ if mode == "📊 経営者ビュー":
                 key="restore_latest_draft_shift",
             ):
                 save_session_shift(latest_draft)
+                try:
+                    restore_validation_context_for_month(
+                        int(target_year), int(target_month), rule_cfg,
+                    )
+                except Exception:
+                    pass
                 st.success("自動保存の下書きを復元しました")
                 st.rerun()
-    elif int(shift.year) != int(target_year) or int(shift.month) != int(target_month):
-        # 表示中の月と保持しているシフトの月が違う場合は隠す（混乱防止）
-        st.warning(
-            f"⚠ **{target_year}年{target_month}月** を表示しようとしていますが、"
-            f"前回生成したシフトは **{shift.year}年{shift.month}月** のものです。"
-            f"\n\n下のボタンで新規生成するか、過去シフトから読み込んでください。"
-        )
-        if st.button(
-            f"🗑 前回生成した {shift.year}/{shift.month} のシフトを破棄",
-            key="discard_stale_shift",
-        ):
-            st.session_state.pop("current_shift", None)
-            st.session_state.pop("last_validation_inputs", None)
-            st.rerun()
-        shift = None
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
-        shift_view_options = ["📋 シフト表", "✅ 検証結果", "📊 統計", "📥 出力", "💬 AI対話"]
+        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力"]
+        if st.session_state.get("manager_shift_view") not in shift_view_options:
+            st.session_state["manager_shift_view"] = shift_view_options[0]
         selected_shift_view = st.radio(
             "表示切替",
             options=shift_view_options,
@@ -1417,7 +3989,7 @@ if mode == "📊 経営者ビュー":
             label_visibility="collapsed",
         )
 
-        if selected_shift_view == shift_view_options[0]:
+        if selected_shift_view == "📋 シフト表":
             # コメント欄（表の上）— Excel出力時にも反映される
             st.markdown("##### 📝 上部コメント（Excel/PDF出力に反映）")
             col_cm1, col_cm2, col_cm3 = st.columns(3)
@@ -1449,18 +4021,404 @@ if mode == "📊 経営者ビュー":
             st.markdown("---")
 
             render_shift_legend()
+            _table_validation_context = get_validation_context_for_shift(shift)
+            _table_ym = f"{int(shift.year):04d}-{int(shift.month):02d}"
+            if _table_ym not in st.session_state.get("validation_inputs_by_month", {}):
+                try:
+                    _table_validation_context = restore_validation_context_for_month(
+                        int(shift.year), int(shift.month), rule_cfg,
+                    )
+                except Exception:
+                    pass
+            _table_off_cells = build_off_request_cells(
+                _table_validation_context.get("off_requests", {})
+            )
+            if _table_off_cells:
+                st.caption("赤枠の × は、本人が提出した「絶対休み」の希望です。")
 
-            # 人員不足日を計算
-            short_staff_by_store = detect_short_staff_by_store(shift)
-            short_days = set(short_staff_by_store.keys())
-            if short_days:
-                short_day_text = format_short_staff_summary(shift, short_staff_by_store)
-                st.warning(
-                    f"⚠ 人員不足の日: {short_day_text}"
-                    f"（黄色でハイライト・人員少欄に店舗別マーク表示）"
+            edit_ym = f"{int(shift.year):04d}_{int(shift.month):02d}"
+            inline_version_key = f"inline_shift_editor_version_{edit_ym}"
+            inline_undo_key = f"inline_edit_undo_stack_{edit_ym}"
+            inline_redo_key = f"inline_edit_redo_stack_{edit_ym}"
+            inline_status_key = f"inline_edit_status_{edit_ym}"
+            inline_autosave_key = f"inline_edit_autosave_signature_{edit_ym}"
+            inline_draft_key = f"inline_edit_draft_rows_{edit_ym}"
+            inline_base_signature_key = f"inline_edit_base_signature_{edit_ym}"
+            if inline_version_key not in st.session_state:
+                st.session_state[inline_version_key] = 0
+            if inline_undo_key not in st.session_state:
+                st.session_state[inline_undo_key] = []
+            if inline_redo_key not in st.session_state:
+                st.session_state[inline_redo_key] = []
+            if st.session_state.get(inline_status_key):
+                st.success(st.session_state.pop(inline_status_key))
+
+            st.markdown("##### ✏️ 色付きシフト表を直接クリックして修正")
+            st.caption(
+                "セルをクリックすると、空白・×・各店舗記号を選べます。"
+                "変更は下の「変更を確定」を押すまで本シフトには保存されません。"
+            )
+            with st.container(border=True):
+                if lock_info is not None:
+                    st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
+
+                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
+                base_editor_rows = shift_to_editor_rows(shift)
+                base_signature = editor_symbol_signature(base_editor_rows)
+                if st.session_state.get(inline_base_signature_key) != base_signature:
+                    st.session_state[inline_draft_key] = base_editor_rows
+                    st.session_state[inline_base_signature_key] = base_signature
+                draft_rows = st.session_state.get(inline_draft_key) or base_editor_rows
+                draft_rows = refresh_editor_short_staff_column(shift, draft_rows)
+                st.session_state[inline_draft_key] = draft_rows
+                draft_changed_cells = get_editor_changed_cells(shift, draft_rows)
+                editor_df = pd.DataFrame(draft_rows, columns=editor_columns)
+                column_config = {
+                    "日": st.column_config.NumberColumn("日", width="small"),
+                    "曜": st.column_config.TextColumn("曜", width="small"),
+                }
+                for name in EXPORT_COLUMN_ORDER:
+                    column_config[name] = st.column_config.SelectboxColumn(
+                        name,
+                        options=STORE_SYMBOL_OPTIONS,
+                        width="small",
+                        help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
+                    )
+                column_config["人数少"] = st.column_config.TextColumn("少", width="small")
+                column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
+                disabled_columns = ["日", "曜", "人数少", "鍵"]
+                if lock_info is not None:
+                    disabled_columns = editor_columns
+
+                editor_key = f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}"
+                if HAS_AGGRID:
+                    st.markdown(
+                        f'<div style="background:#0f172a; color:#ffffff; '
+                        f'padding:10px 12px; border:1px solid #999; '
+                        f'border-radius:6px 6px 0 0; font-weight:800; '
+                        f'font-size:16px;">'
+                        f'{int(shift.year)}年{int(shift.month)}月 シフト表</div>',
+                        unsafe_allow_html=True,
+                    )
+                    grid_response = render_colored_shift_editor(
+                        shift,
+                        editor_df,
+                        grid_key=editor_key,
+                        locked=lock_info is not None,
+                        off_request_cells=_table_off_cells,
+                        changed_cells=draft_changed_cells,
+                    )
+                    edited_value = grid_response.get("data", editor_df)
+                else:
+                    st.warning(
+                        "色付きの直接編集部品がまだ入っていないため、一時的に標準の編集表で表示しています。"
+                        "GitHubに requirements.txt も反映すると、色付き編集に切り替わります。"
+                    )
+                    render_shift_table(
+                        shift,
+                        short_staff_by_store=detect_short_staff_by_store(shift),
+                        off_request_cells=_table_off_cells,
+                        sticky=True,
+                        selectable_cells=False,
+                    )
+                    edited_value = st.data_editor(
+                        editor_df,
+                        key=editor_key,
+                        hide_index=True,
+                        width="stretch",
+                        height=620,
+                        num_rows="fixed",
+                        column_config=column_config,
+                        disabled=disabled_columns,
+                    )
+                edited_records = normalize_editor_records(editor_rows_to_records(edited_value))
+                if not edited_records:
+                    edited_records = draft_rows
+                edited_records = refresh_editor_short_staff_column(shift, edited_records)
+                if (
+                    HAS_AGGRID
+                    and lock_info is None
+                    and editor_symbol_signature(edited_records)
+                    != editor_symbol_signature(st.session_state.get(inline_draft_key, []))
+                ):
+                    st.session_state[inline_draft_key] = edited_records
+                    st.rerun()
+
+                inline_changed_cells = get_editor_changed_cells(shift, edited_records)
+                inline_display_shift = editor_rows_to_shift(shift, edited_records)
+                fixed_off_violations = get_fixed_off_edit_violations(
+                    edited_records, _table_off_cells,
+                )
+                short_staff_by_store = detect_short_staff_by_store(inline_display_shift)
+                short_days = set(short_staff_by_store.keys())
+                if short_days:
+                    short_day_text = format_short_staff_summary(inline_display_shift, short_staff_by_store)
+                    st.warning(
+                        f"⚠ 人員不足の日: {short_day_text}"
+                        "（黄色でハイライト・人員少欄に店舗別マーク表示）"
+                    )
+                key_warnings_by_store = detect_key_warnings_by_store(inline_display_shift)
+                if key_warnings_by_store:
+                    st.warning(
+                        "鍵確認: "
+                        + format_key_warning_summary(inline_display_shift, key_warnings_by_store)
+                        + "（鍵欄にも表示）"
+                    )
+
+                inline_result = run_shift_validation(
+                    shift=inline_display_shift,
+                    work_requests=_table_validation_context.get("work_requests", []),
+                    off_requests=_table_validation_context.get("off_requests", {}),
+                    prev_month=_table_validation_context.get("prev_month", []),
+                    holiday_overrides=_table_validation_context.get("holiday_overrides", {}),
+                    exact_holiday_days=_table_validation_context.get("exact_holiday_days", {}),
+                    employee_max_consecutive_work=_table_validation_context.get("employee_max_consecutive_work", {}),
+                    employee_max_consecutive_off=_table_validation_context.get("employee_max_consecutive_off", {}),
+                    max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                    monthly_store_count_rules=_table_validation_context.get("monthly_store_count_rules", []),
                 )
 
-            render_shift_table(shift, short_staff_by_store=short_staff_by_store)
+                if inline_changed_cells and lock_info is None:
+                    autosave_signature = json.dumps(
+                        [
+                            [
+                                employee,
+                                day,
+                                assignment_to_symbol(
+                                    inline_display_shift.get_assignment(employee, day)
+                                ),
+                            ]
+                            for employee, day in sorted(inline_changed_cells)
+                        ],
+                        ensure_ascii=False,
+                    )
+                    if st.session_state.get(inline_autosave_key) != autosave_signature:
+                        try:
+                            save_shift_snapshot_with_github(
+                                backup_mgr,
+                                inline_display_shift,
+                                kind="draft",
+                                author="手動修正",
+                                note=f"編集中の自動保存（未確定・{len(inline_changed_cells)}件）",
+                            )
+                            st.session_state[inline_autosave_key] = autosave_signature
+                        except Exception:
+                            pass
+
+                state_col1, state_col2, state_col3, state_col4, state_col5 = st.columns(5)
+                state_col1.metric("編集中の変更", len(inline_changed_cells))
+                state_col2.metric("エラー", inline_result.error_count, delta_color="inverse")
+                state_col3.metric("警告", inline_result.warning_count, delta_color="inverse")
+                state_col4.metric("人員不足日", len(short_staff_by_store), delta_color="inverse")
+                state_col5.metric("鍵確認", len(key_warnings_by_store), delta_color="inverse")
+                render_part_time_paid_leave_suggestions(
+                    inline_display_shift,
+                    _table_validation_context,
+                    key_prefix=f"inline_{edit_ym}",
+                )
+
+                needs_exception_save = bool(fixed_off_violations) or inline_result.error_count > 0
+                allow_exception_save = False
+
+                if fixed_off_violations:
+                    st.error(
+                        "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
+                        + "、".join(fixed_off_violations)
+                        + "。通常運用では×へ戻してください。"
+                    )
+                elif inline_result.error_count == 0:
+                    st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
+                else:
+                    st.error("エラーが残っています。下の詳細を確認して修正してください。")
+
+                if needs_exception_save and inline_changed_cells and lock_info is None:
+                    allow_exception_save = st.checkbox(
+                        "管理者例外として、エラーが残っていても下書きに反映する",
+                        key=f"inline_allow_exception_save_{edit_ym}",
+                        help=(
+                            "過去月のすり合わせや本人と後日合意済みの変更だけで使ってください。"
+                            "エラー表示は残るため、確定前に必ず内容を確認してください。"
+                        ),
+                    )
+                    if allow_exception_save:
+                        st.warning(
+                            "管理者例外として下書きに反映できます。"
+                            "本人×休み希望やその他エラーは、検証詳細に残ります。"
+                        )
+
+                btn_col1, btn_col2, btn_col3, btn_col4, btn_col5 = st.columns([1, 1, 1, 1, 2])
+                with btn_col1:
+                    apply_disabled = (
+                        lock_info is not None
+                        or not inline_changed_cells
+                        or (needs_exception_save and not allow_exception_save)
+                    )
+                    if st.button(
+                        (
+                            "下書きに反映"
+                            if needs_exception_save and allow_exception_save
+                            else "変更を確定"
+                        ),
+                        key=f"inline_edit_apply_{edit_ym}",
+                        type="primary",
+                        width="stretch",
+                        disabled=apply_disabled,
+                    ):
+                        st.session_state[inline_undo_key].append(clone_monthly_shift(shift))
+                        st.session_state[inline_undo_key] = st.session_state[inline_undo_key][-20:]
+                        st.session_state[inline_redo_key] = []
+                        save_session_shift(inline_display_shift)
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=inline_display_shift,
+                            changed_cells=inline_changed_cells,
+                            actor="手動修正",
+                            reason=(
+                                "シフト表直接編集（管理者例外）"
+                                if needs_exception_save and allow_exception_save
+                                else "シフト表直接編集"
+                            ),
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            inline_display_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note=(
+                                f"シフト表直接編集で{len(inline_changed_cells)}件変更"
+                                + (
+                                    "（エラーあり・管理者例外として下書き反映）"
+                                    if needs_exception_save and allow_exception_save
+                                    else ""
+                                )
+                            ),
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
+                        st.session_state.pop("chat_engine", None)
+                        st.session_state.pop("chat_shift_id", None)
+                        st.session_state[inline_status_key] = (
+                            f"{len(inline_changed_cells)}件の変更を下書きに反映しました。"
+                            if needs_exception_save and allow_exception_save
+                            else f"{len(inline_changed_cells)}件の変更を確定しました。"
+                        )
+                        st.rerun()
+                with btn_col2:
+                    if st.button(
+                        "変更を破棄",
+                        key=f"inline_edit_discard_{edit_ym}",
+                        width="stretch",
+                        disabled=not inline_changed_cells,
+                    ):
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
+                        st.session_state[inline_status_key] = "編集中の変更を破棄しました。"
+                        st.rerun()
+                with btn_col3:
+                    if st.button(
+                        "← 戻る",
+                        key=f"inline_edit_undo_{edit_ym}",
+                        width="stretch",
+                        disabled=lock_info is not None or not st.session_state[inline_undo_key],
+                    ):
+                        previous_shift = st.session_state[inline_undo_key].pop()
+                        st.session_state[inline_redo_key].append(clone_monthly_shift(shift))
+                        undo_cells = get_editor_changed_cells(shift, shift_to_editor_rows(previous_shift))
+                        save_session_shift(previous_shift)
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=previous_shift,
+                            changed_cells=undo_cells,
+                            actor="手動修正",
+                            reason="戻る",
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            previous_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note="戻るでシフトを復元",
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
+                        st.session_state.pop("chat_engine", None)
+                        st.session_state.pop("chat_shift_id", None)
+                        st.session_state[inline_status_key] = "直前の変更を元に戻しました。"
+                        st.rerun()
+                with btn_col4:
+                    if st.button(
+                        "進む →",
+                        key=f"inline_edit_redo_{edit_ym}",
+                        width="stretch",
+                        disabled=lock_info is not None or not st.session_state[inline_redo_key],
+                    ):
+                        next_shift = st.session_state[inline_redo_key].pop()
+                        st.session_state[inline_undo_key].append(clone_monthly_shift(shift))
+                        redo_cells = get_editor_changed_cells(shift, shift_to_editor_rows(next_shift))
+                        save_session_shift(next_shift)
+                        record_edit_history_with_github(
+                            backup_mgr,
+                            shift.year,
+                            shift.month,
+                            before_shift=shift,
+                            after_shift=next_shift,
+                            changed_cells=redo_cells,
+                            actor="手動修正",
+                            reason="進む",
+                        )
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            next_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note="進むでシフトを再反映",
+                        )
+                        st.session_state[inline_version_key] += 1
+                        st.session_state.pop(inline_autosave_key, None)
+                        st.session_state.pop(inline_draft_key, None)
+                        st.session_state.pop(inline_base_signature_key, None)
+                        st.session_state.pop("chat_engine", None)
+                        st.session_state.pop("chat_shift_id", None)
+                        st.session_state[inline_status_key] = "元に戻した変更をもう一度反映しました。"
+                        st.rerun()
+                with btn_col5:
+                    if inline_changed_cells:
+                        st.caption("緑枠のセルが、現在編集中の変更です。")
+                    else:
+                        st.caption("まだ変更はありません。")
+
+                if inline_result.error_count > 0 or inline_result.warning_count > 0:
+                    with st.expander(
+                        f"エラー・警告の詳細（{inline_result.error_count + inline_result.warning_count}件）",
+                        expanded=inline_result.error_count > 0,
+                    ):
+                        for issue in inline_result.issues:
+                            prefix = "❌" if issue.severity == "ERROR" else "⚠"
+                            st.write(f"{prefix} {issue}")
+
+            if not HAS_AGGRID:
+                st.markdown("##### 色付きプレビュー")
+                render_shift_table(
+                    inline_display_shift,
+                    short_staff_by_store=short_staff_by_store,
+                    sticky=True,
+                    off_request_cells=_table_off_cells,
+                    changed_cells=inline_changed_cells,
+                    changed_cell_color="#16a34a",
+                    selectable_cells=False,
+                )
 
             st.markdown("---")
             st.markdown("##### 📝 下部注意書き（Excel/PDF出力に反映）")
@@ -1477,30 +4435,286 @@ if mode == "📊 経営者ビュー":
             )
             st.session_state["excel_footer"] = footer_text
 
-        elif selected_shift_view == shift_view_options[1]:
-            # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
-            _vi = st.session_state.get("last_validation_inputs", {})
-            _vi_match = (
-                _vi.get("ym")
-                == f"{int(shift.year):04d}-{int(shift.month):02d}"
+        elif selected_shift_view == "✏️ シフト修正":
+            st.markdown("##### ✏️ シフト修正")
+            st.caption(
+                "表のセルをクリックして、空白・休み・各店舗を選びます。"
+                "本人が提出した×は赤枠で固定扱いです。変更中のセルは下のプレビュー表で緑枠になります。"
             )
-            if _vi_match:
-                _v_work = _vi.get("work_requests", [])
-                _v_off = _vi.get("off_requests", {})
-                _v_prev = _vi.get("prev_month", [])
-                _v_holiday = _vi.get("holiday_overrides", {})
+
+            validation_context = get_validation_context_for_shift(shift)
+            off_request_cells = build_off_request_cells(
+                validation_context.get("off_requests", {})
+            )
+            if off_request_cells:
+                st.info(
+                    "赤枠の×は、本人が提出した「絶対休み」です。通常は勤務へ変更しません。"
+                    "過去月のすり合わせなど、本人と後日合意済みの例外だけ管理者例外として下書き反映できます。"
+                )
+            if lock_info is not None:
+                st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
+
+            edit_ym = f"{int(shift.year):04d}_{int(shift.month):02d}"
+            version_key = f"manual_edit_version_{edit_ym}"
+            undo_key = f"manual_edit_undo_{edit_ym}"
+            redo_key = f"manual_edit_redo_{edit_ym}"
+            status_key = f"manual_edit_status_{edit_ym}"
+            if version_key not in st.session_state:
+                st.session_state[version_key] = 0
+            if undo_key not in st.session_state:
+                st.session_state[undo_key] = []
+            if redo_key not in st.session_state:
+                st.session_state[redo_key] = []
+            if st.session_state.get(status_key):
+                st.success(st.session_state.pop(status_key))
+
+            editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
+            editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
+            column_config = {
+                "日": st.column_config.NumberColumn("日", width="small"),
+                "曜": st.column_config.TextColumn("曜", width="small"),
+            }
+            for name in EXPORT_COLUMN_ORDER:
+                column_config[name] = st.column_config.SelectboxColumn(
+                    name,
+                    options=STORE_SYMBOL_OPTIONS,
+                    width="small",
+                    help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
+                )
+            column_config["人数少"] = st.column_config.TextColumn("少", width="small")
+            column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
+            disabled_columns = ["日", "曜", "人数少", "鍵"]
+            if lock_info is not None:
+                disabled_columns = editor_columns
+
+            edited_value = st.data_editor(
+                editor_df,
+                key=f"manual_shift_editor_{edit_ym}_{st.session_state[version_key]}",
+                hide_index=True,
+                width="stretch",
+                height=620,
+                num_rows="fixed",
+                column_config=column_config,
+                disabled=disabled_columns,
+            )
+            edited_records = editor_rows_to_records(edited_value)
+            if not edited_records:
+                edited_records = shift_to_editor_rows(shift)
+            edited_records = refresh_editor_short_staff_column(shift, edited_records)
+
+            changed_cells = get_editor_changed_cells(shift, edited_records)
+            edited_shift = editor_rows_to_shift(shift, edited_records)
+            fixed_off_violations = get_fixed_off_edit_violations(
+                edited_records, off_request_cells,
+            )
+
+            edit_result = run_shift_validation(
+                shift=edited_shift,
+                work_requests=validation_context.get("work_requests", []),
+                off_requests=validation_context.get("off_requests", {}),
+                prev_month=validation_context.get("prev_month", []),
+                holiday_overrides=validation_context.get("holiday_overrides", {}),
+                exact_holiday_days=validation_context.get("exact_holiday_days", {}),
+                employee_max_consecutive_work=validation_context.get("employee_max_consecutive_work", {}),
+                employee_max_consecutive_off=validation_context.get("employee_max_consecutive_off", {}),
+                max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                monthly_store_count_rules=validation_context.get("monthly_store_count_rules", []),
+            )
+            edit_short_staff_by_store = detect_short_staff_by_store(edited_shift)
+            edit_key_warnings_by_store = detect_key_warnings_by_store(edited_shift)
+
+            st.markdown("##### 編集中の状態")
+            state_col1, state_col2, state_col3, state_col4, state_col5 = st.columns(5)
+            state_col1.metric("変更セル", len(changed_cells))
+            state_col2.metric("エラー", edit_result.error_count, delta_color="inverse")
+            state_col3.metric("警告", edit_result.warning_count, delta_color="inverse")
+            state_col4.metric("人員不足日", len(edit_short_staff_by_store), delta_color="inverse")
+            state_col5.metric("鍵確認", len(edit_key_warnings_by_store), delta_color="inverse")
+
+            needs_exception_save = bool(fixed_off_violations) or edit_result.error_count > 0
+            allow_exception_save = False
+
+            if fixed_off_violations:
+                st.error(
+                    "本人の×休み希望を勤務へ変更しようとしているセルがあります: "
+                    + "、".join(fixed_off_violations)
+                    + "。通常運用では×へ戻してください。"
+                )
+            elif edit_result.error_count == 0:
+                st.success("確定できる状態です。警告がある場合は内容だけ確認してください。")
             else:
-                # シフトの月と検証データの月が違う場合は何もチェックしない
-                # （= 5月のテストデータで6月のシフトを検証してエラー大量発生を防ぐ）
-                _v_work = []
-                _v_off = {}
-                _v_prev = []
-                _v_holiday = {}
-            result = validate(
+                st.error("エラーが残っています。下の詳細を確認して修正してください。")
+
+            if needs_exception_save and changed_cells and lock_info is None:
+                allow_exception_save = st.checkbox(
+                    "管理者例外として、エラーが残っていても下書きに反映する",
+                    key=f"manual_allow_exception_save_{edit_ym}",
+                    help=(
+                        "過去月のすり合わせや本人と後日合意済みの変更だけで使ってください。"
+                        "エラー表示は残るため、確定前に必ず内容を確認してください。"
+                    ),
+                )
+                if allow_exception_save:
+                    st.warning(
+                        "管理者例外として下書きに反映できます。"
+                        "本人×休み希望やその他エラーは、検証詳細に残ります。"
+                    )
+
+            action_col1, action_col2, action_col3, action_col4, action_col5 = st.columns([1, 1, 1, 1, 2])
+            with action_col1:
+                confirm_disabled = (
+                    lock_info is not None
+                    or not changed_cells
+                    or (needs_exception_save and not allow_exception_save)
+                )
+                if st.button(
+                    (
+                        "下書きに反映"
+                        if needs_exception_save and allow_exception_save
+                        else "変更を確定"
+                    ),
+                    key="manual_edit_apply",
+                    type="primary",
+                    width="stretch",
+                    disabled=confirm_disabled,
+                    help="通常はエラー0件で反映します。管理者例外チェック時だけエラーありの下書き反映ができます",
+                ):
+                    before_shift = clone_monthly_shift(shift)
+                    st.session_state[undo_key].append(before_shift)
+                    st.session_state[undo_key] = st.session_state[undo_key][-20:]
+                    st.session_state[redo_key] = []
+                    save_session_shift(edited_shift)
+                    record_edit_history_with_github(
+                        backup_mgr,
+                        shift.year,
+                        shift.month,
+                        before_shift=before_shift,
+                        after_shift=edited_shift,
+                        changed_cells=changed_cells,
+                        actor="手動修正",
+                        reason=(
+                            "クリック編集（管理者例外）"
+                            if needs_exception_save and allow_exception_save
+                            else "クリック編集"
+                        ),
+                    )
+                    try:
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
+                            edited_shift,
+                            kind="draft",
+                            author="手動修正",
+                            note=(
+                                f"クリック編集で{len(changed_cells)}件変更"
+                                + (
+                                    "（エラーあり・管理者例外として下書き反映）"
+                                    if needs_exception_save and allow_exception_save
+                                    else ""
+                                )
+                            ),
+                        )
+                    except Exception:
+                        pass
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = (
+                        f"{len(changed_cells)}件の変更を下書きに反映しました。"
+                        if needs_exception_save and allow_exception_save
+                        else f"{len(changed_cells)}件の変更を確定しました。"
+                    )
+                    st.rerun()
+            with action_col2:
+                if st.button(
+                    "変更を破棄",
+                    key="manual_edit_discard",
+                    width="stretch",
+                    disabled=not changed_cells,
+                    help="表で編集中の内容を捨てて、本シフトの内容に戻します",
+                ):
+                    st.session_state[version_key] += 1
+                    st.session_state[status_key] = "編集中の変更を破棄しました。"
+                    st.rerun()
+            with action_col3:
+                if st.button(
+                    "← 戻る",
+                    key="manual_edit_undo",
+                    width="stretch",
+                    disabled=lock_info is not None or not st.session_state[undo_key],
+                    help="直前に確定した手動修正を元に戻します",
+                ):
+                    previous_shift = st.session_state[undo_key].pop()
+                    st.session_state[redo_key].append(clone_monthly_shift(shift))
+                    save_session_shift(previous_shift)
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = "直前の手動修正を元に戻しました。"
+                    st.rerun()
+            with action_col4:
+                if st.button(
+                    "進む →",
+                    key="manual_edit_redo",
+                    width="stretch",
+                    disabled=lock_info is not None or not st.session_state[redo_key],
+                    help="元に戻した手動修正をもう一度反映します",
+                ):
+                    next_shift = st.session_state[redo_key].pop()
+                    st.session_state[undo_key].append(clone_monthly_shift(shift))
+                    save_session_shift(next_shift)
+                    st.session_state[version_key] += 1
+                    st.session_state.pop("chat_engine", None)
+                    st.session_state.pop("chat_shift_id", None)
+                    st.session_state[status_key] = "元に戻した手動修正をもう一度反映しました。"
+                    st.rerun()
+            with action_col5:
+                if changed_cells:
+                    st.caption("緑枠のセルが、現在編集中の変更です。")
+                else:
+                    st.caption("まだ変更はありません。")
+
+            with st.expander(
+                f"エラー・警告の詳細（{edit_result.error_count + edit_result.warning_count}件）",
+                expanded=edit_result.error_count > 0,
+            ):
+                if not edit_result.issues:
+                    st.write("問題はありません。")
+                else:
+                    for issue in edit_result.issues:
+                        prefix = "❌" if issue.severity == "ERROR" else "⚠"
+                        st.write(f"{prefix} {issue}")
+
+            st.markdown("##### プレビュー")
+            render_shift_legend()
+            render_shift_table(
+                edited_shift,
+                short_staff_by_store=edit_short_staff_by_store,
+                key_warnings_by_store=edit_key_warnings_by_store,
+                sticky=True,
+                changed_cells=changed_cells,
+                changed_cell_color="#16a34a",
+                off_request_cells=off_request_cells,
+            )
+
+        elif selected_shift_view == "✅ 検証結果":
+            # シフト生成時に使った制約を取得（無ければ空＝制約なしで検証）
+            _validation_context = get_validation_context_for_shift(shift)
+            _v_work = _validation_context.get("work_requests", [])
+            _v_off = _validation_context.get("off_requests", {})
+            _v_prev = _validation_context.get("prev_month", [])
+            _v_holiday = _validation_context.get("holiday_overrides", {})
+            _v_exact_holiday = _validation_context.get("exact_holiday_days", {})
+            _v_max_work = _validation_context.get("employee_max_consecutive_work", {})
+            _v_max_off = _validation_context.get("employee_max_consecutive_off", {})
+            result = run_shift_validation(
                 shift=shift, work_requests=_v_work,
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
+                exact_holiday_days=_v_exact_holiday,
+                employee_max_consecutive_work=_v_max_work,
+                employee_max_consecutive_off=_v_max_off,
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                monthly_store_count_rules=_validation_context.get("monthly_store_count_rules", []),
             )
             col_a, col_b, col_c = st.columns(3)
             col_a.metric("エラー", result.error_count, delta_color="inverse")
@@ -1520,7 +4734,7 @@ if mode == "📊 経営者ビュー":
                     if issue.severity == "WARNING":
                         st.write(f"⚠ {issue}")
 
-        elif selected_shift_view == shift_view_options[2]:
+        elif selected_shift_view == "📊 統計":
             # 出勤日数統計
             from prototype.employees import ALL_EMPLOYEES
             data = []
@@ -1531,7 +4745,11 @@ if mode == "📊 経営者ビュー":
                 work = sum(1 for d in range(1, days_in_month+1)
                            if (a := shift.get_assignment(e.name, d)) and a.store != Store.OFF)
                 off = days_in_month - work
-                target = round(e.annual_target_days / 12) if e.annual_target_days else None
+                target = get_monthly_work_target(
+                    e.name,
+                    shift.month,
+                    e.annual_target_days,
+                )
                 diff = (work - target) if target else None
                 data.append({
                     "氏名": e.name,
@@ -1542,7 +4760,7 @@ if mode == "📊 経営者ビュー":
                 })
             st.dataframe(data, width="stretch", hide_index=True)
 
-        elif selected_shift_view == shift_view_options[3]:
+        elif selected_shift_view == "📥 出力":
             output_dir = OUTPUT_DIR
             output_dir.mkdir(exist_ok=True)
 
@@ -1555,6 +4773,7 @@ if mode == "📊 経営者ビュー":
             footer_text = st.session_state.get("excel_footer", "")
             footer_notes = [line for line in footer_text.split("\n") if line.strip()]
             short_staff_for_export = detect_short_staff_by_store(shift)
+            key_warnings_for_export = detect_key_warnings_by_store(shift)
 
             st.info(
                 "📝 「📋 シフト表」タブで入力したコメントと注意書きが反映されます。"
@@ -1566,11 +4785,13 @@ if mode == "📊 経営者ビュー":
                 st.write("**📁 Excel 形式（編集可）**")
                 if st.button("Excel を生成", key="gen_xlsx"):
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
-                    export_shift_to_excel(
+                    call_with_supported_kwargs(
+                        export_shift_to_excel,
                         shift, file_path,
                         header_comments=header_comments,
                         footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
+                        key_warnings_by_store=key_warnings_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 xlsx_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
@@ -1585,13 +4806,16 @@ if mode == "📊 経営者ビュー":
                         )
 
             with col_p:
-                st.write("**📄 PDF 形式（印刷用・A4横1枚）**")
+                st.write("**📄 PDF 形式（印刷用・A4縦1枚）**")
                 if st.button("PDF を生成", key="gen_pdf"):
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
-                    export_shift_to_pdf(
+                    call_with_supported_kwargs(
+                        export_shift_to_pdf,
                         shift, file_path,
-                        header_notes=[c for c in header_comments if c.strip()] or ["AI 自動生成版"],
+                        header_notes=header_comments,
+                        footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
+                        key_warnings_by_store=key_warnings_for_export,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 pdf_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
@@ -1611,13 +4835,15 @@ if mode == "📊 経営者ビュー":
             if st.button("バックアップ保存", key="save_backup"):
                 backup = ShiftBackup()
                 kind = "finalized" if note else "draft"
-                path = backup.save_shift(shift, kind=kind, author="代表取締役", note=note)
+                path = save_shift_snapshot_with_github(
+                    backup, shift, kind=kind, author="代表取締役", note=note,
+                )
                 st.success(f"✅ バックアップ保存: {path.name}")
 
-        elif selected_shift_view == shift_view_options[4]:
-            st.markdown("##### 💬 シフトを見ながらAIと対話")
+        elif selected_shift_view == "💬 AI相談":
+            st.markdown("##### 💬 AI相談（補助機能）")
             st.caption(
-                "AIが作る変更はまずプレビューになります。シフト表で確認してから本シフトに反映できます。"
+                "基本の修正は「シフト修正」画面で行います。AIは、エラーの直し方や候補探しを相談する補助機能として使えます。"
             )
 
             api_key = get_anthropic_api_key()
@@ -1628,19 +4854,37 @@ if mode == "📊 経営者ビュー":
                     "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
+                _chat_validation_inputs = st.session_state.get("last_validation_inputs", {})
+                _chat_validation_match = (
+                    _chat_validation_inputs.get("ym")
+                    == f"{int(shift.year):04d}-{int(shift.month):02d}"
+                )
+                if not _chat_validation_match:
+                    _chat_validation_inputs = {}
+                _chat_max_consec = rule_cfg.parameters.get("max_consec_work", 5)
                 if "chat_engine" not in st.session_state or st.session_state.get("chat_shift_id") != id(shift):
-                    st.session_state.chat_engine = ShiftChatEngine(shift, api_key=api_key)
+                    st.session_state.chat_engine = ShiftChatEngine(
+                        shift,
+                        api_key=api_key,
+                        validation_inputs=_chat_validation_inputs,
+                        max_consec=_chat_max_consec,
+                    )
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_messages = []
 
                 chat_engine = st.session_state.chat_engine
+                chat_engine.set_validation_context(
+                    _chat_validation_inputs,
+                    max_consec=_chat_max_consec,
+                )
 
                 st.markdown("##### 📋 現在のシフト表")
                 st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
 
                 def _save_chat_shift_snapshot(note: str) -> None:
                     try:
-                        backup_mgr.save_shift(
+                        save_shift_snapshot_with_github(
+                            backup_mgr,
                             chat_engine.shift,
                             kind="draft",
                             author="AI対話",
@@ -1758,7 +5002,7 @@ if mode == "📊 経営者ビュー":
                 display_shift = chat_engine.get_preview_shift() if pending_count else chat_engine.shift
                 changed_cells = chat_engine.get_pending_change_keys() if pending_count else set()
 
-                _cv_inputs = st.session_state.get("last_validation_inputs", {})
+                _cv_inputs = _chat_validation_inputs
                 _cv_match = (
                     _cv_inputs.get("ym")
                     == f"{int(display_shift.year):04d}-{int(display_shift.month):02d}"
@@ -1768,116 +5012,126 @@ if mode == "📊 経営者ビュー":
                     _cv_off = _cv_inputs.get("off_requests", {})
                     _cv_prev = _cv_inputs.get("prev_month", [])
                     _cv_holiday = _cv_inputs.get("holiday_overrides", {})
+                    _cv_exact_holiday = _cv_inputs.get("exact_holiday_days", {})
+                    _cv_max_work = _cv_inputs.get("employee_max_consecutive_work", {})
+                    _cv_max_off = _cv_inputs.get("employee_max_consecutive_off", {})
+                    _cv_monthly_rules = _cv_inputs.get("monthly_store_count_rules", [])
                 else:
                     _cv_work = []
                     _cv_off = {}
                     _cv_prev = []
                     _cv_holiday = {}
-                chat_result = validate(
+                    _cv_exact_holiday = {}
+                    _cv_max_work = {}
+                    _cv_max_off = {}
+                    _cv_monthly_rules = []
+                chat_result = run_shift_validation(
                     shift=display_shift, work_requests=_cv_work,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
+                    exact_holiday_days=_cv_exact_holiday,
+                    employee_max_consecutive_work=_cv_max_work,
+                    employee_max_consecutive_off=_cv_max_off,
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                    monthly_store_count_rules=_cv_monthly_rules,
                 )
                 short_staff_by_store_chat = detect_short_staff_by_store(display_shift)
                 short_days_chat = set(short_staff_by_store_chat.keys())
 
-                ai_summary_area = st.container()
-                ai_table_area = st.container()
-
-                with ai_summary_area:
-                    summary_col1, summary_col2, summary_col3 = st.columns([1, 1, 2])
-                    with summary_col1:
-                        if chat_result.error_count == 0:
-                            st.markdown(
-                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                                'text-align:center; font-weight:bold; color:#166534;">'
-                                '✅ エラー 0件</div>',
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                f'<div style="background:#fee2e2; padding:8px; border-radius:6px; '
-                                f'text-align:center; font-weight:bold; color:#991b1b;">'
-                                f'❌ エラー {chat_result.error_count}件</div>',
-                                unsafe_allow_html=True,
-                            )
-                    with summary_col2:
-                        if chat_result.warning_count == 0:
-                            st.markdown(
-                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                                'text-align:center; font-weight:bold; color:#166534;">'
-                                '✓ 警告 0件</div>',
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
-                                f'text-align:center; font-weight:bold; color:#92400e;">'
-                                f'⚠ 警告 {chat_result.warning_count}件</div>',
-                                unsafe_allow_html=True,
-                            )
-                    with summary_col3:
-                        if short_days_chat:
-                            short_day_text_chat = format_short_staff_summary(
-                                display_shift, short_staff_by_store_chat,
-                            )
-                            st.markdown(
-                                f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
-                                f'text-align:center; font-weight:bold; color:#92400e;">'
-                                f'👥 人員不足: {short_day_text_chat}</div>',
-                                unsafe_allow_html=True,
-                            )
-                        else:
-                            st.markdown(
-                                '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
-                                'text-align:center; font-weight:bold; color:#166534;">'
-                                '👥 人員充足</div>',
-                                unsafe_allow_html=True,
-                            )
-
-                    if chat_result.error_count > 0 or chat_result.warning_count > 0:
-                        with st.expander(
-                            f"🔍 エラー・警告の詳細を見る（{chat_result.error_count + chat_result.warning_count}件）",
-                            expanded=False,
-                        ):
-                            if chat_result.error_count > 0:
-                                st.markdown("**❌ エラー（要修正）**")
-                                for issue in chat_result.issues:
-                                    if issue.severity == "ERROR":
-                                        st.markdown(
-                                            f'<div style="background:#fef2f2; border-left:4px solid #ef4444; '
-                                            f'padding:6px 10px; margin:4px 0; font-size:13px;">'
-                                            f'<strong>{issue.category}</strong>'
-                                            f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
-                                            f'{" · " + issue.employee if issue.employee else ""}<br>'
-                                            f'<span style="color:#7f1d1d;">{issue.message}</span></div>',
-                                            unsafe_allow_html=True,
-                                        )
-                            if chat_result.warning_count > 0:
-                                st.markdown("**⚠ 警告（確認推奨）**")
-                                for issue in chat_result.issues:
-                                    if issue.severity == "WARNING":
-                                        st.markdown(
-                                            f'<div style="background:#fefce8; border-left:4px solid #eab308; '
-                                            f'padding:6px 10px; margin:4px 0; font-size:13px;">'
-                                            f'<strong>{issue.category}</strong>'
-                                            f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
-                                            f'{" · " + issue.employee if issue.employee else ""}<br>'
-                                            f'<span style="color:#713f12;">{issue.message}</span></div>',
-                                            unsafe_allow_html=True,
-                                        )
-
-                with ai_table_area:
-                    render_shift_legend()
-                    render_shift_table(
-                        display_shift,
-                        short_staff_by_store=short_staff_by_store_chat,
-                        sticky=True,
-                        changed_cells=changed_cells,
-                    )
+                render_shift_legend()
+                if _cv_off:
+                    st.caption("赤枠の × は、本人が提出した「絶対休み」の希望です。")
+                render_shift_table(
+                    display_shift,
+                    short_staff_by_store=short_staff_by_store_chat,
+                    sticky=True,
+                    changed_cells=changed_cells,
+                    off_request_cells=build_off_request_cells(_cv_off),
+                )
 
                 _render_chat_action_buttons()
+
+                summary_col1, summary_col2, summary_col3 = st.columns([1, 1, 2])
+                with summary_col1:
+                    if chat_result.error_count == 0:
+                        st.markdown(
+                            '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                            'text-align:center; font-weight:bold; color:#166534;">'
+                            '✅ エラー 0件</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f'<div style="background:#fee2e2; padding:8px; border-radius:6px; '
+                            f'text-align:center; font-weight:bold; color:#991b1b;">'
+                            f'❌ エラー {chat_result.error_count}件</div>',
+                            unsafe_allow_html=True,
+                        )
+                with summary_col2:
+                    if chat_result.warning_count == 0:
+                        st.markdown(
+                            '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                            'text-align:center; font-weight:bold; color:#166534;">'
+                            '✓ 警告 0件</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
+                            f'text-align:center; font-weight:bold; color:#92400e;">'
+                            f'⚠ 警告 {chat_result.warning_count}件</div>',
+                            unsafe_allow_html=True,
+                        )
+                with summary_col3:
+                    if short_days_chat:
+                        short_day_text_chat = format_short_staff_summary(
+                            display_shift, short_staff_by_store_chat,
+                        )
+                        st.markdown(
+                            f'<div style="background:#fef3c7; padding:8px; border-radius:6px; '
+                            f'text-align:center; font-weight:bold; color:#92400e;">'
+                            f'👥 人員不足: {short_day_text_chat}</div>',
+                            unsafe_allow_html=True,
+                        )
+                    else:
+                        st.markdown(
+                            '<div style="background:#dcfce7; padding:8px; border-radius:6px; '
+                            'text-align:center; font-weight:bold; color:#166534;">'
+                            '👥 人員充足</div>',
+                            unsafe_allow_html=True,
+                        )
+
+                if chat_result.error_count > 0 or chat_result.warning_count > 0:
+                    with st.expander(
+                        f"🔍 エラー・警告の詳細を見る（{chat_result.error_count + chat_result.warning_count}件）",
+                        expanded=False,
+                    ):
+                        if chat_result.error_count > 0:
+                            st.markdown("**❌ エラー（要修正）**")
+                            for issue in chat_result.issues:
+                                if issue.severity == "ERROR":
+                                    st.markdown(
+                                        f'<div style="background:#fef2f2; border-left:4px solid #ef4444; '
+                                        f'padding:6px 10px; margin:4px 0; font-size:13px;">'
+                                        f'<strong>{issue.category}</strong>'
+                                        f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
+                                        f'{" · " + issue.employee if issue.employee else ""}<br>'
+                                        f'<span style="color:#7f1d1d;">{issue.message}</span></div>',
+                                        unsafe_allow_html=True,
+                                    )
+                        if chat_result.warning_count > 0:
+                            st.markdown("**⚠ 警告（確認推奨）**")
+                            for issue in chat_result.issues:
+                                if issue.severity == "WARNING":
+                                    st.markdown(
+                                        f'<div style="background:#fefce8; border-left:4px solid #eab308; '
+                                        f'padding:6px 10px; margin:4px 0; font-size:13px;">'
+                                        f'<strong>{issue.category}</strong>'
+                                        f'{" · " + str(display_shift.month) + "/" + str(issue.day) if issue.day else ""}'
+                                        f'{" · " + issue.employee if issue.employee else ""}<br>'
+                                        f'<span style="color:#713f12;">{issue.message}</span></div>',
+                                        unsafe_allow_html=True,
+                                    )
 
                 st.markdown("---")
                 st.markdown("##### 会話")
@@ -1942,14 +5196,14 @@ if mode == "📊 経営者ビュー":
 # ============================================================
 
 elif mode == "👤 従業員ビュー":
-    st.title("👤 希望シフト提出")
+    st.title("👤 希望シフト")
 
     # マジックリンクでログインしている場合は、その従業員に固定
     from auth import get_logged_in_employee, is_employee, is_manager
     logged_in_emp = get_logged_in_employee()
 
     # employee_names は後でボタンキー生成に使うので、ここで必ず定義しておく
-    employee_names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+    employee_names = shift_submission_employee_names()
 
     if is_employee() and logged_in_emp:
         # 従業員モード（マジックリンク経由）: 自分に固定
@@ -1962,7 +5216,7 @@ elif mode == "👤 従業員ビュー":
             f'border-left:4px solid #16a34a; margin-bottom:12px;">'
             f'👋 こんにちは、<strong>{selected}さん</strong>。<br>'
             f'<span style="font-size:13px; color:#166534;">'
-            f'このページからシフト希望を提出してください。'
+            f'このページで希望提出と確定シフトの確認ができます。'
             f'</span></div>',
             unsafe_allow_html=True,
         )
@@ -1985,7 +5239,9 @@ elif mode == "👤 従業員ビュー":
         st.stop()
 
     # ============================================================
-    # 対象月の選択（テスト目的でも本番でも使える月選択）
+    # 従業員側の表示範囲
+    # - 従業員リンクでは、原則「翌月の希望提出」と「今月の確定シフト確認」だけ。
+    # - 過去月・翌々月などのテスト操作は、管理者プレビュー時だけ折りたたみ内に残す。
     # ============================================================
     today = date.today()
     # 翌月計算
@@ -2009,61 +5265,183 @@ elif mode == "👤 従業員ビュー":
     else:
         pp_year, pp_month = prev_year, prev_month - 1
 
-    # セッションに対象月を保存
-    if "emp_target_year" not in st.session_state:
-        st.session_state["emp_target_year"] = next_year
-    if "emp_target_month" not in st.session_state:
-        st.session_state["emp_target_month"] = next_month
+    employee_view_mode = "翌月の希望を提出"
+    if is_employee():
+        employee_view_mode = st.radio(
+            "表示",
+            ["翌月の希望を提出", "今月の確定シフトを見る"],
+            horizontal=True,
+            key="employee_magic_link_view_mode",
+            label_visibility="collapsed",
+        )
 
-    st.markdown("##### 📅 提出する対象月を選んでください")
+        if employee_view_mode == "今月の確定シフトを見る":
+            st.markdown(f"### {today.year}年{today.month}月の確定シフト")
+            public_shift, public_shift_source = load_public_shift_for_employee_view(
+                today.year, today.month,
+            )
+            if public_shift is None:
+                st.warning(
+                    "今月の確定シフトはまだ公開されていません。"
+                    "確定後にこの画面で確認できます。"
+                )
+            else:
+                st.success(f"公開中の確定シフトを表示しています（{public_shift_source}）。")
+                render_employee_confirmed_shift(public_shift, selected)
+            st.info(
+                "急な忌引き・体調不良などで変更が必要な場合は、"
+                "この画面で上書きせず、店長または管理者へ直接連絡してください。"
+                "管理者側でシフトを修正して再度確定します。"
+            )
+            st.stop()
 
-    # クイック選択ボタン（経営者ビューと同じ範囲：前月/今月/翌月/翌々月）
-    qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
-    with qb_col1:
-        if st.button(
-            f"前月\n({prev_year}/{prev_month})",
-            key="emp_qb_prev",
-            width="stretch",
-            help="テスト用：過去月でも提出可能",
-        ):
-            st.session_state["emp_target_year"] = prev_year
-            st.session_state["emp_target_month"] = prev_month
-            st.rerun()
-    with qb_col2:
-        if st.button(
-            f"今月\n({today.year}/{today.month})",
-            key="emp_qb_curr",
-            width="stretch",
-        ):
-            st.session_state["emp_target_year"] = today.year
-            st.session_state["emp_target_month"] = today.month
-            st.rerun()
-    with qb_col3:
-        # 翌月（デフォルト・本番運用想定）
-        if st.button(
-            f"📌 翌月\n({next_year}/{next_month})",
-            key="emp_qb_next",
-            type="primary",
-            width="stretch",
-            help="通常はこちら（本番運用）",
-        ):
+        target_year = next_year
+        target_month = next_month
+        st.markdown(
+            f'<div style="background:#eff6ff; padding:12px 16px; border-radius:8px; '
+            f'border-left:4px solid #2563eb; margin:8px 0 14px 0;">'
+            f'<strong>提出対象:</strong> {target_year}年{target_month}月分<br>'
+            f'<span style="font-size:13px; color:#1e40af;">'
+            f'月が替わると、この提出対象は自動で次の月に切り替わります。'
+            f'</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # 管理者プレビューでは、過去月テストや翌々月確認のために月変更を残す。
+        if "emp_target_year" not in st.session_state:
             st.session_state["emp_target_year"] = next_year
+        if "emp_target_month" not in st.session_state:
             st.session_state["emp_target_month"] = next_month
-            st.rerun()
-    with qb_col4:
-        if st.button(
-            f"翌々月\n({nn_year}/{nn_month})",
-            key="emp_qb_nn",
-            width="stretch",
-            help="早めに提出する場合",
-        ):
-            st.session_state["emp_target_year"] = nn_year
-            st.session_state["emp_target_month"] = nn_month
-            st.rerun()
 
-    target_year = st.session_state["emp_target_year"]
-    target_month = st.session_state["emp_target_month"]
+        target_year = st.session_state["emp_target_year"]
+        target_month = st.session_state["emp_target_month"]
+        st.markdown(
+            f"##### 📅 管理者プレビュー対象: {int(target_year)}年{int(target_month)}月"
+        )
+        with st.expander("管理者プレビュー用に対象月を変更", expanded=False):
+            qb_col1, qb_col2, qb_col3, qb_col4 = st.columns(4)
+            with qb_col1:
+                if st.button(f"前月\n({prev_year}/{prev_month})", key="emp_qb_prev", width="stretch"):
+                    st.session_state["emp_target_year"] = prev_year
+                    st.session_state["emp_target_month"] = prev_month
+                    st.rerun()
+            with qb_col2:
+                if st.button(f"今月\n({today.year}/{today.month})", key="emp_qb_curr", width="stretch"):
+                    st.session_state["emp_target_year"] = today.year
+                    st.session_state["emp_target_month"] = today.month
+                    st.rerun()
+            with qb_col3:
+                if st.button(
+                    f"📌 翌月\n({next_year}/{next_month})",
+                    key="emp_qb_next",
+                    type="primary",
+                    width="stretch",
+                ):
+                    st.session_state["emp_target_year"] = next_year
+                    st.session_state["emp_target_month"] = next_month
+                    st.rerun()
+            with qb_col4:
+                if st.button(f"翌々月\n({nn_year}/{nn_month})", key="emp_qb_nn", width="stretch"):
+                    st.session_state["emp_target_year"] = nn_year
+                    st.session_state["emp_target_month"] = nn_month
+                    st.rerun()
+
     days_in_month = monthrange(target_year, target_month)[1]
+    free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
+    paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
+    review_key = f"pref_review_{selected}_{target_year}_{target_month}"
+    done_key = f"pref_done_{selected}_{target_year}_{target_month}"
+
+    if "user_prefs" not in st.session_state:
+        st.session_state.user_prefs = {}
+    user_key = f"{selected}_{target_year}_{target_month}"
+    existing_submission = None
+    edit_existing_key = f"pref_edit_existing_{selected}_{target_year}_{target_month}"
+    try:
+        _status = ShiftBackup().get_submission_status(
+            int(target_year), int(target_month), [selected],
+        )
+        existing_submission = next(
+            (s for s in _status.get("submitted", []) if s.get("employee") == selected),
+            None,
+        )
+    except Exception:
+        existing_submission = None
+
+    if (
+        existing_submission
+        and not st.session_state.get(done_key)
+        and not st.session_state.get(edit_existing_key)
+    ):
+        submitted_at = existing_submission.get("submitted_at", "")[:19].replace("T", " ")
+        x_days_submitted = existing_submission.get("off_request_days", [])
+        triangle_days_submitted = existing_submission.get("flexible_off_days", [])
+        ok_days_submitted = [
+            d for d in range(1, days_in_month + 1)
+            if d not in set(x_days_submitted) and d not in set(triangle_days_submitted)
+        ]
+        paid_leave_submitted = int(existing_submission.get("paid_leave_days", 0) or 0)
+        st.markdown("### 提出済み")
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** は提出済みです。\n\n"
+            f"提出日時: {submitted_at or '保存済み'}"
+        )
+        st.info(
+            "この画面が表示されていれば、希望は保存されています。"
+            "内容を変更したい場合だけ、下のボタンから修正して再提出してください。"
+        )
+        submitted_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_submitted), "日数": len(x_days_submitted)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_submitted), "日数": len(triangle_days_submitted)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_submitted), "日数": len(ok_days_submitted)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_submitted}日", "日数": paid_leave_submitted},
+            {"項目": "自由記述", "内容": existing_submission.get("note", "").strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(submitted_rows)
+        if st.button(
+            "内容を修正して再提出する",
+            key=f"edit_existing_submission_{selected}_{target_year}_{target_month}",
+            width="stretch",
+        ):
+            st.session_state[edit_existing_key] = True
+            st.rerun()
+        st.stop()
+
+    if st.session_state.get(done_key):
+        done_info = st.session_state.get(done_key) or {}
+        x_days_done = done_info.get("x_days", [])
+        triangle_days_done = done_info.get("triangle_days", [])
+        ok_days_done = done_info.get("ok_days", [])
+        paid_leave_done = int(done_info.get("paid_leave_days", 0) or 0)
+        submitted_at_done = done_info.get("submitted_at", datetime.now().isoformat())[:19].replace("T", " ")
+
+        st.markdown("### 提出完了")
+        st.success(
+            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました。\n\n"
+            f"提出日時: {submitted_at_done}"
+        )
+        st.info(
+            "この画面が表示されていれば提出は完了しています。"
+            "内容を変えたい場合だけ、下のボタンから修正して再提出してください。"
+        )
+        completion_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_done), "日数": len(x_days_done)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_done), "日数": len(ok_days_done)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_done}日", "日数": paid_leave_done},
+            {"項目": "自由記述", "内容": done_info.get("free_text", "").strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(completion_rows)
+        if st.button(
+            "内容を修正して再提出する",
+            key=f"edit_after_done_{selected}_{target_year}_{target_month}",
+            width="stretch",
+        ):
+            st.session_state.pop(done_key, None)
+            st.session_state[review_key] = False
+            st.session_state[edit_existing_key] = True
+            st.rerun()
+        st.stop()
 
     # テスト月（過去・今月）の場合は注意表示
     is_test_month = (
@@ -2076,17 +5454,14 @@ elif mode == "👤 従業員ビュー":
             "本番運用時は「📌 翌月」を選んでください。"
         )
 
-    st.markdown(f"### {target_year}年{target_month}月の希望")
-    st.write("各日の希望を **3つのボタンから1つ** 選んでください：")
+    st.markdown(f"### {target_year}年{target_month}月の希望を入力")
+    st.caption("各日ごとに、右側の ○・△・× から1つ選んでください。")
     st.markdown(
         """
         <div style="display:flex; gap:14px; margin:8px 0 16px 0; font-size:15px; flex-wrap:wrap;">
-          <span style="background:#22c55e; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">○ 出勤可能</span>
-          <span style="background:#ef4444; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">× 休み希望（絶対）</span>
-          <span style="background:#eab308; color:white; padding:6px 14px; border-radius:6px; font-weight:bold;">△ できれば休み</span>
-        </div>
-        <div style="font-size:13px; color:#6b7280; margin-bottom:12px;">
-          選択中のボタンは「鮮やかな色」、未選択のボタンは「薄い色」で表示されます。
+          <span style="background:#dcfce7; color:#166534; padding:6px 14px; border-radius:999px; font-weight:bold;">○ 出勤可能</span>
+          <span style="background:#fef9c3; color:#854d0e; padding:6px 14px; border-radius:999px; font-weight:bold;">△ できれば休み</span>
+          <span style="background:#fee2e2; color:#991b1b; padding:6px 14px; border-radius:999px; font-weight:bold;">× 休み希望</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -2099,132 +5474,300 @@ elif mode == "👤 従業員ビュー":
     st.markdown(
         """
         <style>
-        /* === 全ての日別ボタン共通の見た目 === */
-        [class*="st-key-pref_"] button {
-            width: 100% !important;
-            font-size: 22px !important;
-            font-weight: bold !important;
-            padding: 6px 0 !important;
-            margin: 2px 0 !important;
-            border-radius: 8px !important;
-            min-height: 44px !important;
-            transition: all 0.15s ease;
+        .employee-answer-title {
+            padding: 14px 16px;
+            background: #f8fafc;
+            border-bottom: 1px solid #e5e7eb;
+            font-size: 20px;
+            font-weight: 800;
+            color: #111827;
+            margin: 0 0 12px 0;
+            border-radius: 8px 8px 0 0;
         }
-
-        /* === ○（出勤可能）= 緑系 === */
-        /* 選択中 (primary) — 鮮やかな緑 */
-        [class*="st-key-pref_ok_"] button[kind="primary"] {
-            background-color: #16a34a !important;
-            color: white !important;
-            border: 3px solid #15803d !important;
-            box-shadow: 0 2px 6px rgba(22,163,74,0.4) !important;
+        [class*="st-key-choice_seg_"] {
+            margin: 4px 0 10px 0;
         }
-        /* 未選択 (secondary) — 薄い緑 */
-        [class*="st-key-pref_ok_"] button[kind="secondary"] {
-            background-color: #f0fdf4 !important;
-            color: #166534 !important;
-            border: 2px solid #bbf7d0 !important;
+        [class*="st-key-choice_seg_"] label p {
+            font-size: 16px !important;
+            font-weight: 800 !important;
+            color: #111827 !important;
+            margin-bottom: 4px !important;
         }
-        [class*="st-key-pref_ok_"] button[kind="secondary"]:hover {
-            background-color: #dcfce7 !important;
+        [class*="st-key-choice_seg_"] button {
+            min-height: 42px !important;
+            font-size: 20px !important;
+            font-weight: 800 !important;
+            border-width: 2px !important;
+            border-radius: 999px !important;
+            transition: background-color 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease, transform 0.12s ease !important;
+        }
+        [class*="st-key-choice_seg_"] button p {
+            font-size: 20px !important;
+            line-height: 1 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(1) {
+            background: #dcfce7 !important;
             border-color: #86efac !important;
+            color: #166534 !important;
         }
-
-        /* === ×（休み希望）= 赤系 === */
-        [class*="st-key-pref_off_"] button[kind="primary"] {
-            background-color: #dc2626 !important;
-            color: white !important;
-            border: 3px solid #b91c1c !important;
-            box-shadow: 0 2px 6px rgba(220,38,38,0.4) !important;
+        [class*="st-key-choice_seg_"] button:nth-of-type(1) p {
+            color: #166534 !important;
         }
-        [class*="st-key-pref_off_"] button[kind="secondary"] {
-            background-color: #fef2f2 !important;
-            color: #991b1b !important;
-            border: 2px solid #fecaca !important;
-        }
-        [class*="st-key-pref_off_"] button[kind="secondary"]:hover {
-            background-color: #fee2e2 !important;
-            border-color: #fca5a5 !important;
-        }
-
-        /* === △（できれば休み）= 黄色系 === */
-        [class*="st-key-pref_maybe_"] button[kind="primary"] {
-            background-color: #eab308 !important;
-            color: white !important;
-            border: 3px solid #ca8a04 !important;
-            box-shadow: 0 2px 6px rgba(234,179,8,0.4) !important;
-        }
-        [class*="st-key-pref_maybe_"] button[kind="secondary"] {
-            background-color: #fefce8 !important;
-            color: #854d0e !important;
-            border: 2px solid #fef08a !important;
-        }
-        [class*="st-key-pref_maybe_"] button[kind="secondary"]:hover {
-            background-color: #fef9c3 !important;
+        [class*="st-key-choice_seg_"] button:nth-of-type(2) {
+            background: #fef9c3 !important;
             border-color: #fde047 !important;
+            color: #854d0e !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(2) p {
+            color: #854d0e !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3) {
+            background: #fee2e2 !important;
+            border-color: #fca5a5 !important;
+            color: #991b1b !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3) p {
+            color: #991b1b !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(1):hover {
+            background: #bbf7d0 !important;
+            border-color: #4ade80 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(2):hover {
+            background: #fef08a !important;
+            border-color: #facc15 !important;
+        }
+        [class*="st-key-choice_seg_"] button:nth-of-type(3):hover {
+            background: #fecaca !important;
+            border-color: #f87171 !important;
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(1),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(1) {
+            background: #16a34a !important;
+            border-color: #15803d !important;
+            box-shadow: 0 4px 10px rgba(22, 163, 74, 0.28) !important;
+            color: #ffffff !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(2),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(2) {
+            background: #facc15 !important;
+            border-color: #ca8a04 !important;
+            box-shadow: 0 4px 10px rgba(250, 204, 21, 0.3) !important;
+            color: #713f12 !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(3),
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(3) {
+            background: #ef4444 !important;
+            border-color: #b91c1c !important;
+            box-shadow: 0 4px 10px rgba(239, 68, 68, 0.26) !important;
+            color: #ffffff !important;
+            transform: translateY(-1px);
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(1) p,
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(3) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(3) p {
+            color: #ffffff !important;
+        }
+        [class*="st-key-choice_seg_"] button[data-testid*="segmented_controlActive"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-checked="true"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-pressed="true"]:nth-of-type(2) p,
+        [class*="st-key-choice_seg_"] button[aria-selected="true"]:nth-of-type(2) p {
+            color: #713f12 !important;
+        }
+        @media (max-width: 640px) {
+            [class*="st-key-employee_answer_grid"] {
+                max-width: 100% !important;
+                overflow-x: hidden !important;
+            }
+            [class*="st-key-choice_seg_"] {
+                margin-bottom: 8px;
+            }
+            [class*="st-key-choice_seg_"] label p {
+                font-size: 15px !important;
+            }
+            [class*="st-key-choice_seg_"] button {
+                min-height: 40px !important;
+                font-size: 19px !important;
+                padding-left: 0.65rem !important;
+                padding-right: 0.65rem !important;
+            }
+            [class*="st-key-choice_seg_"] button p {
+                font-size: 19px !important;
+            }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # カレンダー形式で入力
+    # LINEの日程回答に近い、スマホ向けの1日1行形式で入力
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
-    days_per_row = 7
 
-    if "user_prefs" not in st.session_state:
-        st.session_state.user_prefs = {}
-    user_key = f"{selected}_{target_year}_{target_month}"
+    paid_leave_default_value = 0
     if user_key not in st.session_state.user_prefs:
-        st.session_state.user_prefs[user_key] = {d: "○" for d in range(1, days_in_month + 1)}
+        initial_prefs = {d: "○" for d in range(1, days_in_month + 1)}
+        if existing_submission:
+            paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
+            for d in existing_submission.get("off_request_days", []):
+                if 1 <= int(d) <= days_in_month:
+                    initial_prefs[int(d)] = "×"
+            for d in existing_submission.get("flexible_off_days", []):
+                if 1 <= int(d) <= days_in_month and initial_prefs.get(int(d)) != "×":
+                    initial_prefs[int(d)] = "△"
+            st.session_state.setdefault(
+                free_text_key, existing_submission.get("note", "") or "",
+            )
+        st.session_state.user_prefs[user_key] = initial_prefs
+    elif existing_submission:
+        paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
 
     prefs = st.session_state.user_prefs[user_key]
+    if existing_submission and not st.session_state.get(done_key):
+        st.info(
+            f"この月はすでに提出済みです"
+            f"（{existing_submission.get('submitted_at', '')[:19].replace('T', ' ')}）。"
+            "内容を変更したい場合は、この画面で修正して再提出してください。"
+        )
 
-    # 従業員のインデックス（Japaneseキーを避けてASCII-safeなキーにする）
-    emp_idx = employee_names.index(selected)
+    # 当該従業員の月間基準日数を取得
+    _emp_obj = None
+    try:
+        from prototype.employees import get_employee as _get_emp
+        _emp_obj = _get_emp(selected)
+        annual_target = _emp_obj.annual_target_days
+    except Exception:
+        annual_target = None
 
-    for week_start in range(1, days_in_month + 1, days_per_row):
-        cols = st.columns(days_per_row)
-        for i in range(days_per_row):
-            d = week_start + i
-            if d > days_in_month:
-                break
+    if annual_target:
+        monthly_target = get_monthly_work_target(
+            selected,
+            target_month,
+            annual_target,
+        )
+        base_holidays = days_in_month - monthly_target
+    else:
+        monthly_target = None
+        base_holidays = None
+
+    def _save_employee_preferences(paid_leave_days_value: int, free_text_value: str) -> Path:
+        backup = ShiftBackup()
+        off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
+        work_requests = []
+        if _emp_obj and getattr(_emp_obj, "only_on_request_days", False):
+            work_requests = [
+                (selected, d, None)
+                for d, m in prefs.items()
+                if m == "○"
+            ]
+        flexible_days = [d for d, m in prefs.items() if m == "△"]
+        natural_language_notes = {selected: free_text_value}
+        save_path = backup.save_preferences(
+            year=target_year, month=target_month,
+            off_requests=off_requests,
+            work_requests=work_requests,
+            flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
+            natural_language_notes=natural_language_notes,
+            author=selected,
+        )
+        try:
+            import json
+            with open(save_path, encoding="utf-8") as f:
+                _data = json.load(f)
+            _data["paid_leave_days"] = int(paid_leave_days_value)
+            _data["monthly_target_workdays"] = monthly_target
+            _data["base_holidays"] = base_holidays
+            with open(save_path, "w", encoding="utf-8") as f:
+                json.dump(_data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+        try:
+            from prototype.github_backup import push_preference_to_github
+            push_preference_to_github(
+                save_path, employee_name=selected,
+                year=target_year, month=target_month,
+            )
+        except Exception:
+            pass
+        return save_path
+
+    def _render_employee_review() -> None:
+        paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
+        free_text_review = st.session_state.get(free_text_key, "")
+        x_days = [d for d, m in prefs.items() if m == "×"]
+        triangle_days = [d for d, m in prefs.items() if m == "△"]
+        ok_days = [d for d, m in prefs.items() if m == "○"]
+
+        st.markdown("### 提出前の確認")
+        st.warning(
+            "この画面で内容を確認してください。"
+            "× を付けた日は、例外なく「休み希望（絶対）」として扱われます。"
+        )
+        review_rows = [
+            {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days), "日数": len(x_days)},
+            {"項目": "△ できれば休み", "内容": format_day_list(triangle_days), "日数": len(triangle_days)},
+            {"項目": "○ 出勤可能", "内容": format_day_list(ok_days), "日数": len(ok_days)},
+            {"項目": "希望有給日数", "内容": f"{paid_leave_days_review}日", "日数": paid_leave_days_review},
+            {"項目": "自由記述", "内容": free_text_review.strip() or "なし", "日数": ""},
+        ]
+        render_scrollable_review_table(review_rows)
+
+        confirm_col1, confirm_col2 = st.columns([1, 1])
+        with confirm_col1:
+            if st.button("入力に戻る", key="emp_review_back", width="stretch"):
+                st.session_state[review_key] = False
+                st.rerun()
+        with confirm_col2:
+            if st.button("この内容で提出する", key="emp_review_submit", type="primary", width="stretch"):
+                _save_employee_preferences(paid_leave_days_review, free_text_review)
+                st.session_state[review_key] = False
+                st.session_state[done_key] = {
+                    "submitted_at": datetime.now().isoformat(),
+                    "x_days": x_days,
+                    "triangle_days": triangle_days,
+                    "ok_days": ok_days,
+                    "paid_leave_days": paid_leave_days_review,
+                    "free_text": free_text_review,
+                }
+                st.session_state.pop(edit_existing_key, None)
+                st.rerun()
+
+    if st.session_state.get(review_key):
+        _render_employee_review()
+        st.stop()
+
+    # ここはStreamlitボタンで描画する。リンクではないため別タブ遷移は発生しない。
+    with st.container(border=True, key="employee_answer_grid"):
+        st.markdown(
+            '<div class="employee-answer-title">日程回答</div>',
+            unsafe_allow_html=True,
+        )
+        for d in range(1, days_in_month + 1):
             wd = weekday_jp[date(target_year, target_month, d).weekday()]
-            wd_color = "#dc2626" if wd == "日" else ("#2563eb" if wd == "土" else "#374151")
-            with cols[i]:
-                st.markdown(
-                    f'<div style="text-align:center; font-weight:bold; color:{wd_color}; '
-                    f'font-size:14px; margin-bottom:4px;">{d}日({wd})</div>',
-                    unsafe_allow_html=True,
-                )
-                current = prefs.get(d, "○")
-                # ○ 出勤可能（緑）
-                if st.button(
-                    "○",
-                    key=f"pref_ok_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "○" else "secondary",
-                ):
-                    prefs[d] = "○"
-                    st.rerun()
-                # × 休み希望（赤）
-                if st.button(
-                    "×",
-                    key=f"pref_off_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "×" else "secondary",
-                ):
-                    prefs[d] = "×"
-                    st.rerun()
-                # △ できれば休み（黄色）
-                if st.button(
-                    "△",
-                    key=f"pref_maybe_{emp_idx}_{d}",
-                    width="stretch",
-                    type="primary" if current == "△" else "secondary",
-                ):
-                    prefs[d] = "△"
-                    st.rerun()
+            current = prefs.get(d, "○")
+            selected_mark = st.segmented_control(
+                f"{target_month}.{d}({wd})",
+                ["○", "△", "×"],
+                default=current,
+                key=f"choice_seg_{target_year}_{target_month}_{d}",
+                width="stretch",
+            )
+            if selected_mark and selected_mark != current:
+                prefs[d] = selected_mark
+                st.rerun()
 
     # ============================================================
     # 希望有給日数の入力（任意）
@@ -2241,7 +5784,11 @@ elif mode == "👤 従業員ビュー":
         annual_target = None
 
     if annual_target:
-        monthly_target = round(annual_target / 12)
+        monthly_target = get_monthly_work_target(
+            selected,
+            target_month,
+            annual_target,
+        )
         base_holidays = days_in_month - monthly_target
         st.caption(
             f"💡 **{selected}さんの今月の基準**: 勤務 {monthly_target}日 / 休み {base_holidays}日"
@@ -2258,8 +5805,9 @@ elif mode == "👤 従業員ビュー":
 
     paid_leave_days = st.number_input(
         "希望有給日数（任意）",
-        min_value=0, max_value=31, value=0, step=1,
+        min_value=0, max_value=31, value=paid_leave_default_value, step=1,
         help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
+        key=paid_leave_key,
     )
 
     # 現在の入力状況を集計
@@ -2330,71 +5878,53 @@ elif mode == "👤 従業員ビュー":
     st.markdown("---")
     st.subheader("自由記述（任意）")
     st.caption(
-        "💡 連勤の上限・特定日の事情など、シフト作成時に考慮してほしい点があればご記入ください。"
+        "シフト作成時に考慮してほしい点があれば、下の書き方に合わせてご記入ください。"
+        "日付と内容がはっきりしているほど反映されやすくなります。"
+    )
+    st.info(
+        "**おすすめの書き方**\n\n"
+        "日付を入れて、何を希望しているかを短く書いてください。\n\n"
+        "```\n"
+        "22日 出勤希望\n"
+        "6日 赤羽出勤希望\n"
+        "1日 すずらん出勤希望\n"
+        "3日か29日のいずれか1日は出勤したい\n"
+        "16日・17日のどちらか1日休み希望\n"
+        "23日・24日のどちらか1日休み希望\n"
+        "有給2日利用で、合計9日休み希望\n"
+        "4連休希望\n"
+        "```"
+    )
+    st.warning(
+        "**ダメな例（反映しづらい書き方）**\n\n"
+        "```\n"
+        "月末あたり休みたいです\n"
+        "どこかで連休ください\n"
+        "なるべく赤羽がいいです\n"
+        "出られる日はあります\n"
+        "いい感じにお願いします\n"
+        "```"
     )
     free_text = st.text_area(
         "自然言語で希望を書いてください",
         placeholder=(
-            "例: 5連勤は避けたいです。月末は実家に帰るため休みたいです。\n"
-            "    16日と17日のどちらか1日は休めると助かります。"
+            "例:\n"
+            "22日 出勤希望\n"
+            "3日か29日のいずれか1日は出勤したい\n"
+            "16日・17日のどちらか1日休み希望\n"
+            "有給2日利用で、合計9日休み希望"
         ),
-        height=120,
-        key=f"free_text_{selected}_{target_year}_{target_month}",
+        height=180,
+        key=free_text_key,
     )
 
     if st.button(
-        f"📤 {target_year}年{target_month}月分 を提出する",
+        f"確認画面へ進む",
         type="primary",
         width="stretch",
     ):
-        # 入力内容を保存
-        backup = ShiftBackup()
-        off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
-        flexible_days = [d for d, m in prefs.items() if m == "△"]
-        # 有給日数とコメントを備考の構造化データに含める
-        natural_language_notes = {selected: free_text}
-        # 拡張データ（有給など）も保存
-        save_path = backup.save_preferences(
-            year=target_year, month=target_month,
-            off_requests=off_requests,
-            work_requests=[],
-            flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
-            natural_language_notes=natural_language_notes,
-            author=selected,
-        )
-        # 有給日数を別ファイルとして追記保存（既存のJSONを編集して有給フィールド追加）
-        try:
-            import json
-            with open(save_path, encoding="utf-8") as f:
-                _data = json.load(f)
-            _data["paid_leave_days"] = int(paid_leave_days)
-            _data["monthly_target_workdays"] = monthly_target
-            _data["base_holidays"] = base_holidays
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
-
-        # GitHub にも自動バックアップ（設定されていれば）
-        try:
-            from prototype.github_backup import push_preference_to_github
-            push_preference_to_github(
-                save_path, employee_name=selected,
-                year=target_year, month=target_month,
-            )
-        except Exception:
-            pass
-
-        # 集計サマリー
-        x_count = sum(1 for m in prefs.values() if m == "×")
-        triangle_count = sum(1 for m in prefs.values() if m == "△")
-        ok_count = sum(1 for m in prefs.values() if m == "○")
-        leave_msg = f" / 🏖 希望有給 {paid_leave_days}日" if paid_leave_days > 0 else ""
-        st.success(
-            f"✅ **{selected}さんの {target_year}年{target_month}月分** の希望を受け付けました！\n\n"
-            f"📊 入力内容: ○ 出勤可能 {ok_count}日 / × 休み希望 {x_count}日 / △ できれば休み {triangle_count}日{leave_msg}"
-        )
-        st.balloons()
+        st.session_state[review_key] = True
+        st.rerun()
 
 
 # ============================================================
@@ -2445,13 +5975,90 @@ elif mode == "⚙️ 設定":
     with setting_tab_leave:
         st.markdown("### 🏖 有給使用状況（経営者のみ閲覧可能）")
         st.caption(
-            "従業員から提出された希望有給日数の集計です。"
-            "提出データの `paid_leave_days` フィールドから自動集計しています。"
+            "本人が提出した希望有給と、管理者が後から付けた有給調整を合算して確認できます。"
         )
+
+        with st.container(border=True):
+            st.markdown("#### 管理者側で有給調整を追加")
+            st.caption(
+                "出勤希望だったパート・アルバイトを調整上休みにした場合などに使います。"
+                "本人の提出内容は上書きせず、管理者調整として別に記録します。"
+            )
+            adj_col1, adj_col2, adj_col3, adj_col4 = st.columns([1, 1, 1.4, 1])
+            with adj_col1:
+                adj_year = st.number_input(
+                    "年",
+                    min_value=2020,
+                    max_value=2100,
+                    value=int(st.session_state.get("target_year", date.today().year)),
+                    step=1,
+                    key="admin_leave_year",
+                )
+            with adj_col2:
+                adj_month = st.number_input(
+                    "月",
+                    min_value=1,
+                    max_value=12,
+                    value=int(st.session_state.get("target_month", date.today().month)),
+                    step=1,
+                    key="admin_leave_month",
+                )
+            part_time_names = [
+                e.name for e in get_all_employees_including_retired()
+                if e.employment_status == EmploymentStatus.PART_TIME
+            ]
+            employee_options = part_time_names + [
+                e.name for e in get_all_employees_including_retired()
+                if e.name not in part_time_names
+                and e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
+            ]
+            with adj_col3:
+                adj_employee = st.selectbox(
+                    "従業員",
+                    options=employee_options,
+                    key="admin_leave_employee",
+                )
+            with adj_col4:
+                adj_days = st.number_input(
+                    "有給日数",
+                    min_value=1,
+                    max_value=31,
+                    value=1,
+                    step=1,
+                    key="admin_leave_days",
+                )
+            adj_col5, adj_col6 = st.columns([1, 2])
+            with adj_col5:
+                adj_dates_text = st.text_input(
+                    "対象日（任意）",
+                    placeholder="例: 26",
+                    key="admin_leave_dates",
+                )
+            with adj_col6:
+                adj_reason = st.text_input(
+                    "理由",
+                    placeholder="例: 出勤希望だったが調整上休み。有給消化で合意",
+                    key="admin_leave_reason",
+                )
+            if st.button("管理者有給調整を追加", type="primary", key="admin_leave_add"):
+                days_in_selected_month = monthrange(int(adj_year), int(adj_month))[1]
+                dates = parse_day_list_text(adj_dates_text, days_in_selected_month)
+                add_admin_paid_leave_adjustment(
+                    int(adj_year),
+                    int(adj_month),
+                    str(adj_employee),
+                    int(adj_days),
+                    dates=dates,
+                    reason=adj_reason or "管理者による有給調整",
+                    actor="管理者",
+                )
+                st.success("管理者有給調整を追加しました。")
+                st.rerun()
 
         import json as _json
         from collections import defaultdict
         backup_dir = BACKUP_DIR
+        admin_leave_data = load_admin_paid_leave_data()
 
         # 月別・従業員別の有給集計
         # data[ym][employee] = {paid_leave_days, submitted_at, base_holidays, ...}
@@ -2473,14 +6080,49 @@ elif mode == "⚙️ 設定":
                         # 最新のもののみ採用
                         if (author not in leave_data[ym]
                                 or saved_at > leave_data[ym][author].get("saved_at", "")):
+                            submitted_paid_leave_days = int(d.get("paid_leave_days", 0))
                             leave_data[ym][author] = {
-                                "paid_leave_days": int(d.get("paid_leave_days", 0)),
+                                "submitted_paid_leave_days": submitted_paid_leave_days,
+                                "admin_paid_leave_days": 0,
+                                "admin_paid_leave_dates": [],
+                                "admin_paid_leave_reasons": [],
+                                "paid_leave_days": submitted_paid_leave_days,
                                 "monthly_target_workdays": d.get("monthly_target_workdays"),
                                 "base_holidays": d.get("base_holidays"),
                                 "saved_at": saved_at,
                             }
                     except Exception:
                         continue
+
+        for adj in admin_leave_data.get("adjustments", []):
+            try:
+                adj_year = int(adj.get("year"))
+                adj_month = int(adj.get("month"))
+                emp = str(adj.get("employee", "")).strip()
+                days = int(adj.get("days", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if not emp or days <= 0:
+                continue
+            ym = f"{adj_year:04d}-{adj_month:02d}"
+            info = leave_data[ym].setdefault(emp, {
+                "submitted_paid_leave_days": 0,
+                "admin_paid_leave_days": 0,
+                "admin_paid_leave_dates": [],
+                "admin_paid_leave_reasons": [],
+                "paid_leave_days": 0,
+                "monthly_target_workdays": None,
+                "base_holidays": None,
+                "saved_at": "",
+            })
+            info["admin_paid_leave_days"] = int(info.get("admin_paid_leave_days", 0) or 0) + days
+            info["paid_leave_days"] = (
+                int(info.get("submitted_paid_leave_days", 0) or 0)
+                + int(info.get("admin_paid_leave_days", 0) or 0)
+            )
+            info.setdefault("admin_paid_leave_dates", []).extend(adj.get("dates", []) or [])
+            if adj.get("reason"):
+                info.setdefault("admin_paid_leave_reasons", []).append(str(adj.get("reason")))
 
         if not leave_data:
             st.info("まだ提出データがありません。従業員が希望を提出すると集計が表示されます。")
@@ -2520,7 +6162,10 @@ elif mode == "⚙️ 設定":
                 for emp, info in sorted(month_data.items()):
                     table_data.append({
                         "氏名": emp,
-                        "希望有給日数": info["paid_leave_days"],
+                        "本人希望": info.get("submitted_paid_leave_days", 0),
+                        "管理者調整": info.get("admin_paid_leave_days", 0),
+                        "有給合計": info["paid_leave_days"],
+                        "調整日": format_day_list(info.get("admin_paid_leave_dates", [])),
                         "基準勤務日数": info.get("monthly_target_workdays") or "-",
                         "基準休日数": info.get("base_holidays") or "-",
                         "希望休日合計": (
@@ -2539,10 +6184,16 @@ elif mode == "⚙️ 設定":
                 if applicants:
                     st.markdown("**🏖 有給申請者の詳細**")
                     for emp, info in applicants:
+                        admin_note = ""
+                        if info.get("admin_paid_leave_days", 0):
+                            date_label = format_day_list(info.get("admin_paid_leave_dates", []))
+                            admin_note = f" / 管理者調整 {info['admin_paid_leave_days']}日"
+                            if date_label:
+                                admin_note += f"（{date_label}）"
                         st.markdown(
                             f'<div style="background:#fef3c7; padding:8px 12px; '
                             f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
-                            f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日 '
+                            f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日{admin_note} '
                             f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
                             f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
                             f'</div>',
@@ -2590,9 +6241,15 @@ elif mode == "⚙️ 設定":
             st.markdown("---")
             st.markdown("#### 📋 全従業員のマジックリンク一覧")
 
-            # 在籍中の従業員のみ
+            # 在籍中の従業員 + 山本さん（補助・特別枠）
             active_emps = _link_active_emps()
             display_emps = [e for e in active_emps if not e.is_auxiliary]
+            try:
+                yamamoto_emp = get_employee("山本")
+                if yamamoto_emp.name not in {e.name for e in display_emps}:
+                    display_emps.append(yamamoto_emp)
+            except Exception:
+                pass
 
             # 一覧テーブル
             link_data = []
@@ -2673,10 +6330,10 @@ elif mode == "⚙️ 設定":
             "eco_required": "東口・西口の必須エコ要員",
             "consec_work": "最大連勤チェック",
             "holiday_days": "月内最低休日数",
-            "consec_off_3": "3連休禁止",
+            "consec_off_3": "3連休の確認",
             "two_off_per_month": "月内 2連休回数（最低1回・最大2回）",
             "off_request": "休み希望厳守",
-            "work_request": "出勤希望厳守",
+            "work_request": "出勤希望・希望店舗の考慮",
             "omiya_anchor": "大宮アンカー（春山 or 下地必須）",
             "higashi_monday": "東口の月曜休店",
             "omiya_short_warning": "大宮人数少（エコ1名運営）の警告表示",
@@ -2713,12 +6370,6 @@ elif mode == "⚙️ 設定":
                 "help": "推奨: 1〜4回",
                 "safe": (1, 4),
             },
-            "higashi_eco2_max_per_month": {
-                "label": "東口エコ2配置 月内最大回数",
-                "min": 0, "max": 10, "default": 3,
-                "help": "推奨: 0〜5回",
-                "safe": (0, 5),
-            },
             "solver_seed": {
                 "label": "ソルバーシード",
                 "min": 0, "max": 999999, "default": 42,
@@ -2727,7 +6378,7 @@ elif mode == "⚙️ 設定":
             },
             "solver_time_limit_seconds": {
                 "label": "ソルバー最大実行時間（秒）",
-                "min": 10, "max": 600, "default": 120,
+                "min": 10, "max": 600, "default": 180,
                 "help": "シフト生成に使う最大秒数です。",
                 "safe": None,
             },
@@ -2742,6 +6393,13 @@ elif mode == "⚙️ 設定":
                 severity=rule.severity,
                 created_at=rule.created_at,
                 created_by=rule.created_by,
+                target_year=rule.target_year,
+                target_month=rule.target_month,
+                rule_type=rule.rule_type,
+                employee=rule.employee,
+                stores=list(rule.stores),
+                count=rule.count,
+                comparison=getattr(rule, "comparison", "min"),
             )
 
         def _sync_rule_widgets(source_cfg: RuleConfig) -> None:
@@ -2780,22 +6438,343 @@ elif mode == "⚙️ 設定":
         else:
             st.info("現在の本設定: デフォルト設定")
 
+        st.markdown("#### ルール台帳 v1.0")
+        st.caption(
+            "現時点でこのフォルダ上にある固定ルールを、"
+            "絶対条件・強い目標・弱い目標・月別例外に分類して保存しています。"
+        )
+
+        def _rule_row(
+            category: str,
+            name: str,
+            detail: str,
+            generation: str,
+            validation: str,
+            display: str,
+            editable: str,
+            status: str,
+            note: str = "",
+        ) -> dict:
+            return {
+                "分類": category,
+                "ルール": name,
+                "内容": detail,
+                "生成": generation,
+                "検証": validation,
+                "画面/出力": display,
+                "編集": editable,
+                "状態": status,
+                "メモ": note,
+            }
+
+        rule_inventory = [
+            _rule_row(
+                "店舗・人数", "赤羽駅前店の基本体制",
+                "基本はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。チケット対応不足時は山本さん補助。",
+                "反映中", "反映中", "人員少表示・Excel/PDFに反映",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "店舗・人数", "赤羽東口店の1名体制",
+                "月曜定休。エコ1名のみ。例外なし。土井さんメイン、休みの日は他エコが代替。",
+                "反映中", "反映中", "2名以上はエラー表示",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "店舗・人数", "大宮駅前店の基本体制",
+                "通常はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。不足時だけ2名体制を警告扱い。",
+                "反映中", "反映中", "人員少表示・Excel/PDFに反映",
+                "コード固定", "反映中",
+                "春山さん・下地さんのどちらか必須。",
+            ),
+            _rule_row(
+                "店舗・人数", "大宮西口店の1名体制",
+                "原則エコ1名のみ。楯さんメイン。人数余り・研修・チケット補助で追加配置の余地あり。",
+                "反映中", "反映中", "人数不足表示に反映",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "店舗・人数", "大宮すずらん通り店の基本体制",
+                "エコ対応1名以上+合計3名。エコ担当はチケット対応も可。チケット専任は多すぎないよう調整。",
+                "反映中", "反映中", "人数不足表示に反映",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "店舗・営業日", "営業モード",
+                "通常・省人員・最小営業・営業停止を月日から自動判定。",
+                "反映中", "反映中", "シフト表・検証に反映",
+                "コード固定", "反映中",
+                "祝日連携は簡易判定のため、将来拡張候補。",
+            ),
+            _rule_row(
+                "連勤・休日", "最大連勤",
+                f"現在の本設定: 最大{cfg.parameters.get('max_consec_work', 5)}連勤。",
+                "反映中", "反映中", "検証結果に表示",
+                "この画面で変更可", "反映中",
+            ),
+            _rule_row(
+                "連勤・休日", "推奨連勤上限",
+                f"現在の本設定: {cfg.parameters.get('soft_consec_threshold', 4)}連勤超を避けたい設定。",
+                "未接続", "未接続", "設定保存のみ",
+                "この画面で変更可", "未接続",
+                "生成側は現在コード内の基準値を使っています。",
+            ),
+            _rule_row(
+                "連勤・休日", "前月末から月初の連勤",
+                "前月末の連勤日数を当月月初に引き継いで判定。",
+                "一部反映", "一部反映", "検証結果に表示",
+                "データ連携待ち", "一部反映",
+                "2026年5月サンプルでは反映。本番提出データでは前月データ取得が未整備。",
+            ),
+            _rule_row(
+                "連勤・休日", "既定の月内最低休日数",
+                f"現在の本設定: {cfg.parameters.get('default_holiday_days', 8)}日。",
+                "反映中", "反映中", "検証結果に表示",
+                "この画面で変更可", "反映中",
+                "個別指定がないスタッフの最低休日数として使います。",
+            ),
+            _rule_row(
+                "連勤・休日", "2連休の最低・最大回数",
+                f"現在の本設定: 最低{cfg.parameters.get('min_2off_per_month', 1)}回 / 最大{cfg.parameters.get('max_2off_per_month', 2)}回。",
+                "コード固定", "コード固定", "警告として表示",
+                "この画面で変更可", "未接続",
+                "原則ルール。例外的に0回・2回以上もあり得るため警告扱いです。",
+            ),
+            _rule_row(
+                "連勤・休日", "3連休の確認",
+                "原則避けるが、人員過多や本人希望がある場合は許容。",
+                "ソフト反映", "参考情報", "提出一覧・入力サマリに表示",
+                "コード固定", "一部反映",
+            ),
+            _rule_row(
+                "希望・提出", "休み希望厳守",
+                "提出された×は例外なく勤務にしない。出勤希望と重なった場合も×を優先。",
+                "反映中", "反映中", "検証結果に表示",
+                "提出データ依存", "反映中",
+            ),
+            _rule_row(
+                "希望・提出", "出勤希望・希望店舗の考慮",
+                "出勤希望はできる限り出勤にし、出勤になった場合は希望店舗を優先する。調整で休み・別店舗になる場合あり。",
+                "ソフト反映", "警告表示", "検証結果に表示",
+                "提出データ依存", "反映中",
+            ),
+            _rule_row(
+                "希望・提出", "柔軟休み希望",
+                "候補日のうち指定日数を休みにする。",
+                "反映中", "未接続", "提出内容に反映",
+                "提出データ依存", "一部反映",
+            ),
+            _rule_row(
+                "スタッフ別", "配置不可店舗",
+                "従業員マスタの不可店舗には配置しない。",
+                "反映中", "未接続", "従業員マスタで管理",
+                "従業員マスタ", "一部反映",
+                "生成では効きますが、手動・AI変更後の検証は今後強化余地あり。",
+            ),
+            _rule_row(
+                "スタッフ別", "赤羽東口店の代替要員",
+                "土井さんメイン。休みの日は楯さん・春山さん・長尾さん・今津さんのいずれか。",
+                "反映中", "警告表示", "検証結果に表示",
+                "コード固定", "反映中",
+                "牧野さんの東口1名体制は当面対象外です。",
+            ),
+            _rule_row(
+                "スタッフ別", "固定店舗",
+                "店舗固定は土井さん（赤羽東口）・下地さん（大宮駅前）の2名のみ。",
+                "反映中", "一部反映", "従業員マスタで管理",
+                "従業員マスタ", "反映中",
+            ),
+            _rule_row(
+                "スタッフ別", "メイン店舗以外への月3日勤務",
+                "楯さん・春山さん・長尾さんは月3日、自分のメイン店舗以外で勤務する。",
+                "反映中", "反映中", "検証結果に表示",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "スタッフ別", "在勤要望（強・中・弱）",
+                "強・中・弱を生成時の重みとして使う。春山さんの西口代替・研修も弱として反映。",
+                "一部反映", "未接続", "従業員マスタで管理",
+                "従業員マスタ", "一部反映",
+                "割合の厳密チェックではなく、現状は配置の好みとして扱います。",
+            ),
+            _rule_row(
+                "スタッフ別", "南さんの出勤希望日のみ稼働",
+                "提出画面で `○` にした日だけを出勤候補として扱う。`×` と `△` の日は配置しない。",
+                "対象外", "一部反映", "従業員マスタで管理",
+                "従業員マスタ", "反映中",
+            ),
+            _rule_row(
+                "スタッフ別", "大塚さんの5月10日勤務",
+                "2026年5月のみ、月10日勤務に固定。最大連勤はチェック対象。",
+                "反映中", "一部反映", "検証結果に表示",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "スタッフ別", "山本さん補助ロジック",
+                "赤羽駅前店のチケット対応が不足する時だけ補助配置。その他は手動入力対象。",
+                "反映中", "反映中", "シフト表では空白/赤羽補助として表示",
+                "コード固定", "反映中",
+            ),
+            _rule_row(
+                "月次ルール", "月ごとの追加条件",
+                "研修・一時的な店舗移動・配置禁止など、その月だけの条件を追加する。",
+                "反映中", "反映中", "カスタムルールに保存",
+                "この画面で変更可", "反映中",
+                "最低回数・最大回数・ちょうど回数・配置禁止を入力できます。",
+            ),
+            _rule_row(
+                "スタッフ別", "すずらん不在時の補填",
+                "野澤さん不在時に岩野さんまたは大類さんで補填する考え方。",
+                "未接続", "未接続", "メモのみ",
+                "コード固定", "未接続",
+            ),
+            _rule_row(
+                "AI・手動変更", "AI対話のプレビュー変更",
+                "AIの変更はまずプレビュー表示し、本シフト反映はボタンで確定。",
+                "対象外", "一部反映", "AI対話画面に表示",
+                "画面操作", "反映中",
+            ),
+            _rule_row(
+                "AI・手動変更", "AI対話中の検証",
+                "プレビュー状態のシフトを検証してエラー・警告を表示。",
+                "対象外", "一部反映", "AI対話画面に表示",
+                "コード固定", "一部反映",
+                "希望休・前月連勤などは、生成時の入力がある場合だけ反映。",
+            ),
+            _rule_row(
+                "設定画面", "検証チェック ON/OFF",
+                "店舗人数・連勤・休日などのON/OFFを設定ファイルに保存。",
+                "未接続", "未接続", "設定画面に表示",
+                "この画面で変更可", "未接続",
+                "細分化して実処理へ接続していく候補です。",
+            ),
+            _rule_row(
+                "設定画面", "カスタムルール",
+                "メモ保存に加えて、月別の指定店舗回数ルールは生成・検証に反映する。",
+                "一部反映", "一部反映", "ルール変更履歴に記録",
+                "この画面で変更可", "一部反映",
+            ),
+        ]
+        ledger = load_rule_ledger_v1()
+        rule_inventory = list(ledger.get("rules", []))
+        employee_suitability_rows = list(ledger.get("employee_store_suitability", []))
+        numeric_ledger_rows = list(ledger.get("numeric_parameters", []))
+        if not employee_suitability_rows:
+            employee_suitability_rows = build_employee_suitability_rows_from_master()
+        if not numeric_ledger_rows:
+            numeric_ledger_rows = build_numeric_ledger_rows_from_parameters(cfg.parameters)
+
+        category_counts = {}
+        for row in rule_inventory:
+            category_counts[row["分類"]] = category_counts.get(row["分類"], 0) + 1
+        stat_cols = st.columns(4)
+        stat_cols[0].metric("絶対条件", category_counts.get("絶対条件", 0))
+        stat_cols[1].metric("強い目標", category_counts.get("強い目標", 0))
+        stat_cols[2].metric("弱い目標", category_counts.get("弱い目標", 0))
+        stat_cols[3].metric("月別例外", category_counts.get("月別例外", 0))
+
+        category_order = ["絶対条件", "強い目標", "弱い目標", "月別例外"]
+        existing_categories = {row.get("分類", "") for row in rule_inventory}
+        categories = (
+            ["すべて"]
+            + [c for c in category_order if c in existing_categories]
+            + sorted(existing_categories - set(category_order) - {""})
+        )
+        filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([1.1, 2, 0.8, 0.8])
+        with filter_col1:
+            selected_rule_category = st.selectbox(
+                "分類で絞り込み",
+                categories,
+                key="rule_inventory_category",
+            )
+        with filter_col2:
+            rule_search_input = st.text_input(
+                "キーワード検索",
+                key="rule_inventory_search_input",
+                placeholder="例: 牧野、赤羽、連勤",
+            )
+        with filter_col3:
+            search_requested = st.button(
+                "検索する",
+                key="rule_inventory_search_button",
+                width="stretch",
+            )
+        with filter_col4:
+            clear_search_requested = st.button(
+                "クリア",
+                key="rule_inventory_clear_button",
+                width="stretch",
+            )
+
+        if search_requested:
+            st.session_state["rule_inventory_search_term"] = rule_search_input.strip()
+        if clear_search_requested:
+            st.session_state["rule_inventory_search_term"] = ""
+
+        rule_search_normalized = st.session_state.get("rule_inventory_search_term", "")
+        visible_rule_inventory = [
+            row for row in rule_inventory
+            if (selected_rule_category == "すべて" or row.get("分類") == selected_rule_category)
+            and (
+                not rule_search_normalized
+                or rule_search_normalized in json.dumps(row, ensure_ascii=False)
+            )
+        ]
+        if rule_search_normalized:
+            st.caption(f"検索中: {rule_search_normalized}")
+        st.caption(f"表示中: {len(visible_rule_inventory)}件 / 台帳全体: {len(rule_inventory)}件")
+        st.dataframe(
+            visible_rule_inventory,
+            width="stretch",
+            hide_index=True,
+            height=360,
+        )
+
+        with st.expander("分類の見方", expanded=False):
+            st.markdown(
+                """
+                - **絶対条件**: 破るとシフト生成できない、または検証ERRORになる条件です。
+                - **強い目標**: できる限り守る条件です。無理な月は警告や候補表示に回ります。
+                - **弱い目標**: 配置の好みや補助的な判断です。
+                - **月別例外**: その月だけ追加・調整する条件です。
+                """
+            )
+        with st.expander(
+            f"従業員別の店舗適性（{len(employee_suitability_rows)}件）",
+            expanded=True,
+        ):
+            if employee_suitability_rows:
+                st.dataframe(
+                    employee_suitability_rows,
+                    width="stretch",
+                    hide_index=True,
+                    height=360,
+                )
+            else:
+                st.warning("店舗適性を表示できません。従業員マスターと台帳ファイルを確認してください。")
+        with st.expander(
+            f"台帳に残した数値基準（{len(numeric_ledger_rows)}件）",
+            expanded=True,
+        ):
+            if numeric_ledger_rows:
+                st.dataframe(
+                    numeric_ledger_rows,
+                    width="stretch",
+                    hide_index=True,
+                )
+            else:
+                st.warning("数値基準を表示できません。ルール設定ファイルを確認してください。")
+        st.caption(
+            f"ルール台帳 v{ledger.get('version', '1.0')} は "
+            f"`config/rule_ledger_v1_0.json` にバックアップとして保存されています。"
+        )
+
+        st.markdown("---")
         draft_status_area = st.container()
 
-        # サブセクション: 検証チェックのON/OFF
-        st.markdown("#### ✅ 検証チェックの ON/OFF")
-        st.caption("「シフトとして問題視するルール」をチェック単位で有効化／無効化できます。")
-
-        new_enabled = {}
-        ck_col1, ck_col2 = st.columns(2)
-        keys = list(check_labels.keys())
-        for i, key in enumerate(keys):
-            with (ck_col1 if i < len(keys) // 2 + 1 else ck_col2):
-                new_enabled[key] = st.toggle(
-                    check_labels[key],
-                    value=st.session_state.get(f"chk_{key}", cfg.enabled_checks.get(key, True)),
-                    key=f"chk_{key}",
-                )
+        # 検証ON/OFFは実処理への接続が不完全だったため、画面からは外す。
+        # 既存configとの互換性のため、保存値自体はそのまま保持する。
+        new_enabled = dict(cfg.enabled_checks)
 
         # サブセクション: 数値パラメータ
         st.markdown("---")
@@ -2807,7 +6786,9 @@ elif mode == "⚙️ 設定":
         )
 
         param_col1, param_col2 = st.columns(2)
-        new_params = {}
+        new_params = dict(cfg.parameters)
+        for key, spec in param_specs.items():
+            new_params.setdefault(key, int(spec["default"]))
 
         def warn_if_unsafe(key: str, value: int) -> None:
             """値が推奨範囲外なら警告を表示"""
@@ -2826,35 +6807,26 @@ elif mode == "⚙️ 設定":
                     )
 
         with param_col1:
-            for key in ("max_consec_work", "soft_consec_threshold", "default_holiday_days"):
+            for key in ("max_consec_work", "soft_consec_threshold"):
                 spec = param_specs[key]
                 new_params[key] = int(st.number_input(
                     spec["label"],
                     min_value=spec["min"], max_value=spec["max"],
-                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
                     help=spec["help"],
                     key=f"param_{key}",
                 ))
                 warn_if_unsafe(key, new_params[key])
         with param_col2:
-            for key in ("min_2off_per_month", "max_2off_per_month", "higashi_eco2_max_per_month"):
+            for key in ("solver_time_limit_seconds", "solver_seed"):
                 spec = param_specs[key]
                 new_params[key] = int(st.number_input(
                     spec["label"],
                     min_value=spec["min"], max_value=spec["max"],
-                    value=int(st.session_state.get(f"param_{key}", cfg.parameters.get(key, spec["default"]))),
                     help=spec["help"],
                     key=f"param_{key}",
                 ))
                 warn_if_unsafe(key, new_params[key])
 
-        # 矛盾チェック: 2連休 最低 > 最大 はおかしい
-        if new_params["min_2off_per_month"] > new_params["max_2off_per_month"]:
-            st.error(
-                f"❌ 設定矛盾: 2連休 最低{new_params['min_2off_per_month']}回 > "
-                f"最大{new_params['max_2off_per_month']}回 になっています。"
-                "最低 ≤ 最大 になるよう調整してください。"
-            )
         # ソフト閾値 > ハード上限 はおかしい
         if new_params["soft_consec_threshold"] > new_params["max_consec_work"]:
             st.error(
@@ -2863,126 +6835,16 @@ elif mode == "⚙️ 設定":
                 "推奨 ≤ ハード になるよう調整してください。"
             )
 
-        st.markdown("##### ソルバー設定")
-        param_col3, param_col4 = st.columns(2)
-        with param_col3:
-            spec = param_specs["solver_seed"]
-            new_params["solver_seed"] = int(st.number_input(
-                spec["label"],
-                min_value=spec["min"], max_value=spec["max"],
-                value=int(st.session_state.get("param_solver_seed", cfg.parameters.get("solver_seed", spec["default"]))),
-                help=spec["help"],
-                key="param_solver_seed",
-            ))
-        with param_col4:
-            spec = param_specs["solver_time_limit_seconds"]
-            new_params["solver_time_limit_seconds"] = int(st.number_input(
-                spec["label"],
-                min_value=spec["min"], max_value=spec["max"],
-                value=int(st.session_state.get(
-                    "param_solver_time_limit_seconds",
-                    cfg.parameters.get("solver_time_limit_seconds", spec["default"]),
-                )),
-                help=spec["help"],
-                key="param_solver_time_limit_seconds",
-            ))
-
-        # サブセクション: カスタムルール
+        # 月ごとの特別ルールは、実際に対象月を見ながら判断できる
+        # シフト生成画面側へ一本化する。
         st.markdown("---")
-        st.markdown("#### ➕ カスタムルール")
+        st.markdown("#### 📌 月ごとの特別ルール")
         st.info(
-            "💡 **このセクションは安全です**：カスタムルールは現在「メモ」として記録されるだけで、"
-            "シフト生成・検証ロジックには影響しません。**追加・変更・削除でバグや停止は起こりません。**"
-            "将来的に検証ロジックに連動させたい場合は、技術者にご相談ください。"
+            "月ごとの研修・例外配置などは、各月のシフト生成画面にある"
+            "「今月だけの特別ルール」で追加します。"
+            "この画面では全体ルールと数値設定だけを扱います。"
         )
-
-        added_rule_objs = [
-            CustomRule(**r) for r in st.session_state.get("rule_added_custom_rules", [])
-        ]
-        deleted_ids = set(st.session_state.get("rule_deleted_ids", []))
-        added_ids = {r.id for r in added_rule_objs}
-        new_custom_rules = [
-            _clone_custom_rule(r) for r in cfg.custom_rules if r.id not in deleted_ids
-        ] + added_rule_objs
-
-        # 既存ルールの一覧と削除
-        if new_custom_rules:
-            st.markdown("**カスタムルール:**")
-            for idx, rule in enumerate(new_custom_rules):
-                rule_col1, rule_col2, rule_col3 = st.columns([5, 1, 1])
-                with rule_col1:
-                    badge = "仮追加" if rule.id in added_ids else "本設定"
-                    st.markdown(
-                        f'<div style="padding:8px; border-left:3px solid #6366f1; '
-                        f'background:#f5f3ff; border-radius:4px;">'
-                        f'<strong>{rule.name}</strong> '
-                        f'<span style="font-size:11px; color:#6b7280;">'
-                        f'({rule.severity} / {badge})</span><br>'
-                        f'<span style="font-size:13px;">{rule.description}</span><br>'
-                        f'<span style="font-size:11px; color:#9ca3af;">'
-                        f'追加: {rule.created_at[:10]} by {rule.created_by}</span>'
-                        f'</div>',
-                        unsafe_allow_html=True,
-                    )
-                with rule_col2:
-                    new_custom_rules[idx].enabled = st.toggle(
-                        "有効",
-                        value=st.session_state.get(f"rule_en_{rule.id}", rule.enabled),
-                        key=f"rule_en_{rule.id}",
-                    )
-                with rule_col3:
-                    if st.button("🗑", key=f"del_{rule.id}"):
-                        if rule.id in added_ids:
-                            st.session_state["rule_added_custom_rules"] = [
-                                r for r in st.session_state.get("rule_added_custom_rules", [])
-                                if r.get("id") != rule.id
-                            ]
-                        else:
-                            next_deleted = set(st.session_state.get("rule_deleted_ids", []))
-                            next_deleted.add(rule.id)
-                            st.session_state["rule_deleted_ids"] = list(next_deleted)
-                        st.session_state["rule_apply_confirm"] = False
-                        st.rerun()
-
-        # 新規ルールの追加フォーム
-        with st.expander("➕ 新しいカスタムルールを追加", expanded=False):
-            with st.form("add_rule_form", clear_on_submit=True):
-                rule_name = st.text_input("ルール名", placeholder="例: 楯さんは日曜休み優先")
-                rule_desc = st.text_area(
-                    "詳細",
-                    placeholder="例: 楯さんは家族の事情で日曜休み優先で組む",
-                    height=80,
-                )
-                rule_severity = st.selectbox(
-                    "重要度",
-                    options=["WARNING", "ERROR"],
-                    help="ERROR: 必ず守る／WARNING: できれば守る",
-                )
-                rule_actor = st.text_input("追加者", value="代表取締役")
-                if st.form_submit_button("追加", type="primary"):
-                    if rule_name and rule_desc:
-                        new_rule = CustomRule(
-                            id=f"custom_{datetime.now().strftime('%Y%m%d%H%M%S')}",
-                            name=rule_name, description=rule_desc,
-                            severity=rule_severity, enabled=True,
-                            created_at=datetime.now().isoformat(),
-                            created_by=rule_actor,
-                        )
-                        st.session_state["rule_added_custom_rules"] = (
-                            st.session_state.get("rule_added_custom_rules", [])
-                            + [{
-                                "id": new_rule.id,
-                                "name": new_rule.name,
-                                "description": new_rule.description,
-                                "enabled": new_rule.enabled,
-                                "severity": new_rule.severity,
-                                "created_at": new_rule.created_at,
-                                "created_by": new_rule.created_by,
-                            }]
-                        )
-                        st.session_state["rule_apply_confirm"] = False
-                        st.success(f"ルール「{rule_name}」を仮追加しました。本設定にするには下の反映操作が必要です。")
-                        st.rerun()
+        new_custom_rules = [_clone_custom_rule(r) for r in cfg.custom_rules]
 
         # 保存・リセットボタン
         st.markdown("---")
@@ -3000,8 +6862,7 @@ elif mode == "⚙️ 設定":
             cfg, draft_cfg, actor=save_actor, note=save_note,
         )
         has_setting_error = (
-            new_params["min_2off_per_month"] > new_params["max_2off_per_month"]
-            or new_params["soft_consec_threshold"] > new_params["max_consec_work"]
+            new_params["soft_consec_threshold"] > new_params["max_consec_work"]
         )
 
         def _change_text(change) -> str:
@@ -3040,6 +6901,12 @@ elif mode == "⚙️ 設定":
                         disabled=has_setting_error,
                     ):
                         changes = rule_mgr.save(draft_cfg, actor=save_actor, note=save_note)
+                        if changes:
+                            try:
+                                from prototype.github_backup import push_config_to_github
+                                push_config_to_github("rule_config", draft_cfg.to_dict())
+                            except Exception:
+                                pass
                         st.session_state["rule_apply_confirm"] = False
                         st.session_state["rule_added_custom_rules"] = []
                         st.session_state["rule_deleted_ids"] = []
@@ -3252,12 +7119,13 @@ elif mode == "⚙️ 設定":
                             help="退職を選ぶと自動的に退職日が記録されます",
                         )
                     with f_col2:
-                        store_options = ["（なし）"] + [s.name for s in Store if s != Store.OFF]
-                        current_home = target.home_store.name if target.home_store else "（なし）"
+                        store_options = [NO_HOME_STORE_LABEL] + [s.name for s in Store if s != Store.OFF]
+                        current_home = target.home_store.name if target.home_store else NO_HOME_STORE_LABEL
                         new_home_store = st.selectbox(
                             "ホーム店舗",
                             options=store_options,
                             index=store_options.index(current_home) if current_home in store_options else 0,
+                            format_func=store_select_label,
                         )
                         new_target_days = st.number_input(
                             "年間目標出勤日数（パートは0でOK）",
@@ -3283,7 +7151,7 @@ elif mode == "⚙️ 設定":
                             "skill": new_skill,
                             "employment_status": new_status,
                             "home_store": (
-                                None if new_home_store == "（なし）"
+                                None if new_home_store == NO_HOME_STORE_LABEL
                                 else new_home_store
                             ),
                             "annual_target_days": new_target_days if new_target_days > 0 else None,
@@ -3381,10 +7249,11 @@ elif mode == "⚙️ 設定":
                             EmploymentStatus.PART_TIME.value,
                         ],
                     )
-                    home_store_options = ["（なし）"] + [s.name for s in Store if s != Store.OFF]
+                    home_store_options = [NO_HOME_STORE_LABEL] + [s.name for s in Store if s != Store.OFF]
                     new_emp_home = st.selectbox(
                         "ホーム店舗（固定配置の場合のみ）",
                         options=home_store_options,
+                        format_func=store_select_label,
                     )
                     new_hired_date = st.date_input(
                         "入社日", value=date.today(),
@@ -3415,11 +7284,11 @@ elif mode == "⚙️ 設定":
                             role=Role(new_emp_role),
                             skill=Skill(new_emp_skill),
                             home_store=(
-                                None if new_emp_home == "（なし）"
+                                None if new_emp_home == NO_HOME_STORE_LABEL
                                 else Store[new_emp_home]
                             ),
                             station_type=(
-                                StationType.FIXED if new_emp_home != "（なし）"
+                                StationType.FIXED if new_emp_home != NO_HOME_STORE_LABEL
                                 else StationType.FLEXIBLE
                             ),
                             employment_status=EmploymentStatus(new_emp_status),
