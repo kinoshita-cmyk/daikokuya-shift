@@ -144,12 +144,22 @@ def build_employee_suitability_rows_from_master() -> list[dict]:
         for store in store_order:
             bucket = affinity_bucket.get(affinities.get(store, Affinity.NONE), "不可")
             grouped[bucket].append(store.display_name)
+        home_store = getattr(emp, "home_store", None)
+        fixed_to_home = (
+            home_store is not None
+            and all(
+                store == home_store or affinities.get(store, Affinity.NONE) == Affinity.NONE
+                for store in store_order
+            )
+        )
         rows.append({
             "氏名": getattr(emp, "name", ""),
-            "主担当・強": "、".join(grouped["強"]) or "-",
-            "通常対応・中": "、".join(grouped["中"]) or "-",
-            "応援・巡回・弱": "、".join(grouped["弱"]) or "-",
-            "原則不可": "、".join(grouped["不可"]) or "-",
+            "絶対担当": home_store.display_name if fixed_to_home else "-",
+            "主担当": "-" if fixed_to_home else ("、".join(grouped["強"]) or "-"),
+            "通常対応可": "、".join(grouped["中"]) or "-",
+            "応援・巡回可": "、".join(grouped["弱"]) or "-",
+            "絶対配置不可": "、".join(grouped["不可"]) or "-",
+            "月内の最低巡回条件": "-",
             "備考": getattr(emp, "notes", "") or "",
         })
     return rows
@@ -203,8 +213,8 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
         {
             "分類": "絶対条件",
             "項目": "1日全体人数上限",
-            "現在値": "通常許容13名 / 例外14名 / 15名以上不可",
-            "備考": "通常は11名体制。14名は特殊日扱い。",
+            "現在値": "最大15名",
+            "備考": "通常は11名体制。増員優先順位は西口、すずらん、大宮、赤羽。",
         },
         {
             "分類": "運用設定",
