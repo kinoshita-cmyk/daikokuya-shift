@@ -424,6 +424,12 @@ st.markdown("""
     .shift-cell-nishi { background: #fce7f3; }
     .shift-cell-suzuran { background: #e0e7ff; }
     .shift-cell-off { background: #f3f4f6; color: #6b7280; }
+    .ag-header-cell-text {
+        white-space: pre !important;
+        word-break: keep-all !important;
+        overflow-wrap: normal !important;
+        line-height: 1.15 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -799,7 +805,7 @@ def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) ->
             return (
                 f'<span style="display:block; font-weight:800;">{escape(name)}</span>'
                 f'<span style="display:block; font-size:11px; line-height:1.1; '
-                f'color:#dbeafe;">{escape(count_text)}</span>'
+                f'color:#dbeafe; white-space:nowrap;">{escape(count_text)}</span>'
             )
         return escape(name)
     return f"{name}\n{count_text}" if count_text else name
@@ -1240,7 +1246,11 @@ def render_colored_shift_editor(
                 backgroundColor: '#1e3a8a',
                 color: '#ffffff',
                 fontWeight: '800',
-                textAlign: 'center'
+                textAlign: 'center',
+                whiteSpace: 'pre',
+                wordBreak: 'keep-all',
+                overflowWrap: 'normal',
+                lineHeight: '1.15'
             };
         }
         """
