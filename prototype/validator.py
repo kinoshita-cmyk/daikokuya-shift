@@ -33,6 +33,7 @@ from .rules import (
     get_monthly_work_target,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
+    WORK_TARGET_WARNING_DIFF_DAYS,
 )
 
 
@@ -223,7 +224,17 @@ def validate(
     # 17. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 18. 統計情報の集計
+    # 18. 月間勤務日数バランスチェック
+    _check_monthly_workday_balance(
+        shift,
+        result,
+        days_in_month,
+        off_requests,
+        holiday_overrides,
+        exact_holiday_days,
+    )
+
+    # 19. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -442,11 +453,21 @@ def _check_store_capacity(
             # すずらん: エコ対応者1名以上 + 合計3名以上。
             # エコ担当はチケット対応もできるため、チケット専任2名に固定しない。
             if store == Store.SUZURAN and mode == OperationMode.NORMAL:
-                if eco_count >= 1 and total >= 3 and ticket_count <= 2:
+                if eco_count >= 1 and total >= 3:
+                    if ticket_count > 2:
+                        result.issues.append(Issue(
+                            severity="WARNING",
+                            category="店舗人数多め",
+                            day=day, employee=None,
+                            message=(
+                                f"大宮すずらん通り店 チケット要員が多めです"
+                                f"（原則2名、実績{ticket_count}名）／配属: {worker_str}"
+                            ),
+                        ))
                     continue  # OK
                 if ticket_count > 2:
                     result.issues.append(Issue(
-                        severity="ERROR",
+                        severity="WARNING",
                         category="店舗人数",
                         day=day, employee=None,
                         message=(
@@ -1219,13 +1240,73 @@ def _check_monthly_store_count_rules(
         ))
 
 
+def _check_monthly_workday_balance(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    off_requests: dict[str, list[int]],
+    holiday_overrides: dict[str, int],
+    exact_holiday_days: dict[str, int],
+) -> None:
+    """月間基準勤務日数から大きく外れていないか確認する。"""
+    warning_diff = int(WORK_TARGET_WARNING_DIFF_DAYS)
+    for emp in ALL_EMPLOYEES:
+        if emp.is_auxiliary or emp.annual_target_days is None:
+            continue
+        base_target = get_monthly_work_target(
+            emp.name,
+            shift.month,
+            emp.annual_target_days,
+        )
+        if base_target is None:
+            continue
+        if emp.name in exact_holiday_days:
+            target = max(0, days - int(exact_holiday_days[emp.name]))
+        elif emp.name in holiday_overrides:
+            target = max(0, days - int(holiday_overrides[emp.name]))
+        else:
+            requested_off_count = len(set(off_requests.get(emp.name, [])))
+            target = min(int(base_target), max(0, days - requested_off_count))
+
+        actual = sum(
+            1
+            for day in range(1, days + 1)
+            if (
+                (assignment := shift.get_assignment(emp.name, day)) is not None
+                and assignment.store != Store.OFF
+            )
+        )
+        diff = actual - target
+        if diff <= -warning_diff:
+            result.issues.append(Issue(
+                severity="WARNING",
+                category="月間勤務日数不足",
+                day=None,
+                employee=emp.name,
+                message=(
+                    f"出勤{actual}日 / 基準{target}日（{abs(diff)}日不足）。"
+                    "月別例外がなければ、出勤日数を増やしてください。"
+                ),
+            ))
+        elif diff >= warning_diff:
+            result.issues.append(Issue(
+                severity="WARNING",
+                category="月間勤務日数超過",
+                day=None,
+                employee=emp.name,
+                message=(
+                    f"出勤{actual}日 / 基準{target}日（{diff}日超過）。"
+                    "人数が余る月でなければ、休みに寄せてください。"
+                ),
+            ))
+
+
 def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> None:
     """
     統計情報の集計（経営側可視化用）
 
-    重要: 月間目標出勤日数の未達は「情報提供のみ」で、エラーや警告にはしない。
-    会社方針として、月単位での過不足は他の月で調整しない運用のため。
-    ただし経営判断材料として「目標 vs 実績」の数字は明示する。
+    月間目標出勤日数の大幅なズレは別チェックでWARNINGにし、
+    ここでは経営判断材料として「目標 vs 実績」の数字を明示する。
     """
     def get_monthly_target(emp) -> Optional[int]:
         return get_monthly_work_target(

@@ -41,6 +41,7 @@ from .rules import (
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
+    WORK_TARGET_IDEAL_TOLERANCE_DAYS, WORK_TARGET_WARNING_DIFF_DAYS,
 )
 
 
@@ -137,6 +138,9 @@ def _monthly_rule_allows_employee_store(
 # 警告ゼロでも使いにくいシフトになるため、店舗嗜好より強く寄せる。
 TARGET_SHORTFALL_PENALTY = 1400
 TARGET_OVERAGE_PENALTY = 120
+TARGET_SHORTFALL_BEYOND_IDEAL_PENALTY = 3200
+TARGET_LARGE_SHORTFALL_PENALTY = 8000
+TARGET_OVERAGE_BEYOND_IDEAL_PENALTY = 1000
 
 # 月次ルールは「その月だけの運用指示」なので、通常の在勤嗜好より強く扱う。
 MONTHLY_RULE_REWARD = 1800
@@ -604,7 +608,6 @@ def generate_shift(
             # エコ担当はチケット対応も可能なため、チケット専任2名には固定しない。
             if s == Store.SUZURAN and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)
-                model.Add(ticket_at_store <= 2)
                 model.Add(total_at_store >= 3)
                 continue
 
@@ -974,6 +977,9 @@ def generate_shift(
     # 目標出勤日数への近づき度（不足分を強くペナルティ）
     target_penalty_terms = []
     target_overage_terms = []
+    target_shortfall_beyond_ideal_terms = []
+    target_large_shortfall_terms = []
+    target_overage_beyond_ideal_terms = []
     only_on_request_shortfall_terms = []
     for e in main_employees:
         if e.annual_target_days is None:
@@ -1005,17 +1011,68 @@ def generate_shift(
         model.Add(shortfall >= target_monthly - actual)
         model.Add(shortfall >= 0)
         target_penalty_terms.append(shortfall)
+        shortfall_beyond_ideal = model.NewIntVar(
+            0,
+            days_in_month,
+            f"shortfall_beyond_ideal_{e.name}",
+        )
+        model.Add(
+            shortfall_beyond_ideal
+            >= target_monthly - int(WORK_TARGET_IDEAL_TOLERANCE_DAYS) - actual
+        )
+        model.Add(shortfall_beyond_ideal >= 0)
+        target_shortfall_beyond_ideal_terms.append(shortfall_beyond_ideal)
+        large_shortfall = model.NewIntVar(
+            0,
+            days_in_month,
+            f"large_shortfall_{e.name}",
+        )
+        model.Add(
+            large_shortfall
+            >= target_monthly - (int(WORK_TARGET_WARNING_DIFF_DAYS) - 1) - actual
+        )
+        model.Add(large_shortfall >= 0)
+        target_large_shortfall_terms.append(large_shortfall)
         overage = model.NewIntVar(0, days_in_month, f"overage_{e.name}")
         model.Add(overage >= actual - target_monthly)
         model.Add(overage >= 0)
         target_overage_terms.append(overage)
+        overage_beyond_ideal = model.NewIntVar(
+            0,
+            days_in_month,
+            f"overage_beyond_ideal_{e.name}",
+        )
+        model.Add(
+            overage_beyond_ideal
+            >= actual - target_monthly - int(WORK_TARGET_IDEAL_TOLERANCE_DAYS)
+        )
+        model.Add(overage_beyond_ideal >= 0)
+        target_overage_beyond_ideal_terms.append(overage_beyond_ideal)
 
     # 在勤要望スコアを最大化、目標未達/連勤超過ペナルティを最小化
     obj = sum(objective_terms)
     if target_penalty_terms:
         obj = obj - TARGET_SHORTFALL_PENALTY * sum(target_penalty_terms)
+    if target_shortfall_beyond_ideal_terms:
+        obj = (
+            obj
+            - TARGET_SHORTFALL_BEYOND_IDEAL_PENALTY
+            * sum(target_shortfall_beyond_ideal_terms)
+        )
+    if target_large_shortfall_terms:
+        obj = (
+            obj
+            - TARGET_LARGE_SHORTFALL_PENALTY
+            * sum(target_large_shortfall_terms)
+        )
     if target_overage_terms:
         obj = obj - TARGET_OVERAGE_PENALTY * sum(target_overage_terms)
+    if target_overage_beyond_ideal_terms:
+        obj = (
+            obj
+            - TARGET_OVERAGE_BEYOND_IDEAL_PENALTY
+            * sum(target_overage_beyond_ideal_terms)
+        )
     if only_on_request_shortfall_terms:
         obj = (
             obj
