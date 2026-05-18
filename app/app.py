@@ -1380,8 +1380,15 @@ def render_colored_shift_editor(
         "theme": "streamlit",
         "reload_data": True,
         "custom_css": {
+            ".ag-root": {
+                "height": "100% !important",
+            },
             ".ag-root-wrapper": {
+                "height": "100% !important",
                 "overflow": "hidden !important",
+            },
+            ".ag-body-viewport": {
+                "overflow-y": "auto !important",
             },
             ".ag-header": {
                 "position": "sticky !important",
