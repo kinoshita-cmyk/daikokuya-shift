@@ -1353,6 +1353,8 @@ def render_colored_shift_editor(
         },
         "stopEditingWhenCellsLoseFocus": True,
         "suppressRowClickSelection": True,
+        "alwaysShowVerticalScroll": True,
+        "suppressScrollOnNewData": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
         "headerHeight": 58,
@@ -1371,13 +1373,25 @@ def render_colored_shift_editor(
     aggrid_kwargs = {
         "gridOptions": grid_options,
         "key": grid_key,
-        "height": 650,
+        "height": 560,
         "width": "100%",
         "fit_columns_on_grid_load": False,
         "allow_unsafe_jscode": True,
         "theme": "streamlit",
         "reload_data": True,
         "custom_css": {
+            ".ag-root-wrapper": {
+                "overflow": "hidden !important",
+            },
+            ".ag-header": {
+                "position": "sticky !important",
+                "top": "0 !important",
+                "z-index": "20 !important",
+                "background": "#f8fafc !important",
+            },
+            ".ag-header-viewport": {
+                "background": "#f8fafc !important",
+            },
             ".shift-grid-header": {
                 "padding-left": "2px !important",
                 "padding-right": "2px !important",
