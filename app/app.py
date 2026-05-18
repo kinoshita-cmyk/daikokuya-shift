@@ -1247,8 +1247,10 @@ def render_colored_shift_editor(
     locked: bool = False,
     off_request_cells: Optional[set[tuple[str, int]]] = None,
     changed_cells: Optional[set[tuple[str, int]]] = None,
+    header_shift: Optional[MonthlyShift] = None,
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
+    header_shift = header_shift or shift
     off_request_keys = json.dumps(
         sorted(f"{employee}|{int(day)}" for employee, day in (off_request_cells or set())),
         ensure_ascii=False,
@@ -1347,7 +1349,7 @@ def render_colored_shift_editor(
     for name in EXPORT_COLUMN_ORDER:
         column_defs.append({
             "field": name,
-            "headerName": employee_header_label(shift, name),
+            "headerName": employee_header_label(header_shift, name),
             "editable": not locked,
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
@@ -4130,6 +4132,7 @@ if mode == "📊 経営者ビュー":
                 draft_rows = refresh_editor_short_staff_column(shift, draft_rows)
                 st.session_state[inline_draft_key] = draft_rows
                 draft_changed_cells = get_editor_changed_cells(shift, draft_rows)
+                draft_header_shift = editor_rows_to_shift(shift, draft_rows)
                 editor_df = pd.DataFrame(draft_rows, columns=editor_columns)
                 column_config = {
                     "日": st.column_config.NumberColumn("日", width="small"),
@@ -4165,6 +4168,7 @@ if mode == "📊 経営者ビュー":
                         locked=lock_info is not None,
                         off_request_cells=_table_off_cells,
                         changed_cells=draft_changed_cells,
+                        header_shift=draft_header_shift,
                     )
                     edited_value = grid_response.get("data", editor_df)
                 else:
@@ -4173,8 +4177,8 @@ if mode == "📊 経営者ビュー":
                         "GitHubに requirements.txt も反映すると、色付き編集に切り替わります。"
                     )
                     render_shift_table(
-                        shift,
-                        short_staff_by_store=detect_short_staff_by_store(shift),
+                        draft_header_shift,
+                        short_staff_by_store=detect_short_staff_by_store(draft_header_shift),
                         off_request_cells=_table_off_cells,
                         sticky=True,
                         selectable_cells=False,
