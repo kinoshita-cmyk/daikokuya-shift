@@ -6525,7 +6525,7 @@ elif mode == "⚙️ 設定":
             st.session_state.setdefault("rule_apply_confirm", False)
 
         cfg_signature = repr(cfg.to_dict())
-        rule_widget_state_version = 2
+        rule_widget_state_version = 3
         discard_requested = st.session_state.pop("rule_discard_requested", False)
         default_draft_requested = st.session_state.pop("rule_default_draft_requested", False)
         if default_draft_requested:
@@ -6544,10 +6544,30 @@ elif mode == "⚙️ 設定":
         else:
             _ensure_rule_widgets_initialized(cfg)
 
+        unsafe_numeric_keys = []
+        for key in ("max_consec_work", "soft_consec_threshold", "solver_time_limit_seconds"):
+            spec = param_specs[key]
+            state_key = f"param_{key}"
+            saved_value = int(cfg.parameters.get(key, spec["default"]))
+            current_value = st.session_state.get(state_key)
+            if current_value == int(spec["min"]) and saved_value != int(spec["min"]):
+                unsafe_numeric_keys.append(key)
+        if unsafe_numeric_keys and not st.session_state.get("rule_apply_confirm"):
+            for key, spec in param_specs.items():
+                st.session_state[f"param_{key}"] = int(
+                    cfg.parameters.get(key, spec["default"])
+                )
+            st.session_state["rule_numeric_auto_reset_notice"] = True
+
         st.caption(
             "この画面は2段階です。値を変えた段階では **仮設定**、"
             "下の確認で本変更を適用するまで **本設定** には保存されません。"
         )
+        if st.session_state.pop("rule_numeric_auto_reset_notice", False):
+            st.info(
+                "設定画面の一時値が危険な最小値になっていたため、"
+                "保存済みの本設定へ自動で戻しました。"
+            )
         if cfg.updated_at:
             st.info(
                 f"現在の本設定: {cfg.updated_at[:16].replace('T', ' ')} 更新"
@@ -7104,6 +7124,12 @@ elif mode == "⚙️ 設定":
                 key="run_rule_consistency_check",
             )
 
+        check_draft_settings = st.checkbox(
+            "画面上の仮設定でチェックする",
+            value=False,
+            key="rule_consistency_use_draft",
+            help="通常は保存済みの本設定でチェックします。保存前の仮変更を試したい時だけオンにします。",
+        )
         include_info_rows = st.checkbox(
             "INFOも表示する",
             value=False,
@@ -7115,12 +7141,13 @@ elif mode == "⚙️ 設定":
             report = run_rule_consistency_checks(
                 year=consistency_year,
                 month=consistency_month,
-                rule_cfg=draft_cfg,
+                rule_cfg=draft_cfg if check_draft_settings else cfg,
                 include_operational_checks=include_operational_checks,
             )
             st.session_state["rule_consistency_report"] = {
                 "year": consistency_year,
                 "month": consistency_month,
+                "source": "仮設定" if check_draft_settings else "本設定",
                 "error_count": report.error_count,
                 "warning_count": report.warning_count,
                 "info_count": report.info_count,
@@ -7131,6 +7158,7 @@ elif mode == "⚙️ 設定":
         if stored_report:
             st.caption(
                 f"チェック対象: {stored_report['year']}年{stored_report['month']}月"
+                f" / 使用設定: {stored_report.get('source', '本設定')}"
             )
             m1, m2, m3 = st.columns(3)
             m1.metric("要修正", stored_report["error_count"])
