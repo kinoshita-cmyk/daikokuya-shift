@@ -3452,10 +3452,11 @@ if mode == "📊 経営者ビュー":
                             f"📥 **実際の提出データ {sub_data.submission_count}名分**を使用して生成しました"
                         )
                         parsed_note_summaries = getattr(sub_data, "parsed_note_summaries", {})
-                        if parsed_note_summaries:
+                        natural_language_notes = getattr(sub_data, "natural_language_notes", {})
+                        if natural_language_notes:
                             data_source_msg += (
-                                f"\n自由記載から "
-                                f"{len(parsed_note_summaries)}名分の希望も反映しました。"
+                                f"\n自由記載コメントは {len(natural_language_notes)}名分あります。"
+                                f"そのうち {len(parsed_note_summaries)}名分を条件として自動反映しました。"
                             )
                         if sub_data.pending_employees:
                             data_source_msg += (
