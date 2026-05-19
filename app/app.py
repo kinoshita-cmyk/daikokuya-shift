@@ -6502,22 +6502,47 @@ elif mode == "⚙️ 設定":
                 st.session_state[f"param_{key}"] = int(
                     source_cfg.parameters.get(key, spec["default"])
                 )
-            for rule in cfg.custom_rules:
+            for rule in source_cfg.custom_rules:
                 st.session_state[f"rule_en_{rule.id}"] = rule.enabled
             st.session_state["rule_added_custom_rules"] = []
             st.session_state["rule_deleted_ids"] = []
             st.session_state["rule_apply_confirm"] = False
 
+        def _ensure_rule_widgets_initialized(source_cfg: RuleConfig) -> None:
+            """既存セッションで未初期化の設定欄が最小値に落ちるのを防ぐ。"""
+            for key in check_labels:
+                state_key = f"chk_{key}"
+                if state_key not in st.session_state:
+                    st.session_state[state_key] = source_cfg.enabled_checks.get(key, True)
+            for key, spec in param_specs.items():
+                state_key = f"param_{key}"
+                if state_key not in st.session_state:
+                    st.session_state[state_key] = int(
+                        source_cfg.parameters.get(key, spec["default"])
+                    )
+            st.session_state.setdefault("rule_added_custom_rules", [])
+            st.session_state.setdefault("rule_deleted_ids", [])
+            st.session_state.setdefault("rule_apply_confirm", False)
+
         cfg_signature = repr(cfg.to_dict())
+        rule_widget_state_version = 2
         discard_requested = st.session_state.pop("rule_discard_requested", False)
         default_draft_requested = st.session_state.pop("rule_default_draft_requested", False)
         if default_draft_requested:
             _sync_rule_widgets(RuleConfig())
             st.session_state["rule_deleted_ids"] = [r.id for r in cfg.custom_rules]
             st.session_state["rule_cfg_loaded_sig"] = cfg_signature
-        elif discard_requested or st.session_state.get("rule_cfg_loaded_sig") != cfg_signature:
+            st.session_state["rule_widget_state_version"] = rule_widget_state_version
+        elif (
+            discard_requested
+            or st.session_state.get("rule_cfg_loaded_sig") != cfg_signature
+            or st.session_state.get("rule_widget_state_version") != rule_widget_state_version
+        ):
             _sync_rule_widgets(cfg)
             st.session_state["rule_cfg_loaded_sig"] = cfg_signature
+            st.session_state["rule_widget_state_version"] = rule_widget_state_version
+        else:
+            _ensure_rule_widgets_initialized(cfg)
 
         st.caption(
             "この画面は2段階です。値を変えた段階では **仮設定**、"
