@@ -81,8 +81,16 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
 
 # 店舗ごとの標準人数・最大人数。
 # 月間目標勤務日数よりも、まず店舗ごとの上限を守る。
+# 標準超過時の増員優先順位。左から順に「増員先として許容しやすい」店舗。
+STORE_OVERAGE_PRIORITY: tuple[Store, ...] = (
+    Store.SUZURAN,
+    Store.NISHIGUCHI,
+    Store.OMIYA,
+    Store.AKABANE,
+)
+
 STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
-    # 増員優先順位は 西口 → すずらん → 大宮 → 赤羽。
+    # 増員優先順位は すずらん → 西口 → 大宮 → 赤羽。
     # 赤羽は標準3名、4名は必要時のみ。
     Store.AKABANE: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1400),
     # 赤羽東口店は原則1名のみ。
@@ -90,9 +98,9 @@ STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
     # 大宮駅前店は3名を標準にし、4名は赤羽より優先して許容。
     Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1100),
     # 大宮西口店は原則1名、研修などで2名まで。
-    Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=600),
+    Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=800),
     # すずらんは3名標準、状況により4名まで。
-    Store.SUZURAN: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=800),
+    Store.SUZURAN: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=600),
 }
 
 # 1日全体の人数上限。

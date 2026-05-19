@@ -25,6 +25,7 @@ from .rules import (
     REDUCED_CAPACITY,
     MINIMUM_CAPACITY,
     OMIYA_ANCHOR_STAFF,
+    STORE_OVERAGE_PRIORITY,
     STORE_ROTATION_MINIMUMS,
     STORE_STAFFING_LIMITS,
     get_monthly_required_holiday_days,
@@ -218,6 +219,38 @@ def _check_store_capacity(issues: list[ConsistencyIssue]) -> None:
                     "エコ最小人数がエコ最大人数を超えています。",
                     f"{mode_name}: 最小{cap.eco_min}名 / 最大{cap.eco_max}名",
                 )
+
+    priority_stores = [
+        store for store in STORE_OVERAGE_PRIORITY
+        if store in STORE_STAFFING_LIMITS
+        and STORE_STAFFING_LIMITS[store].max_total > STORE_STAFFING_LIMITS[store].standard_total
+    ]
+    penalty_order = sorted(
+        priority_stores,
+        key=lambda store: STORE_STAFFING_LIMITS[store].over_standard_penalty,
+    )
+    if penalty_order != priority_stores:
+        _issue(
+            issues, "ERROR", "店舗人数", "増員優先順位",
+            "増員優先順位と生成時のペナルティ重みが一致していません。",
+            "優先順位: "
+            + " → ".join(store.display_name for store in priority_stores)
+            + " / ペナルティ順: "
+            + " → ".join(store.display_name for store in penalty_order),
+        )
+    seen_penalties: dict[int, list[Store]] = {}
+    for store in priority_stores:
+        penalty = int(STORE_STAFFING_LIMITS[store].over_standard_penalty)
+        seen_penalties.setdefault(penalty, []).append(store)
+    duplicate_penalties = [
+        stores for stores in seen_penalties.values() if len(stores) > 1
+    ]
+    for stores in duplicate_penalties:
+        _issue(
+            issues, "WARNING", "店舗人数", "増員優先順位",
+            "複数店舗の増員回避ペナルティが同じため、優先順位が曖昧です。",
+            "、".join(store.display_name for store in stores),
+        )
 
 
 def _check_employee_master(
