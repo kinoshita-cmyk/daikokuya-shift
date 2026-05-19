@@ -105,6 +105,7 @@ _FULLWIDTH_TRANS = str.maketrans(
         "，": ",",
         "、": ",",
         "．": ".",
+        "：": ":",
         "　": " ",
     }
 )
@@ -177,6 +178,15 @@ def _extract_work_days_from_sentence(
     """出勤希望文から具体日を拾う。日付の「日」が省略された書き方にも対応する。"""
     cleaned = _strip_total_count_phrases(sentence)
     days = _extract_days_from_text(cleaned, target_month, days_in_month)
+    for candidate_list in re.findall(
+        r"(?:出勤確定日|出勤希望日|出勤可能日|出勤日)\s*:\s*"
+        r"(\d{1,2}(?:\s*[,\.・と]\s*\d{1,2})*)",
+        cleaned,
+    ):
+        for day_str in re.findall(r"\d{1,2}", candidate_list):
+            day = _safe_day(day_str, days_in_month)
+            if day is not None:
+                days.append(day)
     for candidate_list in re.findall(
         r"(\d{1,2}(?:\s*[,\.・と]\s*\d{1,2})*)\s*(?:は|を|が)",
         cleaned,
