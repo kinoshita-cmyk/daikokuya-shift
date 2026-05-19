@@ -382,6 +382,14 @@ def parse_natural_language_note(
     if consecutive_off is not None and consecutive_off >= 2:
         if max_consecutive_off is None:
             result.preferred_consecutive_off_days = consecutive_off
+    elif (
+        max_consecutive_off is None
+        and "連休" in normalized
+        and any(word in normalized for word in ("ほしい", "欲しい", "希望", "取りたい", "ください"))
+        and not any(word in normalized for word in ("NG", "不可", "禁止", "だめ", "ダメ", "避けたい", "避けて", "なし", "無し", "無理"))
+    ):
+        # 「連休がほしい」のように日数指定がない場合は、最低限の2連休希望として扱う。
+        result.preferred_consecutive_off_days = 2
 
     whole_note_work_request = any(
         word in normalized
