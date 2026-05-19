@@ -5605,7 +5605,9 @@ elif mode == "👤 従業員ビュー":
 
     days_in_month = monthrange(target_year, target_month)[1]
     free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
+    free_text_draft_key = f"free_text_draft_{selected}_{target_year}_{target_month}"
     paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
+    paid_leave_draft_key = f"paid_leave_days_draft_{selected}_{target_year}_{target_month}"
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
     done_key = f"pref_done_{selected}_{target_year}_{target_month}"
 
@@ -5887,6 +5889,10 @@ elif mode == "👤 従業員ビュー":
             st.session_state.setdefault(
                 free_text_key, existing_submission.get("note", "") or "",
             )
+            st.session_state.setdefault(
+                free_text_draft_key, existing_submission.get("note", "") or "",
+            )
+            st.session_state.setdefault(paid_leave_draft_key, paid_leave_default_value)
         st.session_state.user_prefs[user_key] = initial_prefs
     elif existing_submission:
         paid_leave_default_value = int(existing_submission.get("paid_leave_days", 0) or 0)
@@ -5962,8 +5968,16 @@ elif mode == "👤 従業員ビュー":
         return save_path
 
     def _render_employee_review() -> None:
-        paid_leave_days_review = int(st.session_state.get(paid_leave_key, 0) or 0)
-        free_text_review = st.session_state.get(free_text_key, "")
+        paid_leave_days_review = int(
+            st.session_state.get(
+                paid_leave_draft_key,
+                st.session_state.get(paid_leave_key, 0),
+            ) or 0
+        )
+        free_text_review = st.session_state.get(
+            free_text_draft_key,
+            st.session_state.get(free_text_key, ""),
+        )
         x_days = [d for d, m in prefs.items() if m == "×"]
         triangle_days = [d for d, m in prefs.items() if m == "△"]
         ok_days = [d for d, m in prefs.items() if m == "○"]
@@ -6009,10 +6023,14 @@ elif mode == "👤 従業員ビュー":
         confirm_col1, confirm_col2 = st.columns([1, 1])
         with confirm_col1:
             if st.button("入力に戻る", key="emp_review_back", width="stretch"):
+                st.session_state[free_text_key] = free_text_review
+                st.session_state[paid_leave_draft_key] = paid_leave_days_review
                 st.session_state[review_key] = False
                 st.rerun()
         with confirm_col2:
             if st.button("この内容で提出する", key="emp_review_submit", type="primary", width="stretch"):
+                st.session_state[free_text_key] = free_text_review
+                st.session_state[paid_leave_draft_key] = paid_leave_days_review
                 _save_employee_preferences(paid_leave_days_review, free_text_review)
                 st.session_state[review_key] = False
                 st.session_state[done_key] = {
@@ -6084,12 +6102,16 @@ elif mode == "👤 従業員ビュー":
             f"💡 基準日数が設定されていない方は、希望有給日数を入力する必要はありません。"
         )
 
+    paid_leave_default_value = int(
+        st.session_state.get(paid_leave_draft_key, paid_leave_default_value) or 0
+    )
     paid_leave_days = st.number_input(
         "希望有給日数（任意）",
         min_value=0, max_value=31, value=paid_leave_default_value, step=1,
         help="今月使いたい有給日数を入力してください。基準より多く休みたい時のみ。",
         key=paid_leave_key,
     )
+    st.session_state[paid_leave_draft_key] = int(paid_leave_days or 0)
 
     # 現在の入力状況を集計
     x_count = sum(1 for m in prefs.values() if m == "×")
@@ -6198,12 +6220,15 @@ elif mode == "👤 従業員ビュー":
         height=180,
         key=free_text_key,
     )
+    st.session_state[free_text_draft_key] = free_text
 
     if st.button(
         f"確認画面へ進む",
         type="primary",
         width="stretch",
     ):
+        st.session_state[free_text_draft_key] = free_text
+        st.session_state[paid_leave_draft_key] = int(paid_leave_days or 0)
         st.session_state[review_key] = True
         st.rerun()
 
