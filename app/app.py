@@ -375,6 +375,7 @@ from prototype.pdf_exporter import export_shift_to_pdf
 from prototype.shift_chat import ShiftChatEngine, HAS_ANTHROPIC
 from prototype.shift_lock import ShiftLockManager
 from prototype.rule_config import RuleConfigManager, RuleConfig, CustomRule, DEFAULT_ENABLED_CHECKS, DEFAULT_PARAMETERS
+from prototype.rule_consistency import run_rule_consistency_checks
 from prototype.employee_config import (
     EmployeeConfigManager, get_active_employees, get_all_employees_including_retired,
 )
@@ -7040,6 +7041,93 @@ elif mode == "⚙️ 設定":
                     if st.button("デフォルトを仮設定にする", width="stretch"):
                         st.session_state["rule_default_draft_requested"] = True
                         st.rerun()
+
+        st.markdown("---")
+        st.markdown("#### ルール整合性チェック")
+        st.caption(
+            "現在のルール設定・従業員マスタ・対象月を見て、"
+            "ルール同士の矛盾や運用上の注意点をまとめて確認します。"
+        )
+        check_col1, check_col2, check_col3, check_col4 = st.columns([1, 1, 1.3, 1.4])
+        with check_col1:
+            consistency_year = int(st.number_input(
+                "対象年",
+                min_value=2025,
+                max_value=2035,
+                value=int(st.session_state.get("target_year", date.today().year)),
+                key="rule_consistency_year",
+            ))
+        with check_col2:
+            consistency_month = int(st.selectbox(
+                "対象月",
+                list(range(1, 13)),
+                index=max(0, int(st.session_state.get("target_month", date.today().month)) - 1),
+                key="rule_consistency_month",
+            ))
+        with check_col3:
+            include_operational_checks = st.checkbox(
+                "前月ロック状況も確認",
+                value=True,
+                key="rule_consistency_operational",
+                help="対象月の前月がロックされているかも確認します。",
+            )
+        with check_col4:
+            run_consistency = st.button(
+                "整合性チェックを実行",
+                type="primary",
+                width="stretch",
+                key="run_rule_consistency_check",
+            )
+
+        include_info_rows = st.checkbox(
+            "INFOも表示する",
+            value=False,
+            key="rule_consistency_show_info",
+            help="月別基準勤務日数の補足など、問題ではない参考情報も表示します。",
+        )
+
+        if run_consistency:
+            report = run_rule_consistency_checks(
+                year=consistency_year,
+                month=consistency_month,
+                rule_cfg=draft_cfg,
+                include_operational_checks=include_operational_checks,
+            )
+            st.session_state["rule_consistency_report"] = {
+                "year": consistency_year,
+                "month": consistency_month,
+                "error_count": report.error_count,
+                "warning_count": report.warning_count,
+                "info_count": report.info_count,
+                "rows": report.rows(include_info=True),
+            }
+
+        stored_report = st.session_state.get("rule_consistency_report")
+        if stored_report:
+            st.caption(
+                f"チェック対象: {stored_report['year']}年{stored_report['month']}月"
+            )
+            m1, m2, m3 = st.columns(3)
+            m1.metric("要修正", stored_report["error_count"])
+            m2.metric("注意", stored_report["warning_count"])
+            m3.metric("参考", stored_report["info_count"])
+            if stored_report["error_count"] == 0 and stored_report["warning_count"] == 0:
+                st.success("ルール同士の明らかな矛盾は見つかりませんでした。")
+            elif stored_report["error_count"] > 0:
+                st.error("要修正のルール矛盾があります。内容を確認してください。")
+            else:
+                st.warning("致命的ではありませんが、注意点があります。")
+
+            report_rows = list(stored_report["rows"])
+            if not include_info_rows:
+                report_rows = [
+                    row for row in report_rows
+                    if row.get("重要度") != "INFO"
+                ]
+            if report_rows:
+                st.dataframe(report_rows, width="stretch", hide_index=True, height=320)
+            else:
+                st.info("表示対象のチェック結果はありません。")
 
     # ============================================================
     # タブ2: ルール変更履歴
