@@ -1836,6 +1836,122 @@ def format_day_list(days) -> str:
     return "、".join(f"{d}日" for d in safe_days)
 
 
+def summarize_natural_language_note_for_review(
+    note_text: str,
+    year: int,
+    month: int,
+) -> dict:
+    """自由記載の読み取り結果を、従業員・管理者が確認しやすい文言へ変換する。"""
+    note_text = note_text or ""
+    if not note_text.strip():
+        return {
+            "has_note": False,
+            "auto_labels": [],
+            "review_labels": [],
+            "status": "自由記載なし",
+        }
+
+    try:
+        from prototype.submission_loader import parse_natural_language_note
+
+        parsed_note = parse_natural_language_note(note_text, int(year), int(month))
+    except Exception:
+        return {
+            "has_note": True,
+            "auto_labels": [],
+            "review_labels": ["読み取り中に問題がありました。管理者が原文を確認してください。"],
+            "status": "要確認",
+        }
+
+    auto_labels: list[str] = []
+    review_labels: list[str] = []
+
+    def _day_list_label(days: list[int]) -> str:
+        return "、".join(f"{int(day)}日" for day in sorted(set(days))) if days else "なし"
+
+    def _store_label(store) -> str:
+        return getattr(store, "display_name", "") if store else ""
+
+    if parsed_note.off_requests:
+        auto_labels.append(f"休み希望（絶対）: {_day_list_label(parsed_note.off_requests)}")
+
+    if parsed_note.flexible_off:
+        for candidate_days, required_count in parsed_note.flexible_off:
+            auto_labels.append(
+                f"候補休み: {_day_list_label(candidate_days)} のうち {int(required_count)}日休み"
+            )
+
+    if parsed_note.work_requests:
+        work_parts = []
+        for day, store in parsed_note.work_requests:
+            store_text = f" {_store_label(store)}" if store else ""
+            work_parts.append(f"{int(day)}日{store_text}出勤希望")
+        auto_labels.append("出勤希望: " + "、".join(work_parts))
+
+    if parsed_note.work_groups:
+        for candidate_days, required_count, store in parsed_note.work_groups:
+            store_text = f"（{_store_label(store)}希望）" if store else ""
+            auto_labels.append(
+                f"候補出勤: {_day_list_label(candidate_days)} のうち "
+                f"{int(required_count)}日出勤{store_text}"
+            )
+
+    if parsed_note.paid_leave_days is not None:
+        auto_labels.append(f"希望有給日数: {int(parsed_note.paid_leave_days)}日")
+    if parsed_note.requested_holiday_days is not None:
+        auto_labels.append(f"希望休日数: 合計{int(parsed_note.requested_holiday_days)}日")
+    if parsed_note.max_consecutive_work_days is not None:
+        auto_labels.append(f"連勤上限: {int(parsed_note.max_consecutive_work_days)}連勤まで")
+    if parsed_note.max_consecutive_off_days is not None:
+        auto_labels.append(f"連休上限: {int(parsed_note.max_consecutive_off_days)}連休まで")
+    if parsed_note.preferred_consecutive_off_days is not None:
+        auto_labels.append(f"連休希望: {int(parsed_note.preferred_consecutive_off_days)}連休を優先")
+    if parsed_note.ignored_optional_work_days:
+        auto_labels.append(
+            f"任意出勤候補: {_day_list_label(parsed_note.ignored_optional_work_days)}"
+        )
+
+    normalized_note = note_text.translate(str.maketrans({
+        "，": ",",
+        "、": ",",
+        "．": ".",
+        "：": ":",
+        "　": " ",
+    }))
+    review_keywords = {
+        "程度": "日数が目安表現です",
+        "くらい": "日数が目安表現です",
+        "ぐらい": "日数が目安表現です",
+        "想定": "日数が目安表現です",
+        "以降": "範囲指定があります",
+        "まで": "範囲指定があります",
+        "前後": "日付が曖昧です",
+        "あたり": "日付が曖昧です",
+        "なるべく": "希望の強さが曖昧です",
+        "できれば": "希望の強さが曖昧です",
+        "カウントしない": "人数カウント除外は管理者確認が必要です",
+        "必要人数にはカウントしない": "人数カウント除外は管理者確認が必要です",
+        "割合": "配属割合の指定は管理者確認が必要です",
+        "半々": "配属割合の指定は管理者確認が必要です",
+    }
+    seen_review_reasons: set[str] = set()
+    for keyword, reason in review_keywords.items():
+        if keyword in normalized_note and reason not in seen_review_reasons:
+            review_labels.append(reason)
+            seen_review_reasons.add(reason)
+
+    if not auto_labels:
+        review_labels.insert(0, "自動で条件化できませんでした。管理者が原文を確認してください。")
+
+    status = "要確認" if review_labels else "反映済み"
+    return {
+        "has_note": True,
+        "auto_labels": auto_labels,
+        "review_labels": review_labels,
+        "status": status,
+    }
+
+
 def render_scrollable_request_table(rows: list[dict]) -> None:
     """本人提出希望を横スクロール可能な表で表示する。"""
     if not rows:
@@ -1843,7 +1959,7 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         return
     columns = [
         "氏名", "状態", "× 休み希望（絶対）", "△ できれば休み",
-        "出勤希望", "有給", "自由記載から反映", "備考",
+        "出勤希望", "有給", "自由記載から反映", "自由記載確認", "備考",
     ]
     widths = {
         "氏名": 110,
@@ -1852,14 +1968,16 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         "△ できれば休み": 220,
         "出勤希望": 180,
         "有給": 90,
-        "自由記載から反映": 220,
+        "自由記載から反映": 300,
+        "自由記載確認": 260,
         "備考": 560,
     }
+    min_width = sum(widths.get(col, 140) for col in columns)
     html_parts = [
         '<div style="overflow:auto; max-height:430px; border:1px solid #e5e7eb; '
         'border-radius:6px; background:white;">',
-        '<table style="border-collapse:collapse; min-width:1530px; width:max-content; '
-        'font-size:14px;">',
+        f'<table style="border-collapse:collapse; min-width:{min_width}px; width:max-content; '
+        f'font-size:14px;">',
         '<thead><tr>',
     ]
     for col in columns:
@@ -2199,6 +2317,10 @@ def enrich_submission_days_from_files(
             submitted["note"] = note_text
             submitted["note_excerpt"] = note_text[:50] + ("..." if len(note_text) > 50 else "")
             submitted["has_note"] = True
+            note_summary = summarize_natural_language_note_for_review(note_text, year, month)
+            submitted["note_auto_labels"] = note_summary.get("auto_labels", [])
+            submitted["note_review_labels"] = note_summary.get("review_labels", [])
+            submitted["note_parse_status"] = note_summary.get("status", "")
         try:
             from prototype.submission_loader import parse_natural_language_note
             parsed_note = parse_natural_language_note(note_text, year, month)
@@ -2995,6 +3117,24 @@ if mode == "📊 経営者ビュー":
             unsafe_allow_html=True,
         )
 
+    note_review_items = [
+        s for s in submission_status.get("submitted", [])
+        if s.get("note_review_labels")
+    ]
+    if note_review_items:
+        review_names = "、".join(s.get("employee", "") for s in note_review_items)
+        st.warning(
+            "⚠ 自由記載に、管理者確認が必要な表現があります。"
+            f"対象: {review_names}"
+        )
+        with st.expander("自由記載の要確認内容を見る", expanded=False):
+            for s in note_review_items:
+                st.markdown(f"**{s.get('employee', '')}**")
+                st.write(" / ".join(s.get("note_review_labels", [])))
+                if s.get("note_auto_labels"):
+                    st.caption("自動反映: " + " / ".join(s.get("note_auto_labels", [])))
+                st.caption("原文: " + (s.get("note", "") or s.get("note_excerpt", "")))
+
     # 詳細表示（折りたたみ式）
     with st.expander(
         f"📥 提出状況の詳細を見る（提出済み{summary['total_submitted']}名・未提出{summary['total_pending']}名）",
@@ -3017,6 +3157,7 @@ if mode == "📊 経営者ビュー":
                         "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
                         "有給": f"{s.get('paid_leave_days', 0)}日",
                         "備考": "📝 あり" if s["has_note"] else "",
+                        "自由記載確認": s.get("note_parse_status", ""),
                     })
                 st.dataframe(submitted_data, width="stretch", hide_index=True)
 
@@ -3025,10 +3166,16 @@ if mode == "📊 経営者ビュー":
                 if has_notes:
                     st.markdown("**📝 自由記述コメント:**")
                     for s in has_notes:
+                        status_label = s.get("note_parse_status", "")
+                        status_html = (
+                            f' <span style="font-size:12px; color:#0369a1;">'
+                            f'[{escape(str(status_label))}]</span>'
+                            if status_label else ""
+                        )
                         st.markdown(
                             f'<div style="background:#f0f9ff; padding:6px 10px; '
                             f'margin:4px 0; border-left:3px solid #0ea5e9; font-size:13px;">'
-                            f'<strong>{s["employee"]}</strong>: {s["note_excerpt"]}'
+                            f'<strong>{s["employee"]}</strong>{status_html}: {escape(str(s["note_excerpt"]))}'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
@@ -3109,7 +3256,9 @@ if mode == "📊 経営者ビュー":
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
                 note_applied.extend(s.get("work_request_group_labels", []))
+                note_applied.extend(s.get("note_auto_labels", []))
                 note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
+                note_applied = list(dict.fromkeys(note_applied))
                 request_rows.append({
                     "氏名": emp_name,
                     "状態": "提出済み",
@@ -3118,6 +3267,7 @@ if mode == "📊 経営者ビュー":
                     "出勤希望": format_day_list(s.get("work_request_days", [])),
                     "有給": leave_label,
                     "自由記載から反映": " / ".join(note_applied),
+                    "自由記載確認": " / ".join(s.get("note_review_labels", [])) or s.get("note_parse_status", ""),
                     "備考": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             else:
@@ -3130,6 +3280,7 @@ if mode == "📊 経営者ビュー":
                     "出勤希望": "",
                     "有給": f"管理者+{admin_leave}日" if admin_leave else "",
                     "自由記載から反映": " / ".join(monthly_custom_by_employee.get(emp_name, [])),
+                    "自由記載確認": "",
                     "備考": "",
                 })
         render_scrollable_request_table(request_rows)
@@ -3458,6 +3609,18 @@ if mode == "📊 経営者ビュー":
                                 f"\n自由記載コメントは {len(natural_language_notes)}名分あります。"
                                 f"そのうち {len(parsed_note_summaries)}名分を条件として自動反映しました。"
                             )
+                            note_review_names = []
+                            for note_author, note_text in natural_language_notes.items():
+                                note_summary = summarize_natural_language_note_for_review(
+                                    note_text, int(target_year), int(target_month),
+                                )
+                                if note_summary.get("review_labels"):
+                                    note_review_names.append(str(note_author))
+                            if note_review_names:
+                                data_source_msg += (
+                                    f"\n⚠ 自由記載に管理者確認が必要な提出があります: "
+                                    f"{'、'.join(note_review_names)}"
+                                )
                         if sub_data.pending_employees:
                             data_source_msg += (
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
@@ -5818,6 +5981,30 @@ elif mode == "👤 従業員ビュー":
             {"項目": "自由記述", "内容": free_text_review.strip() or "なし", "日数": ""},
         ]
         render_scrollable_review_table(review_rows)
+
+        if free_text_review.strip():
+            note_summary = summarize_natural_language_note_for_review(
+                free_text_review, target_year, target_month,
+            )
+            st.markdown("#### 自由記載から以下を読み取りました")
+            note_review_rows = [
+                {
+                    "項目": "自動反映する内容",
+                    "内容": "\n".join(note_summary.get("auto_labels", [])) or "なし",
+                    "日数": "",
+                },
+                {
+                    "項目": "管理者確認",
+                    "内容": "\n".join(note_summary.get("review_labels", [])) or "なし",
+                    "日数": "",
+                },
+            ]
+            render_scrollable_review_table(note_review_rows)
+            if note_summary.get("review_labels"):
+                st.info(
+                    "管理者確認と表示された内容は、提出後に管理者側にも表示されます。"
+                    "意図と違う場合は、入力に戻って日付や希望内容を具体的に書き直してください。"
+                )
 
         confirm_col1, confirm_col2 = st.columns([1, 1])
         with confirm_col1:
