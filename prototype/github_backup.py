@@ -162,47 +162,60 @@ def sync_preferences_from_github(
         return 0, "同期済み"
 
     repo = _get_repo()
-    repo_dir = f"backups/{sync_key}"
-    url = f"https://api.github.com/repos/{repo}/contents/{repo_dir}"
+    repo_dirs = [
+        f"backups/{sync_key}",
+        # 古い実装や手動バックアップで使っていた可能性がある保存先。
+        f"preferences/{sync_key}",
+    ]
     headers = _github_headers()
 
     try:
-        response = requests.get(url, headers=headers, timeout=timeout)
-        if response.status_code == 404:
-            _SYNCED_PREFERENCE_MONTHS.add(sync_key)
-            return 0, "GitHub上に提出データなし"
-        if response.status_code != 200:
-            return 0, f"HTTP {response.status_code}: {response.text[:160]}"
-
-        items = response.json()
-        if not isinstance(items, list):
-            return 0, "GitHub応答形式が不正"
-
         restored = 0
-        for item in items:
-            name = str(item.get("name", ""))
-            if not (name.startswith("preferences_") and name.endswith(".json")):
+        checked = []
+        errors = []
+        for repo_dir in repo_dirs:
+            url = f"https://api.github.com/repos/{repo}/contents/{repo_dir}"
+            response = requests.get(url, headers=headers, timeout=timeout)
+            checked.append(repo_dir)
+            if response.status_code == 404:
                 continue
-            local_path = local_month_dir / name
-            if local_path.exists():
+            if response.status_code != 200:
+                errors.append(f"{repo_dir}: HTTP {response.status_code}")
                 continue
-            file_url = item.get("url")
-            if not file_url:
+
+            items = response.json()
+            if not isinstance(items, list):
+                errors.append(f"{repo_dir}: GitHub応答形式が不正")
                 continue
-            file_response = requests.get(file_url, headers=headers, timeout=timeout)
-            if file_response.status_code != 200:
-                continue
-            file_data = file_response.json()
-            encoded = str(file_data.get("content", "")).replace("\n", "")
-            if not encoded:
-                continue
-            content = base64.b64decode(encoded)
-            with open(local_path, "wb") as f:
-                f.write(content)
-            restored += 1
+
+            for item in items:
+                name = str(item.get("name", ""))
+                if not (name.startswith("preferences_") and name.endswith(".json")):
+                    continue
+                local_path = local_month_dir / name
+                if local_path.exists():
+                    continue
+                file_url = item.get("url")
+                if not file_url:
+                    continue
+                file_response = requests.get(file_url, headers=headers, timeout=timeout)
+                if file_response.status_code != 200:
+                    continue
+                file_data = file_response.json()
+                encoded = str(file_data.get("content", "")).replace("\n", "")
+                if not encoded:
+                    continue
+                content = base64.b64decode(encoded)
+                with open(local_path, "wb") as f:
+                    f.write(content)
+                restored += 1
 
         _SYNCED_PREFERENCE_MONTHS.add(sync_key)
-        return restored, f"{restored}件復元"
+        if restored:
+            return restored, f"{restored}件復元（確認先: {', '.join(checked)}）"
+        if errors:
+            return 0, " / ".join(errors)
+        return 0, f"GitHub上に提出データなし（確認先: {', '.join(checked)}）"
     except requests.exceptions.Timeout:
         return 0, "タイムアウト"
     except Exception as e:
@@ -234,15 +247,101 @@ def push_preference_to_github(
         # アプリは backups/YYYY-MM/preferences_*.json を読み込むため、
         # 再起動後もそのまま復元できるパスへ保存する。
         safe_name = "".join(c if c.isalnum() else "_" for c in employee_name)
-        repo_path = (
+        primary_repo_path = (
             f"backups/{year:04d}-{month:02d}/"
+            f"preferences_{ts}_{safe_name}.json"
+        )
+        legacy_repo_path = (
+            f"preferences/{year:04d}-{month:02d}/"
             f"preferences_{ts}_{safe_name}.json"
         )
         content = local_file_path.read_bytes()
         commit_msg = f"Preference: {employee_name} for {year}-{month:02d}"
-        return _push_file(repo_path, content, commit_msg)
+        primary_success, primary_msg = _push_file(
+            primary_repo_path, content, commit_msg,
+        )
+        legacy_success, legacy_msg = _push_file(
+            legacy_repo_path, content, commit_msg + " (legacy mirror)",
+        )
+        if primary_success and legacy_success:
+            return True, f"{primary_repo_path} と {legacy_repo_path} に保存"
+        if primary_success:
+            return True, f"{primary_repo_path} に保存（予備保存失敗: {legacy_msg}）"
+        if legacy_success:
+            return True, f"{legacy_repo_path} に保存（主保存失敗: {primary_msg}）"
+        return False, f"主保存失敗: {primary_msg} / 予備保存失敗: {legacy_msg}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def push_all_preferences_to_github(
+    local_backup_dir: Path,
+    target_ym: str | None = None,
+) -> dict:
+    """
+    ローカルに残っている提出データをまとめて GitHub へ同期する。
+
+    コード更新前に提出済みだったデータを、あとから GitHub バックアップへ
+    押し出すための管理者用リカバリ処理。
+    """
+    result = {
+        "success_count": 0,
+        "failed_count": 0,
+        "skipped_count": 0,
+        "messages": [],
+    }
+    if not is_github_backup_enabled():
+        result["failed_count"] += 1
+        result["messages"].append("GitHub自動バックアップが未設定です。")
+        return result
+
+    base_dir = Path(local_backup_dir)
+    if target_ym:
+        month_dirs = [base_dir / str(target_ym)]
+    else:
+        month_dirs = sorted(p for p in base_dir.iterdir() if p.is_dir()) if base_dir.exists() else []
+
+    for month_dir in month_dirs:
+        if not month_dir.exists():
+            result["skipped_count"] += 1
+            result["messages"].append(f"{month_dir.name}: ローカル提出データなし")
+            continue
+        try:
+            year_str, month_str = month_dir.name.split("-", 1)
+            year = int(year_str)
+            month = int(month_str)
+        except ValueError:
+            result["skipped_count"] += 1
+            continue
+
+        files = sorted(month_dir.glob("preferences_*.json"))
+        if not files:
+            result["skipped_count"] += 1
+            result["messages"].append(f"{month_dir.name}: 提出ファイルなし")
+            continue
+
+        for file_path in files:
+            try:
+                with open(file_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                author = str(data.get("author", "")).strip()
+                if not author or author == "system":
+                    result["skipped_count"] += 1
+                    continue
+                success, msg = push_preference_to_github(
+                    file_path, author, year, month,
+                )
+                if success:
+                    result["success_count"] += 1
+                    result["messages"].append(f"{month_dir.name} / {author}: 保存OK")
+                else:
+                    result["failed_count"] += 1
+                    result["messages"].append(f"{month_dir.name} / {author}: {msg}")
+            except Exception as e:
+                result["failed_count"] += 1
+                result["messages"].append(f"{file_path.name}: {type(e).__name__}: {e}")
+
+    return result
 
 
 def push_shift_to_github(
