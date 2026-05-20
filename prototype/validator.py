@@ -20,7 +20,11 @@ from .models import (
     MonthlyShift, Store, Skill, OperationMode,
     PreferenceMark, PreviousMonthCarryover, Affinity,
 )
-from .employees import ALL_EMPLOYEES, get_employee, is_probationary_employee
+from .employees import ALL_EMPLOYEES, get_employee
+try:
+    from .employees import is_probationary_employee as _employee_is_probationary_employee
+except ImportError:
+    _employee_is_probationary_employee = None
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
@@ -36,6 +40,69 @@ from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     WORK_TARGET_WARNING_DIFF_DAYS,
 )
+
+
+def _parse_iso_date(value: str | None) -> Optional[date]:
+    """YYYY-MM-DD の入社日を date に変換する。"""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _add_months(value: date, months: int) -> date:
+    """月末日を考慮して date に月数を足す。"""
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def is_probationary_employee(
+    employee,
+    target_year: int,
+    target_month: int,
+    target_day: Optional[int] = None,
+) -> bool:
+    """
+    入社日から2か月間の試用期間かどうか。
+
+    employees.py 側に同名関数がある場合はそれを使い、
+    ない環境でも validator.py 単体で起動できるようにする。
+    """
+    if _employee_is_probationary_employee is not None:
+        try:
+            return bool(_employee_is_probationary_employee(
+                employee, target_year, target_month, target_day,
+            ))
+        except TypeError:
+            try:
+                return bool(_employee_is_probationary_employee(
+                    employee, target_year, target_month,
+                ))
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    hired_on = _parse_iso_date(getattr(employee, "hired_at", None))
+    if hired_on is None:
+        return False
+
+    probation_end = _add_months(hired_on, 2)
+    if target_day is not None:
+        try:
+            target = date(int(target_year), int(target_month), int(target_day))
+        except ValueError:
+            return False
+        return hired_on <= target < probation_end
+
+    month_start = date(int(target_year), int(target_month), 1)
+    next_month = _add_months(month_start, 1)
+    return month_start < probation_end and next_month > hired_on
 
 
 def _validation_employees() -> list:
