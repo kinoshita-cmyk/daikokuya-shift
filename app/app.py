@@ -4990,9 +4990,8 @@ if mode == "📊 経営者ビュー":
 
         elif selected_shift_view == "📊 統計":
             # 出勤日数統計
-            from prototype.employees import ALL_EMPLOYEES
             data = []
-            for e in ALL_EMPLOYEES:
+            for e in shift_active_employees():
                 if e.is_auxiliary:
                     continue
                 days_in_month = monthrange(shift.year, shift.month)[1]
