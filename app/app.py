@@ -5610,6 +5610,7 @@ elif mode == "👤 従業員ビュー":
     paid_leave_draft_key = f"paid_leave_days_draft_{selected}_{target_year}_{target_month}"
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
     done_key = f"pref_done_{selected}_{target_year}_{target_month}"
+    github_backup_status_key = f"pref_github_backup_status_{selected}_{target_year}_{target_month}"
 
     if "user_prefs" not in st.session_state:
         st.session_state.user_prefs = {}
@@ -5683,6 +5684,15 @@ elif mode == "👤 従業員ビュー":
             "この画面が表示されていれば提出は完了しています。"
             "内容を変えたい場合だけ、下のボタンから修正して再提出してください。"
         )
+        github_status = st.session_state.get(github_backup_status_key)
+        if isinstance(github_status, dict):
+            if github_status.get("success"):
+                st.caption("GitHubバックアップにも保存済みです。")
+            else:
+                st.warning(
+                    "提出は受け付けましたが、GitHubバックアップへの保存確認ができませんでした。"
+                    "管理者へお知らせください。"
+                )
         completion_rows = [
             {"項目": "× 休み希望（絶対）", "内容": format_day_list(x_days_done), "日数": len(x_days_done)},
             {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
@@ -5959,12 +5969,19 @@ elif mode == "👤 従業員ビュー":
 
         try:
             from prototype.github_backup import push_preference_to_github
-            push_preference_to_github(
+            gh_success, gh_msg = push_preference_to_github(
                 save_path, employee_name=selected,
                 year=target_year, month=target_month,
             )
+            st.session_state[github_backup_status_key] = {
+                "success": bool(gh_success),
+                "message": gh_msg,
+            }
         except Exception:
-            pass
+            st.session_state[github_backup_status_key] = {
+                "success": False,
+                "message": "GitHubバックアップ処理で例外が発生",
+            }
         return save_path
 
     def _render_employee_review() -> None:
