@@ -488,6 +488,13 @@ def load_submissions_for_month(
     data = SubmissionData(year=year, month=month)
     month_dir = BACKUP_DIR / f"{year:04d}-{month:02d}"
     legacy_month_dir = PROJECT_ROOT / "preferences" / f"{year:04d}-{month:02d}"
+    try:
+        from .github_backup import sync_preferences_from_github
+
+        sync_preferences_from_github(year, month, BACKUP_DIR)
+    except Exception:
+        pass
+
     candidate_files: list[Path] = []
     if month_dir.exists():
         candidate_files.extend(sorted(month_dir.glob("preferences_*.json")))

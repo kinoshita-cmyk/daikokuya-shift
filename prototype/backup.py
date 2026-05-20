@@ -235,6 +235,13 @@ class ShiftBackup:
             }
         """
         month_dir = self._get_month_dir(year, month)
+        try:
+            from .github_backup import sync_preferences_from_github
+
+            sync_preferences_from_github(year, month, self.backup_dir)
+        except Exception:
+            pass
+
         submission_map: dict[str, dict] = {}  # 従業員名 → 最新の提出情報
 
         def _safe_days(values) -> list[int]:

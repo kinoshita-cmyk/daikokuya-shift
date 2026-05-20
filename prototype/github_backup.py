@@ -39,6 +39,8 @@ except ImportError:
 SECRET_GITHUB_TOKEN = "GITHUB_TOKEN"
 SECRET_GITHUB_BACKUP_REPO = "GITHUB_BACKUP_REPO"
 
+_SYNCED_PREFERENCE_MONTHS: set[str] = set()
+
 
 def _get_secret(key: str, default: str = "") -> str:
     """Streamlit Secrets または環境変数から値を取得"""
@@ -68,6 +70,13 @@ def _get_repo() -> str:
     return _get_secret(SECRET_GITHUB_BACKUP_REPO)
 
 
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"token {_get_token()}",
+        "Accept": "application/vnd.github.v3+json",
+    }
+
+
 # ============================================================
 # GitHub API ラッパー
 # ============================================================
@@ -93,10 +102,7 @@ def _push_file(
         return False, "GITHUB_TOKEN または GITHUB_BACKUP_REPO 未設定"
 
     url = f"https://api.github.com/repos/{repo}/contents/{file_path_in_repo}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept": "application/vnd.github.v3+json",
-    }
+    headers = _github_headers()
 
     # 既存ファイルの SHA 取得（上書き時に必要）
     existing_sha: Optional[str] = None
@@ -128,6 +134,77 @@ def _push_file(
         return False, "タイムアウト"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def sync_preferences_from_github(
+    year: int,
+    month: int,
+    local_backup_dir: Path,
+    timeout: int = 8,
+) -> tuple[int, str]:
+    """
+    GitHubバックアップに保存済みの希望提出データをローカルへ復元する。
+
+    Streamlit Cloud は再起動時にローカル保存が消えることがあるため、
+    提出状況を読む前にこの同期を行う。
+    """
+    if not is_github_backup_enabled():
+        return 0, "未設定"
+
+    year = int(year)
+    month = int(month)
+    sync_key = f"{year:04d}-{month:02d}"
+    local_month_dir = Path(local_backup_dir) / sync_key
+    local_month_dir.mkdir(parents=True, exist_ok=True)
+    if sync_key in _SYNCED_PREFERENCE_MONTHS and any(local_month_dir.glob("preferences_*.json")):
+        return 0, "同期済み"
+
+    repo = _get_repo()
+    repo_dir = f"backups/{sync_key}"
+    url = f"https://api.github.com/repos/{repo}/contents/{repo_dir}"
+    headers = _github_headers()
+
+    try:
+        response = requests.get(url, headers=headers, timeout=timeout)
+        if response.status_code == 404:
+            _SYNCED_PREFERENCE_MONTHS.add(sync_key)
+            return 0, "GitHub上に提出データなし"
+        if response.status_code != 200:
+            return 0, f"HTTP {response.status_code}: {response.text[:160]}"
+
+        items = response.json()
+        if not isinstance(items, list):
+            return 0, "GitHub応答形式が不正"
+
+        restored = 0
+        for item in items:
+            name = str(item.get("name", ""))
+            if not (name.startswith("preferences_") and name.endswith(".json")):
+                continue
+            local_path = local_month_dir / name
+            if local_path.exists():
+                continue
+            file_url = item.get("url")
+            if not file_url:
+                continue
+            file_response = requests.get(file_url, headers=headers, timeout=timeout)
+            if file_response.status_code != 200:
+                continue
+            file_data = file_response.json()
+            encoded = str(file_data.get("content", "")).replace("\n", "")
+            if not encoded:
+                continue
+            content = base64.b64decode(encoded)
+            with open(local_path, "wb") as f:
+                f.write(content)
+            restored += 1
+
+        _SYNCED_PREFERENCE_MONTHS.add(sync_key)
+        return restored, f"{restored}件復元"
+    except requests.exceptions.Timeout:
+        return 0, "タイムアウト"
+    except Exception as e:
+        return 0, f"{type(e).__name__}: {e}"
 
 
 # ============================================================
