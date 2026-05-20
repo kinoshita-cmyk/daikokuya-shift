@@ -18,6 +18,7 @@ from typing import Optional
 
 from .paths import BACKUP_DIR, PROJECT_ROOT
 from .models import Store
+from .submission_window import is_submission_in_window, timestamp_sort_key
 
 
 @dataclass
@@ -516,7 +517,12 @@ def load_submissions_for_month(
             if not author or author == "system":
                 continue
             saved_at = d.get("saved_at", "")
-            if author not in latest or saved_at > latest[author].get("saved_at", ""):
+            if not is_submission_in_window(year, month, saved_at):
+                continue
+            if (
+                author not in latest
+                or timestamp_sort_key(saved_at) > timestamp_sort_key(latest[author].get("saved_at", ""))
+            ):
                 latest[author] = d
         except Exception:
             continue

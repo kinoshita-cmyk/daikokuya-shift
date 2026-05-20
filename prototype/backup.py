@@ -22,7 +22,6 @@
 from __future__ import annotations
 import json
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +30,9 @@ from .models import (
     DayPreference, PreferenceMark,
 )
 from .paths import BACKUP_DIR as DEFAULT_BACKUP_DIR, PROJECT_ROOT
+from .submission_window import (
+    is_submission_in_window, now_jst, timestamp_sort_key,
+)
 
 
 class ShiftBackup:
@@ -46,7 +48,7 @@ class ShiftBackup:
         return d
 
     def _timestamp(self) -> str:
-        return datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        return now_jst().strftime("%Y-%m-%d_%H%M%S")
 
     # ============================================================
     # シフトのバックアップ
@@ -69,7 +71,7 @@ class ShiftBackup:
             "kind": kind,
             "author": author,
             "note": note,
-            "saved_at": datetime.now().isoformat(),
+            "saved_at": now_jst().isoformat(timespec="seconds"),
             "operation_modes": {
                 str(d): m.value for d, m in shift.operation_modes.items()
             },
@@ -142,7 +144,7 @@ class ShiftBackup:
         data = {
             "year": year,
             "month": month,
-            "saved_at": datetime.now().isoformat(),
+            "saved_at": now_jst().isoformat(timespec="seconds"),
             "author": author,
             "off_requests": off_requests,
             "work_requests": [
@@ -178,10 +180,10 @@ class ShiftBackup:
     ) -> None:
         """シフト編集を1件記録（JSONL形式で追記）"""
         month_dir = self._get_month_dir(year, month)
-        log_file = month_dir / f"edits_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+        log_file = month_dir / f"edits_{now_jst().strftime('%Y-%m-%d')}.jsonl"
 
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_jst().isoformat(timespec="seconds"),
             "actor": actor,
             "employee": employee,
             "day": day,
@@ -306,9 +308,13 @@ class ShiftBackup:
                 if not author or author == "system":
                     continue
                 saved_at = data.get("saved_at", "")
+                if not is_submission_in_window(year, month, saved_at):
+                    continue
                 # 最新のものを保持
                 if (author not in submission_map
-                        or saved_at > submission_map[author].get("submitted_at", "")):
+                        or timestamp_sort_key(saved_at) > timestamp_sort_key(
+                            submission_map[author].get("submitted_at", "")
+                        )):
                     # off_requestsの中身を集計（提出内容のサマリー）
                     off_requests = data.get("off_requests", {})
                     off_days = _extract_employee_days(off_requests, author)
@@ -342,7 +348,10 @@ class ShiftBackup:
 
         # 提出済み・未提出の振り分け
         submitted_list = list(submission_map.values())
-        submitted_list.sort(key=lambda x: x.get("submitted_at", ""), reverse=True)
+        submitted_list.sort(
+            key=lambda x: timestamp_sort_key(x.get("submitted_at", "")),
+            reverse=True,
+        )
         submitted_names = set(submission_map.keys())
         not_submitted = [
             name for name in expected_employees if name not in submitted_names

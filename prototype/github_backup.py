@@ -27,6 +27,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from .submission_window import now_jst
+
 # requests は標準では入っていないが、anthropic SDK が依存しているので利用可能
 try:
     import requests
@@ -228,7 +230,7 @@ def push_preference_to_github(
         local_file_path = Path(local_file_path)
         if not local_file_path.exists():
             return False, "ローカルファイルが見つからない"
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        ts = now_jst().strftime("%Y%m%d-%H%M%S")
         # アプリは backups/YYYY-MM/preferences_*.json を読み込むため、
         # 再起動後もそのまま復元できるパスへ保存する。
         safe_name = "".join(c if c.isalnum() else "_" for c in employee_name)
@@ -260,7 +262,7 @@ def push_shift_to_github(
         local_file_path = Path(local_file_path)
         if not local_file_path.exists():
             return False, "ローカルファイルが見つからない"
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        ts = now_jst().strftime("%Y%m%d-%H%M%S")
         repo_path = f"shifts/{year:04d}-{month:02d}/{kind}_{ts}.json"
         content = local_file_path.read_bytes()
         commit_msg = f"Shift {kind}: {year}-{month:02d}"
@@ -293,7 +295,7 @@ def push_lock_to_github(
     action: str = "lock",
 ) -> tuple[bool, str]:
     """ロック/解除履歴ファイルを GitHub に保存する。"""
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = now_jst().strftime("%Y%m%d-%H%M%S")
     repo_path = f"locks/{year:04d}-{month:02d}/{action}_{ts}.json"
     return push_local_file_to_github(
         local_file_path,
@@ -329,7 +331,7 @@ def push_config_to_github(
     if not is_github_backup_enabled():
         return False, "未設定"
     try:
-        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        ts = now_jst().strftime("%Y%m%d-%H%M%S")
         repo_path = f"config/{config_name}_{ts}.json"
         content = json.dumps(
             config_data, ensure_ascii=False, indent=2,
@@ -408,6 +410,6 @@ if __name__ == "__main__":
         print("\n[3] テストファイル送信")
         ok, msg = push_config_to_github(
             "test_connection",
-            {"timestamp": datetime.now().isoformat(), "test": True},
+            {"timestamp": now_jst().isoformat(timespec="seconds"), "test": True},
         )
         print(f"  結果: {'✅' if ok else '❌'} {msg}")
