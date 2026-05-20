@@ -7895,6 +7895,7 @@ elif mode == "⚙️ 設定":
         )
         from prototype.github_backup import (
             is_github_backup_enabled, test_connection as gh_test_connection,
+            push_all_preferences_to_github,
         )
 
         st.markdown("### 💾 データバックアップ")
@@ -8002,6 +8003,57 @@ elif mode == "⚙️ 設定":
                     "提出ファイル数": data_summary["submissions_by_month"][ym],
                 })
             st.dataframe(month_data, width="stretch", hide_index=True)
+
+        if is_github_backup_enabled():
+            st.markdown("##### GitHubへ提出データを手動同期")
+            st.caption(
+                "管理画面に表示されている提出データを、GitHubバックアップへまとめて保存します。"
+                "コード更新前に提出済みだったデータを保護したい時に使ってください。"
+            )
+            available_submission_months = sorted(
+                data_summary.get("submissions_by_month", {}).keys(),
+                reverse=True,
+            )
+            if available_submission_months:
+                default_sync_index = (
+                    available_submission_months.index("2026-06")
+                    if "2026-06" in available_submission_months else 0
+                )
+                sync_target_ym = st.selectbox(
+                    "同期する月",
+                    options=available_submission_months,
+                    index=default_sync_index,
+                    key="github_manual_sync_month",
+                )
+                if st.button(
+                    "この月の提出データをGitHubへ同期",
+                    key="github_manual_sync_preferences",
+                    type="primary",
+                ):
+                    with st.spinner("GitHubへ提出データを保存しています..."):
+                        sync_result = push_all_preferences_to_github(
+                            BACKUP_DIR,
+                            target_ym=sync_target_ym,
+                        )
+                    if sync_result.get("failed_count", 0) == 0 and sync_result.get("success_count", 0) > 0:
+                        st.success(
+                            f"GitHub同期完了: {sync_result['success_count']}件保存しました。"
+                        )
+                    elif sync_result.get("success_count", 0) > 0:
+                        st.warning(
+                            f"一部保存できませんでした: 成功{sync_result['success_count']}件 / "
+                            f"失敗{sync_result['failed_count']}件"
+                        )
+                    else:
+                        st.error(
+                            "GitHub同期に成功した提出データがありません。"
+                            "接続テストとバックアップ用リポジトリの権限を確認してください。"
+                        )
+                    with st.expander("同期結果の詳細", expanded=True):
+                        for msg in sync_result.get("messages", [])[:80]:
+                            st.write(msg)
+            else:
+                st.caption("同期できる提出データがまだありません。")
 
         # ============================================================
         # ダウンロード（エクスポート）
