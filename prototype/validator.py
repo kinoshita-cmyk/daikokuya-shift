@@ -20,9 +20,7 @@ from .models import (
     MonthlyShift, Store, Skill, OperationMode,
     PreferenceMark, PreviousMonthCarryover, Affinity,
 )
-from .employees import (
-    ALL_EMPLOYEES, get_employee, is_probationary_employee, shift_active_employees,
-)
+from .employees import ALL_EMPLOYEES, get_employee, is_probationary_employee
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
@@ -42,15 +40,35 @@ from .rules import (
 
 def _validation_employees() -> list:
     """検証対象の従業員を従業員マスターから動的に取得する。"""
+    def _is_active_for_validation(emp) -> bool:
+        if getattr(emp, "is_auxiliary", False):
+            return False
+        if not getattr(emp, "is_shift_eligible", True):
+            return False
+
+        role = getattr(emp, "role", None)
+        role_text = str(getattr(role, "value", role))
+        if role_text in ("顧問", "ADVISOR", "代表取締役", "REPRESENTATIVE"):
+            return False
+
+        status = getattr(emp, "employment_status", None)
+        if status is not None:
+            status_text = str(getattr(status, "value", status))
+            if status_text not in ("正社員", "パート", "ACTIVE", "PART_TIME"):
+                return False
+        return True
+
     try:
+        from .employee_config import get_all_employees_including_retired
+
         return [
-            emp for emp in shift_active_employees()
-            if emp.is_shift_eligible and not emp.is_auxiliary
+            emp for emp in get_all_employees_including_retired()
+            if _is_active_for_validation(emp)
         ]
     except Exception:
         return [
             emp for emp in ALL_EMPLOYEES
-            if emp.is_shift_eligible and not emp.is_auxiliary
+            if _is_active_for_validation(emp)
         ]
 
 
