@@ -46,6 +46,9 @@ except Exception:
 from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, MAY_2026_SHIFT_XLSX,
 )
+from prototype.submission_window import (
+    format_timestamp_jst, is_submission_in_window, now_jst, timestamp_sort_key,
+)
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
 from auth import require_auth, render_logout_button, is_manager, get_user_role
@@ -3152,7 +3155,7 @@ if mode == "📊 経営者ビュー":
                 for s in submission_status["submitted"]:
                     submitted_data.append({
                         "氏名": s["employee"],
-                        "提出日時": s["submitted_at"][:19].replace("T", " "),
+                        "提出日時": format_timestamp_jst(s.get("submitted_at", "")),
                         "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
                         "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
                         "有給": f"{s.get('paid_leave_days', 0)}日",
@@ -5633,7 +5636,7 @@ elif mode == "👤 従業員ビュー":
         and not st.session_state.get(done_key)
         and not st.session_state.get(edit_existing_key)
     ):
-        submitted_at = existing_submission.get("submitted_at", "")[:19].replace("T", " ")
+        submitted_at = format_timestamp_jst(existing_submission.get("submitted_at", ""))
         x_days_submitted = existing_submission.get("off_request_days", [])
         triangle_days_submitted = existing_submission.get("flexible_off_days", [])
         ok_days_submitted = [
@@ -5673,7 +5676,9 @@ elif mode == "👤 従業員ビュー":
         triangle_days_done = done_info.get("triangle_days", [])
         ok_days_done = done_info.get("ok_days", [])
         paid_leave_done = int(done_info.get("paid_leave_days", 0) or 0)
-        submitted_at_done = done_info.get("submitted_at", datetime.now().isoformat())[:19].replace("T", " ")
+        submitted_at_done = format_timestamp_jst(
+            done_info.get("submitted_at", now_jst().isoformat(timespec="seconds"))
+        )
 
         st.markdown("### 提出完了")
         st.success(
@@ -5911,7 +5916,7 @@ elif mode == "👤 従業員ビュー":
     if existing_submission and not st.session_state.get(done_key):
         st.info(
             f"この月はすでに提出済みです"
-            f"（{existing_submission.get('submitted_at', '')[:19].replace('T', ' ')}）。"
+            f"（{format_timestamp_jst(existing_submission.get('submitted_at', ''))}）。"
             "内容を変更したい場合は、この画面で修正して再提出してください。"
         )
 
@@ -6051,7 +6056,7 @@ elif mode == "👤 従業員ビュー":
                 _save_employee_preferences(paid_leave_days_review, free_text_review)
                 st.session_state[review_key] = False
                 st.session_state[done_key] = {
-                    "submitted_at": datetime.now().isoformat(),
+                    "submitted_at": now_jst().isoformat(timespec="seconds"),
                     "x_days": x_days,
                     "triangle_days": triangle_days,
                     "ok_days": ok_days,
@@ -6400,9 +6405,17 @@ elif mode == "⚙️ 設定":
                         if not author or author == "system":
                             continue
                         saved_at = d.get("saved_at", "")
+                        try:
+                            pref_year, pref_month = (int(part) for part in ym.split("-", 1))
+                        except ValueError:
+                            pref_year, pref_month = 0, 0
+                        if pref_year and not is_submission_in_window(pref_year, pref_month, saved_at):
+                            continue
                         # 最新のもののみ採用
                         if (author not in leave_data[ym]
-                                or saved_at > leave_data[ym][author].get("saved_at", "")):
+                                or timestamp_sort_key(saved_at) > timestamp_sort_key(
+                                    leave_data[ym][author].get("saved_at", "")
+                                )):
                             submitted_paid_leave_days = int(d.get("paid_leave_days", 0))
                             leave_data[ym][author] = {
                                 "submitted_paid_leave_days": submitted_paid_leave_days,
@@ -6495,7 +6508,7 @@ elif mode == "⚙️ 設定":
                             (info.get("base_holidays") or 0) + info["paid_leave_days"]
                             if info.get("base_holidays") is not None else "-"
                         ),
-                        "提出日時": info["saved_at"][:19].replace("T", " ") if info["saved_at"] else "-",
+                        "提出日時": format_timestamp_jst(info["saved_at"]) if info["saved_at"] else "-",
                     })
                 st.dataframe(table_data, width="stretch", hide_index=True)
 
