@@ -139,7 +139,8 @@ class ShiftBackup:
         """希望データをスナップショット化"""
         month_dir = self._get_month_dir(year, month)
         ts = self._timestamp()
-        file_path = month_dir / f"preferences_{ts}.json"
+        safe_author = "".join(c if c.isalnum() else "_" for c in str(author or "system"))
+        file_path = month_dir / f"preferences_{ts}_{safe_author}.json"
 
         data = {
             "year": year,

@@ -20,7 +20,9 @@ from .models import (
     MonthlyShift, Store, Skill, OperationMode,
     PreferenceMark, PreviousMonthCarryover, Affinity,
 )
-from .employees import ALL_EMPLOYEES, get_employee
+from .employees import (
+    ALL_EMPLOYEES, get_employee, is_probationary_employee, shift_active_employees,
+)
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
@@ -36,6 +38,20 @@ from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     WORK_TARGET_WARNING_DIFF_DAYS,
 )
+
+
+def _validation_employees() -> list:
+    """検証対象の従業員を従業員マスターから動的に取得する。"""
+    try:
+        return [
+            emp for emp in shift_active_employees()
+            if emp.is_shift_eligible and not emp.is_auxiliary
+        ]
+    except Exception:
+        return [
+            emp for emp in ALL_EMPLOYEES
+            if emp.is_shift_eligible and not emp.is_auxiliary
+        ]
 
 
 # ============================================================
@@ -321,7 +337,11 @@ def _check_store_capacity(
             # 補助要員は除外して人数集計
             store_workers = [
                 a for a in day_assignments
-                if a.store == store and not get_employee(a.employee).is_auxiliary
+                if a.store == store
+                and not get_employee(a.employee).is_auxiliary
+                and not is_probationary_employee(
+                    get_employee(a.employee), shift.year, shift.month, day,
+                )
             ]
             # ECO_SUPPORT は店頭直接応対しないためチケット枠としてカウント
             eco_count = sum(
@@ -337,7 +357,13 @@ def _check_store_capacity(
             # 配属者の名前リスト
             worker_names = [a.employee for a in store_workers]
             worker_str = ", ".join(worker_names) if worker_names else "(誰もいない)"
-            all_store_workers = [a.employee for a in day_assignments if a.store == store]
+            all_store_workers = [
+                a.employee for a in day_assignments
+                if a.store == store
+                and not is_probationary_employee(
+                    get_employee(a.employee), shift.year, shift.month, day,
+                )
+            ]
             all_worker_str = ", ".join(all_store_workers) if all_store_workers else "(誰もいない)"
             staffing_total = len(all_store_workers)
             yamamoto_present = any(
@@ -512,7 +538,11 @@ def _check_eco_placement(shift: MonthlyShift, result: ValidationResult, days: in
             day_assignments = shift.get_day_assignments(day)
             eco_at_store = [
                 a for a in day_assignments
-                if a.store == store and get_employee(a.employee).skill == Skill.ECO
+                if a.store == store
+                and get_employee(a.employee).skill == Skill.ECO
+                and not is_probationary_employee(
+                    get_employee(a.employee), shift.year, shift.month, day,
+                )
             ]
             if not eco_at_store:
                 # その日の店舗が休店or閉店ならスキップ
@@ -543,8 +573,10 @@ def _check_consecutive_work(
         max_consec = HARD_CONSTRAINTS["max_consecutive_work_days"]
     employee_max_consecutive_work = employee_max_consecutive_work or {}
 
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if not emp.is_shift_eligible:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         if (
             emp.name in CONSTRAINT_EXCLUDED
@@ -597,8 +629,10 @@ def _check_holiday_days(
 ) -> None:
     """月内の休日日数チェック"""
     exact_holiday_days = exact_holiday_days or {}
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if not emp.is_shift_eligible:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         if (
             emp.name in CONSTRAINT_EXCLUDED
@@ -649,8 +683,10 @@ def _check_consecutive_off(
     max_2off = HARD_CONSTRAINTS["max_two_day_off_per_month"]
     employee_max_consecutive_off = employee_max_consecutive_off or {}
 
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if not emp.is_shift_eligible:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         if emp.name in CONSTRAINT_EXCLUDED and emp.name not in employee_max_consecutive_off:
             continue
@@ -1256,8 +1292,10 @@ def _check_monthly_workday_balance(
 ) -> None:
     """月間基準勤務日数から大きく外れていないか確認する。"""
     warning_diff = int(WORK_TARGET_WARNING_DIFF_DAYS)
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if emp.is_auxiliary or emp.annual_target_days is None:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         base_target = get_monthly_work_target(
             emp.name,
@@ -1322,8 +1360,10 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
         )
 
     # 各従業員の出勤日数・休日日数・目標達成度
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if emp.is_auxiliary:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         work_days = sum(
             1 for d in range(1, days + 1)
@@ -1369,7 +1409,11 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
 
         actual_total = sum(
             1 for a in shift.get_day_assignments(day)
-            if a.store != Store.OFF and not get_employee(a.employee).is_auxiliary
+            if a.store != Store.OFF
+            and not get_employee(a.employee).is_auxiliary
+            and not is_probationary_employee(
+                get_employee(a.employee), shift.year, shift.month, day,
+            )
         )
         if actual_total < required_total:
             shortage = required_total - actual_total
@@ -1381,8 +1425,10 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
     total_target = 0
     total_actual = 0
     shortfall_employees = []
-    for emp in ALL_EMPLOYEES:
+    for emp in _validation_employees():
         if emp.is_auxiliary or emp.annual_target_days is None:
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
             continue
         target = get_monthly_work_target(emp.name, shift.month, emp.annual_target_days)
         if target is None:
