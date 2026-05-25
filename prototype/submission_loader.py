@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .paths import BACKUP_DIR, PROJECT_ROOT
+from .paths import BACKUP_DIR, CONFIG_DIR, PROJECT_ROOT
 from .models import Store
 from .submission_window import is_submission_in_window, timestamp_sort_key
 
@@ -38,6 +38,7 @@ class SubmissionData:
     max_consecutive_off_days: dict[str, int] = field(default_factory=dict)
     preferred_consecutive_off: list[tuple[str, int]] = field(default_factory=list)
     parsed_note_summaries: dict[str, dict] = field(default_factory=dict)
+    admin_note_adjustments: dict[str, str] = field(default_factory=dict)
     submitted_employees: list[str] = field(default_factory=list)
     pending_employees: list[str] = field(default_factory=list)
 
@@ -68,6 +69,52 @@ def _is_only_on_request_employee(name: str) -> bool:
         return bool(getattr(get_employee(name), "only_on_request_days", False))
     except Exception:
         return False
+
+
+NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
+
+
+def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
+    """管理者が確認済みにした自由記載補正を読み込む。"""
+    try:
+        from .github_backup import sync_latest_config_from_github
+
+        sync_latest_config_from_github("natural_language_adjustments", CONFIG_DIR)
+    except Exception:
+        pass
+    if not NOTE_ADJUSTMENT_FILE.exists():
+        return {}
+    try:
+        with open(NOTE_ADJUSTMENT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+    latest: dict[str, dict] = {}
+    for adj in data.get("adjustments", []):
+        if not isinstance(adj, dict):
+            continue
+        if bool(adj.get("deleted", False)):
+            continue
+        if int(adj.get("year", 0) or 0) != int(year):
+            continue
+        if int(adj.get("month", 0) or 0) != int(month):
+            continue
+        if str(adj.get("status", "")) != "確認済み":
+            continue
+        employee = str(adj.get("employee", "")).strip()
+        corrected_text = str(adj.get("corrected_text", "")).strip()
+        if not employee or not corrected_text:
+            continue
+        if (
+            employee not in latest
+            or str(adj.get("updated_at") or adj.get("created_at") or "")
+            >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
+        ):
+            latest[employee] = adj
+    return {
+        employee: str(adj.get("corrected_text", "")).strip()
+        for employee, adj in latest.items()
+    }
 
 
 @dataclass
@@ -417,6 +464,9 @@ def parse_natural_language_note(
         [
             r"出勤(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
             r"出勤\s*(\d{1,2})\s*日(?:間)?",
+            r"勤務(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
+            r"勤務\s*(\d{1,2})\s*日(?:間)?",
+            r"(\d{1,2})\s*日(?:間)?\s*(?:勤務|出勤)(?:希望|でお願い|お願いします|したい)",
         ],
         normalized,
     )
@@ -531,6 +581,127 @@ def parse_natural_language_note(
             by_day[day] = store
     result.work_requests = sorted(by_day.items())
     return result
+
+
+def _apply_parsed_note_to_submission_data(
+    data: SubmissionData,
+    author: str,
+    parsed_note: ParsedNaturalLanguageNote,
+    source_label: str = "自由記載",
+) -> None:
+    """解析済みの自由記載/管理者補正を生成入力へ重ねる。"""
+    if parsed_note.has_constraints or parsed_note.ignored_optional_work_days:
+        summary = data.parsed_note_summaries.setdefault(author, {
+            "off_requests": [],
+            "work_requests": [],
+            "work_groups": [],
+            "flexible_off": [],
+            "paid_leave_days": None,
+            "requested_holiday_days": None,
+            "max_consecutive_work_days": None,
+            "max_consecutive_off_days": None,
+            "preferred_consecutive_off_days": None,
+            "ignored_optional_work_days": [],
+            "sources": [],
+        })
+        summary.setdefault("sources", []).append(source_label)
+        summary.setdefault("off_requests", []).extend(parsed_note.off_requests)
+        summary.setdefault("work_requests", []).extend([
+            {"day": day, "store": store.name if store else None}
+            for day, store in parsed_note.work_requests
+        ])
+        summary.setdefault("work_groups", []).extend([
+            {
+                "candidate_days": list(candidate_days),
+                "required_count": required_count,
+                "store": store.name if store else None,
+            }
+            for candidate_days, required_count, store in parsed_note.work_groups
+        ])
+        summary.setdefault("flexible_off", []).extend([
+            {"candidate_days": days, "n_required": n}
+            for days, n in parsed_note.flexible_off
+        ])
+        if parsed_note.paid_leave_days is not None:
+            summary["paid_leave_days"] = parsed_note.paid_leave_days
+        if parsed_note.requested_holiday_days is not None:
+            summary["requested_holiday_days"] = parsed_note.requested_holiday_days
+        if parsed_note.max_consecutive_work_days is not None:
+            summary["max_consecutive_work_days"] = parsed_note.max_consecutive_work_days
+        if parsed_note.max_consecutive_off_days is not None:
+            summary["max_consecutive_off_days"] = parsed_note.max_consecutive_off_days
+        if parsed_note.preferred_consecutive_off_days is not None:
+            summary["preferred_consecutive_off_days"] = parsed_note.preferred_consecutive_off_days
+        summary.setdefault("ignored_optional_work_days", []).extend(
+            parsed_note.ignored_optional_work_days
+        )
+
+    if parsed_note.off_requests:
+        existing_off = set(data.off_requests.get(author, []))
+        existing_off.update(parsed_note.off_requests)
+        data.off_requests[author] = sorted(existing_off)
+
+    only_on_request = _is_only_on_request_employee(author)
+    existing_preferred_work_days = {
+        (emp, day, store) for emp, day, store in data.preferred_work_requests
+    }
+    for day, store in parsed_note.work_requests:
+        item = (author, day, store)
+        if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
+            data.preferred_work_requests.append(item)
+            existing_preferred_work_days.add(item)
+    for day in parsed_note.ignored_optional_work_days:
+        if not only_on_request:
+            continue
+        item = (author, day, None)
+        if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
+            data.preferred_work_requests.append(item)
+            existing_preferred_work_days.add(item)
+
+    existing_work_groups = {
+        (emp, tuple(candidate_days), required_count, store)
+        for emp, candidate_days, required_count, store in data.preferred_work_groups
+    }
+    for candidate_days, required_count, store in parsed_note.work_groups:
+        filtered_candidates = [
+            day for day in candidate_days
+            if day not in set(data.off_requests.get(author, []))
+        ]
+        if not filtered_candidates:
+            continue
+        item = (
+            author,
+            sorted(set(filtered_candidates)),
+            min(int(required_count), len(set(filtered_candidates))),
+            store,
+        )
+        key = (item[0], tuple(item[1]), item[2], item[3])
+        if key not in existing_work_groups:
+            data.preferred_work_groups.append(item)
+            existing_work_groups.add(key)
+
+    for candidate_days, n_required in parsed_note.flexible_off:
+        data.flexible_off.append((author, candidate_days, n_required))
+
+    if parsed_note.paid_leave_days is not None:
+        data.paid_leave_days[author] = max(
+            int(data.paid_leave_days.get(author, 0) or 0),
+            int(parsed_note.paid_leave_days),
+        )
+
+    if parsed_note.requested_holiday_days is not None:
+        data.requested_holiday_days[author] = int(parsed_note.requested_holiday_days)
+
+    if parsed_note.max_consecutive_work_days is not None:
+        data.max_consecutive_work_days[author] = int(parsed_note.max_consecutive_work_days)
+
+    if parsed_note.max_consecutive_off_days is not None:
+        data.max_consecutive_off_days[author] = int(parsed_note.max_consecutive_off_days)
+
+    if parsed_note.preferred_consecutive_off_days is not None:
+        data.preferred_consecutive_off.append(
+            (author, int(parsed_note.preferred_consecutive_off_days))
+        )
 
 
 def load_submissions_for_month(
@@ -754,6 +925,20 @@ def load_submissions_for_month(
                     data.work_requests.append((author, day, None))
 
         data.submitted_employees.append(author)
+
+    confirmed_adjustments = _load_confirmed_note_adjustments(year, month)
+    for author, corrected_text in confirmed_adjustments.items():
+        if expected_employees and author not in expected_employees:
+            continue
+        parsed_adjustment = parse_natural_language_note(corrected_text, year, month)
+        if parsed_adjustment.has_constraints or parsed_adjustment.ignored_optional_work_days:
+            data.admin_note_adjustments[author] = corrected_text
+            _apply_parsed_note_to_submission_data(
+                data,
+                author,
+                parsed_adjustment,
+                source_label="管理者補正",
+            )
 
     # 未提出者の判定
     if expected_employees:
