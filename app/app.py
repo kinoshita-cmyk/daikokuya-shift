@@ -2195,6 +2195,89 @@ def build_note_reflection_review(
     }
 
 
+def parsed_note_summary_to_labels(summary: dict) -> list[str]:
+    """提出ローダーが実際に生成へ渡す自由記載由来条件を表示用にする。"""
+    if not isinstance(summary, dict):
+        return []
+
+    def _day_list_label(days) -> str:
+        safe_days = []
+        for day in days or []:
+            try:
+                safe_days.append(int(day))
+            except (TypeError, ValueError):
+                continue
+        return "、".join(f"{d}日" for d in sorted(set(safe_days))) if safe_days else "なし"
+
+    def _store_label(store_name) -> str:
+        if not store_name:
+            return ""
+        if hasattr(store_name, "display_name"):
+            return store_name.display_name
+        try:
+            return Store[str(store_name)].display_name
+        except Exception:
+            return str(store_name)
+
+    labels: list[str] = []
+
+    if summary.get("off_requests"):
+        labels.append(f"休み希望（絶対）: {_day_list_label(summary.get('off_requests'))}")
+
+    for item in summary.get("flexible_off") or []:
+        if not isinstance(item, dict):
+            continue
+        labels.append(
+            f"候補休み: {_day_list_label(item.get('candidate_days'))} のうち "
+            f"{int(item.get('n_required', 0) or 0)}日休み"
+        )
+
+    work_parts = []
+    for item in summary.get("work_requests") or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            day = int(item.get("day"))
+        except (TypeError, ValueError):
+            continue
+        store_text = _store_label(item.get("store"))
+        work_parts.append(
+            f"{day}日{(' ' + store_text) if store_text else ''}出勤希望"
+        )
+    if work_parts:
+        labels.append("出勤希望: " + "、".join(work_parts))
+
+    for item in summary.get("work_groups") or []:
+        if not isinstance(item, dict):
+            continue
+        store_text = _store_label(item.get("store"))
+        labels.append(
+            f"候補出勤: {_day_list_label(item.get('candidate_days'))} のうち "
+            f"{int(item.get('required_count', 0) or 0)}日出勤"
+            f"{('（' + store_text + '希望）') if store_text else ''}"
+        )
+
+    requested = summary.get("requested_holiday_days")
+    paid = summary.get("paid_leave_days")
+    if requested is not None and paid is not None:
+        labels.append(f"希望休日数: 合計{int(requested)}日（うち有給{int(paid)}日）")
+    elif requested is not None:
+        labels.append(f"希望休日数: 合計{int(requested)}日")
+    elif paid is not None:
+        labels.append(f"希望有給日数: {int(paid)}日")
+
+    if summary.get("max_consecutive_work_days") is not None:
+        labels.append(f"連勤上限: {int(summary['max_consecutive_work_days'])}連勤まで")
+    if summary.get("max_consecutive_off_days") is not None:
+        labels.append(f"連休上限: {int(summary['max_consecutive_off_days'])}連休まで")
+    if summary.get("preferred_consecutive_off_days") is not None:
+        labels.append(f"連休希望: {int(summary['preferred_consecutive_off_days'])}連休を優先")
+    if summary.get("ignored_optional_work_days"):
+        labels.append(f"任意出勤候補: {_day_list_label(summary.get('ignored_optional_work_days'))}")
+
+    return _unique_label_list(labels)
+
+
 def render_scrollable_request_table(rows: list[dict]) -> None:
     """本人提出希望を横スクロール可能な表で表示する。"""
     if not rows:
@@ -3465,28 +3548,79 @@ if mode == "📊 経営者ビュー":
             int(target_year), int(target_month),
         )
         with st.expander("📝 自由記載レビュー一覧（原文・自動反映・要確認）", expanded=False):
+            actual_note_summaries = {}
+            try:
+                from prototype.submission_loader import load_submissions_for_month
+
+                actual_sub_data_for_review = load_submissions_for_month(
+                    int(target_year), int(target_month), expected_employees,
+                )
+                actual_note_summaries = dict(
+                    getattr(actual_sub_data_for_review, "parsed_note_summaries", {})
+                )
+            except Exception:
+                st.warning("自由記載の最終反映条件を読み込めませんでした。")
+
+            reflection_rows = []
             note_rows = []
             for s in all_note_items:
-                adj = note_adjustments_by_employee.get(s.get("employee", "")) or {}
+                employee_name = s.get("employee", "")
+                adj = note_adjustments_by_employee.get(employee_name) or {}
                 reflection = build_note_reflection_review(
                     s.get("note", "") or s.get("note_excerpt", ""),
                     adj,
                     int(target_year),
                     int(target_month),
                 )
+                actual_final_labels = parsed_note_summary_to_labels(
+                    actual_note_summaries.get(employee_name, {})
+                )
+                reflection_notes = list(reflection.get("notes", []))
+                has_unread_correction = any(
+                    "生成条件として読めていません" in str(note)
+                    for note in reflection_notes
+                )
+                status = str(adj.get("status", "") or "")
+                if status == "反映しない":
+                    reflection_status = "反映しない"
+                elif not actual_final_labels:
+                    reflection_status = "未反映"
+                    if not reflection_notes:
+                        reflection_notes.append("自由記載由来の条件は生成に入りません")
+                elif has_unread_correction:
+                    reflection_status = "一部未反映"
+                elif reflection_notes:
+                    reflection_status = "反映済み（要確認あり）"
+                else:
+                    reflection_status = "反映済み"
+
+                reflection_rows.append({
+                    "氏名": employee_name,
+                    "反映判定": reflection_status,
+                    "実際に生成へ渡る自由記載条件": " / ".join(actual_final_labels) or "-",
+                    "未反映・確認ポイント": " / ".join(_unique_label_list(reflection_notes)) or "-",
+                    "反映方式": reflection.get("source_label", "-"),
+                })
                 note_rows.append({
-                    "氏名": s.get("employee", ""),
+                    "氏名": employee_name,
                     "判定": s.get("note_parse_status", ""),
                     "自動反映": " / ".join(s.get("note_auto_labels", [])) or "-",
                     "要確認": " / ".join(s.get("note_review_labels", [])) or "-",
                     "管理者補正": adj.get("corrected_text", "") or "-",
                     "補正の読取": " / ".join(reflection.get("correction_auto_labels", [])) or "-",
-                    "最終反映条件": " / ".join(reflection.get("final_labels", [])) or "-",
+                    "最終反映条件": " / ".join(actual_final_labels) or "-",
                     "反映方式": reflection.get("source_label", "-"),
-                    "確認メモ": " / ".join(reflection.get("notes", [])) or "-",
+                    "確認メモ": " / ".join(_unique_label_list(reflection_notes)) or "-",
                     "補正状態": adj.get("status", "") or "-",
                     "原文": s.get("note", "") or s.get("note_excerpt", ""),
                 })
+            st.markdown("##### 自由記載の反映チェック（生成に入る最終条件）")
+            st.dataframe(reflection_rows, width="stretch", hide_index=True)
+            st.caption(
+                "この表の「実際に生成へ渡る自由記載条件」が、自由記載・管理者補正から生成へ入る最終条件です。"
+                "「一部未反映」「未反映」がある場合は、補正メモを直すか、反映しない扱いにしてください。"
+            )
+            st.markdown("##### 詳細（原文・自動反映・管理者補正）")
             st.dataframe(note_rows, width="stretch", hide_index=True)
             st.caption(
                 "補正状態が「確認済み」の場合は自動反映に管理者補正を追加します。"
