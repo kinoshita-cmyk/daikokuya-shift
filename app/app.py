@@ -4295,8 +4295,8 @@ if mode == "📊 経営者ビュー":
                 from calendar import monthrange as _mr
                 days_in_m = _mr(_saved_target_year, _saved_target_month)[1]
                 solver_limit_seconds = max(
-                    180,
-                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 180)),
+                    240,
+                    int(rule_cfg.parameters.get("solver_time_limit_seconds", 240)),
                 )
 
                 progress_area.info(
@@ -7564,7 +7564,7 @@ elif mode == "⚙️ 設定":
             },
             "solver_time_limit_seconds": {
                 "label": "ソルバー最大実行時間（秒）",
-                "min": 10, "max": 600, "default": 180,
+                "min": 10, "max": 600, "default": 240,
                 "help": "シフト生成に使う最大秒数です。",
                 "safe": None,
             },
