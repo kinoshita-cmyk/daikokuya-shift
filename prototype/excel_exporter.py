@@ -79,6 +79,24 @@ SHORT_STAFF_STORE_LABELS = {
     Store.SUZURAN: "◆すずらん",
 }
 
+STORE_EXPORT_FILLS = {
+    Store.AKABANE: "FEF3C7",       # 黄色
+    Store.HIGASHIGUCHI: "DBEAFE",  # 青
+    Store.OMIYA: "DCFCE7",         # 緑
+    Store.NISHIGUCHI: "FCE7F3",    # ピンク
+    Store.SUZURAN: "E5E7EB",       # グレー
+    Store.OFF: "F3F4F6",           # 休み
+}
+
+STORE_EXPORT_FONT_COLORS = {
+    Store.AKABANE: "92400E",
+    Store.HIGASHIGUCHI: "1D4ED8",
+    Store.OMIYA: "15803D",
+    Store.NISHIGUCHI: "BE185D",
+    Store.SUZURAN: "111827",
+    Store.OFF: "6B7280",
+}
+
 DEFAULT_FOOTER_NOTES = [
     "※25日までに翌月のお休み又は出勤希望日を、ご連絡ください。（お忘れなく！！）",
     "※出勤基準日数（の目安）と違いがある場合は、希望するお休み日数と消化する有給休暇日数もお願いします。",
@@ -144,6 +162,7 @@ def export_shift_to_excel(
     footer_notes: Optional[list[str]] = None,
     short_staff_days: Optional[object] = None,
     key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
+    color_output: bool = True,
 ) -> Path:
     """
     シフトを Excel に出力する（テンプレート完全互換・A4縦）。
@@ -156,6 +175,7 @@ def export_shift_to_excel(
         footer_notes: 表の下の注意書き（任意の行数）
         short_staff_days: 「人員少」マークを付ける日のリスト、または {日: {店舗}} の辞書
         key_warnings_by_store: 鍵確認の {日: {店舗: "missing"|"support"}}
+        color_output: True の場合、店舗記号セルに画面に近い背景色を付ける
 
     Returns:
         実際に書き込んだファイルパス
@@ -200,6 +220,10 @@ def export_shift_to_excel(
     legend_font = Font(name=JP_FONT, size=36, bold=True)
     header_font = Font(name=JP_FONT, size=24, bold=True)
     cell_font = Font(name=JP_FONT, size=35, bold=False)
+    store_fonts = {
+        store: Font(name=JP_FONT, size=35, bold=False, color=color)
+        for store, color in STORE_EXPORT_FONT_COLORS.items()
+    }
     note_font = Font(name=JP_FONT, size=27, bold=True)
 
     # 罫線・スタイル
@@ -325,7 +349,12 @@ def export_shift_to_excel(
             a = shift.get_assignment(name, d)
             value = a.store.value if a else ""
             c = ws.cell(row=row, column=col, value=value)
-            c.font = cell_font
+            if color_output and a and a.store in STORE_EXPORT_FILLS:
+                color = STORE_EXPORT_FILLS[a.store]
+                c.fill = PatternFill(start_color=color, end_color=color, fill_type="solid")
+                c.font = store_fonts.get(a.store, cell_font)
+            else:
+                c.font = cell_font
             c.alignment = center
             c.border = border
 

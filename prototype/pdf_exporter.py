@@ -25,6 +25,8 @@ from .excel_exporter import (
     DEFAULT_FOOTER_NOTES,
     EXPORT_COLUMN_ORDER,
     SHORT_STAFF_STORE_LABELS,
+    STORE_EXPORT_FILLS,
+    STORE_EXPORT_FONT_COLORS,
     detect_key_warnings_by_store,
     format_key_warning_text,
 )
@@ -164,12 +166,14 @@ def _draw_text(
     font_size: float,
     align: str = "center",
     bold: bool = False,
+    text_color=colors.black,
 ) -> None:
     text = "" if text is None else str(text)
     if not text:
         return
     text_font_name = font_name
     size = _fit_font_size(text, text_font_name, font_size, w, h)
+    c.setFillColor(text_color)
     c.setFont(text_font_name, size)
     text_y = y + (h - size) / 2 + size * 0.18
     if align == "left":
@@ -190,14 +194,14 @@ def _draw_cell(
     align: str = "center",
     fill_color=colors.white,
     stroke_color=colors.black,
+    text_color=colors.black,
     line_width: float = 0.35,
 ) -> None:
     c.setFillColor(fill_color)
     c.setStrokeColor(stroke_color)
     c.setLineWidth(line_width)
     c.rect(x, y, w, h, stroke=1, fill=1)
-    c.setFillColor(colors.black)
-    _draw_text(c, text, x, y, w, h, font_name, font_size, align=align)
+    _draw_text(c, text, x, y, w, h, font_name, font_size, align=align, text_color=text_color)
 
 
 def export_shift_to_pdf(
@@ -208,6 +212,7 @@ def export_shift_to_pdf(
     footer_notes: Optional[list[str]] = None,
     short_staff_days: Optional[object] = None,
     key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
+    color_output: bool = True,
 ) -> Path:
     """
     シフトを Excel 印刷イメージに合わせた A4 縦 1ページ PDF に出力する。
@@ -367,9 +372,17 @@ def export_shift_to_pdf(
             col_idx = 2 + i
             assignment = shift.get_assignment(emp_name, day)
             value = assignment.store.value if assignment else ""
+            store_fill = colors.white
+            store_text_color = colors.black
+            if color_output and assignment and assignment.store in STORE_EXPORT_FILLS:
+                store_fill = colors.HexColor(f"#{STORE_EXPORT_FILLS[assignment.store]}")
+                store_text_color = colors.HexColor(f"#{STORE_EXPORT_FONT_COLORS.get(assignment.store, '000000')}")
             _draw_cell(
                 pdf, col_x(col_idx), y, col_widths[col_idx], data_h,
-                value, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+                value, font_name, FONT_SIZES["cell"] * scale,
+                fill_color=store_fill,
+                text_color=store_text_color,
+                line_width=line_width,
             )
 
         _draw_cell(
