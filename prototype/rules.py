@@ -262,7 +262,7 @@ MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 # 月内の最低巡回条件。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {
-    "黒澤": [((Store.SUZURAN,), 2)],
+    "黒澤": [((Store.SUZURAN,), 5)],
     "牧野": [((Store.AKABANE,), 3), ((Store.SUZURAN,), 3)],
     "下田": [((Store.AKABANE,), 1), ((Store.OMIYA,), 1)],
 }

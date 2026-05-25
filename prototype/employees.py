@@ -13,6 +13,11 @@
 - 代表（あなた）はシステム管理者で、シフトには入らない
 """
 
+from __future__ import annotations
+
+from calendar import monthrange
+from datetime import date
+
 from .models import (
     Employee, Skill, Role, Store, StationType, Affinity, EmploymentStatus,
 )
@@ -48,7 +53,7 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.AKABANE: Affinity.MEDIUM,
-            Store.SUZURAN: Affinity.WEAK,
+            Store.SUZURAN: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 配置不可
             Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
             Store.OMIYA: Affinity.NONE,
@@ -193,7 +198,7 @@ TICKET_STAFF: list[Employee] = [
         affinities={
             Store.AKABANE: Affinity.STRONG,
             Store.OMIYA: Affinity.WEAK,           # 大宮+すずらん合わせて弱
-            Store.SUZURAN: Affinity.WEAK,
+            Store.SUZURAN: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
@@ -240,13 +245,13 @@ TICKET_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.OMIYA: Affinity.STRONG,
-            Store.SUZURAN: Affinity.WEAK,
+            Store.SUZURAN: Affinity.MEDIUM,
             Store.AKABANE: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
         annual_target_days=260,
-        notes="大宮強、すずらん弱。月に数回はすずらん、状況により赤羽応援あり",
+        notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: すずらん5回以上。",
     ),
     Employee(
         name="野澤",
@@ -379,6 +384,54 @@ def get_employee(name: str) -> Employee:
         if e.name == name:
             return e
     raise KeyError(f"従業員が見つかりません: {name}")
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    """YYYY-MM-DD の入社日を date に変換する。"""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
+
+
+def _add_months(value: date, months: int) -> date:
+    """月末日を考慮して date に月数を足す。"""
+    month_index = value.month - 1 + months
+    year = value.year + month_index // 12
+    month = month_index % 12 + 1
+    day = min(value.day, monthrange(year, month)[1])
+    return date(year, month, day)
+
+
+def is_probationary_employee(
+    employee: Employee,
+    target_year: int,
+    target_month: int,
+    target_day: int | None = None,
+) -> bool:
+    """
+    入社日から2か月間の試用期間かどうか。
+
+    試用期間者は希望提出は受けるが、自動生成・通常検証の人数対象には含めない。
+    月単位の生成では、対象月に試用期間が1日でも重なれば対象外として扱う。
+    """
+    hired_on = _parse_iso_date(employee.hired_at)
+    if hired_on is None:
+        return False
+
+    probation_end = _add_months(hired_on, 2)
+    if target_day is not None:
+        try:
+            target = date(int(target_year), int(target_month), int(target_day))
+        except ValueError:
+            return False
+        return hired_on <= target < probation_end
+
+    month_start = date(int(target_year), int(target_month), 1)
+    next_month = _add_months(month_start, 1)
+    return month_start < probation_end and next_month > hired_on
 
 
 def shift_active_employees() -> list[Employee]:

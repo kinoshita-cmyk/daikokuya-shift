@@ -108,12 +108,43 @@ _FULLWIDTH_TRANS = str.maketrans(
         "．": ".",
         "：": ":",
         "　": " ",
+        "〜": "-",
+        "～": "-",
+        "－": "-",
+        "―": "-",
+        "–": "-",
+        "—": "-",
+        "＋": "+",
+        "➕": "+",
     }
 )
 
 
 def _normalize_note_text(text: str) -> str:
     return (text or "").translate(_FULLWIDTH_TRANS)
+
+
+def _strip_greeting_only_text(text: str) -> str:
+    """挨拶・定型文だけなら空文字に寄せる。"""
+    normalized = _normalize_note_text(text)
+    patterns = [
+        r"よろしくお願いいたします",
+        r"よろしくお願い致します",
+        r"よろしくお願いします",
+        r"宜しくお願いいたします",
+        r"宜しくお願い致します",
+        r"宜しくお願いします",
+        r"お願いします",
+        r"お願いいたします",
+        r"お願い致します",
+        r"です",
+        r"ます",
+    ]
+    cleaned = normalized
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"[\s。．.,、!！?？]+", "", cleaned)
+    return cleaned
 
 
 def _safe_day(day, days_in_month: int) -> Optional[int]:
@@ -230,7 +261,11 @@ def _extract_number(patterns: list[str], text: str) -> Optional[int]:
 def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
     """「3連勤NG」「3連休は避けたい」なら上限2として返す。"""
     normalized = _normalize_note_text(text)
-    negative_words = r"(?:NG|不可|禁止|だめ|ダメ|避けたい|避けて|なし|無し|無理)"
+    negative_words = (
+        r"(?:NG|不可|禁止|だめ|ダメ|避けたい|避けて|なし|無し|無理|"
+        r"不要|いらない|いりません|要らない|要りません|必要ない|"
+        r"必要ありません|なくていい|なくてもいい)"
+    )
     patterns = [
         rf"(\d{{1,2}})\s*{label}[^。\n]{{0,24}}?{negative_words}",
         rf"{negative_words}[^。\n]{{0,24}}?(\d{{1,2}})\s*{label}",
@@ -245,6 +280,20 @@ def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
             if value >= 2:
                 return value - 1
     return None
+
+
+def _has_consecutive_off_negation(text: str) -> bool:
+    """「連休はいりません」のような、連休希望ではない表現を拾う。"""
+    normalized = _normalize_note_text(text)
+    negative_words = (
+        r"(?:不要|いらない|いりません|要らない|要りません|必要ない|"
+        r"必要ありません|なくていい|なくてもいい|希望しない|希望しません|なし|無し)"
+    )
+    patterns = [
+        rf"連休[^。\n]{{0,18}}?{negative_words}",
+        rf"{negative_words}[^。\n]{{0,18}}?連休",
+    ]
+    return any(re.search(pattern, normalized, flags=re.IGNORECASE) for pattern in patterns)
 
 
 def _extract_store_from_text(text: str) -> Optional[Store]:
@@ -332,6 +381,8 @@ def parse_natural_language_note(
     normalized = _normalize_note_text(note)
     if not normalized.strip():
         return result
+    if not _strip_greeting_only_text(normalized):
+        return result
     days_in_month = monthrange(target_year, target_month)[1]
     sentences = [
         s.strip()
@@ -353,7 +404,9 @@ def parse_natural_language_note(
         [
             r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日",
             r"(?:休み|休日|休暇)(?:は|を)?\s*(\d{1,2})\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
+            r"(?:休み|休日|休暇)日数\s*(\d{1,2})\s*(?:日)?\s*(?:希望)?",
             r"(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:お)?休み",
+            r"(?:有給|有休)[^。\n]{0,24}?(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:希望|お願い|いただきたい)",
             r"(\d{1,2})\s*日間\s*(?:お)?休み",
             r"月の休みは\s*(\d{1,2})\s*回",
             r"(\d{1,2})\s*日休暇",
@@ -379,15 +432,24 @@ def parse_natural_language_note(
     if max_consecutive_off is not None:
         result.max_consecutive_off_days = max_consecutive_off
 
+    consecutive_off_negated = _has_consecutive_off_negation(normalized)
     consecutive_off = _extract_number([r"(\d{1,2})\s*連休"], normalized)
     if consecutive_off is not None and consecutive_off >= 2:
-        if max_consecutive_off is None:
+        if max_consecutive_off is None and not consecutive_off_negated:
             result.preferred_consecutive_off_days = consecutive_off
     elif (
         max_consecutive_off is None
+        and not consecutive_off_negated
         and "連休" in normalized
         and any(word in normalized for word in ("ほしい", "欲しい", "希望", "取りたい", "ください"))
-        and not any(word in normalized for word in ("NG", "不可", "禁止", "だめ", "ダメ", "避けたい", "避けて", "なし", "無し", "無理"))
+        and not any(
+            word in normalized
+            for word in (
+                "NG", "不可", "禁止", "だめ", "ダメ", "避けたい", "避けて",
+                "なし", "無し", "無理", "不要", "いらない", "いりません",
+                "要らない", "要りません", "必要ない", "必要ありません",
+            )
+        )
     ):
         # 「連休がほしい」のように日数指定がない場合は、最低限の2連休希望として扱う。
         result.preferred_consecutive_off_days = 2
