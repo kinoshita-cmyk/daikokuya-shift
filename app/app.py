@@ -2995,6 +2995,27 @@ def monthly_rule_display_text(rule: dict) -> str:
     )
 
 
+def custom_monthly_rule_display_text(rule: CustomRule) -> str:
+    """CustomRule を月別特別ルール一覧・削除UIで見やすく表示する。"""
+    rule_type = getattr(rule, "rule_type", "note")
+    if rule_type == "employee_store_count":
+        return monthly_rule_display_text({
+            "name": rule.name,
+            "employee": rule.employee,
+            "stores": list(rule.stores),
+            "count": rule.count,
+            "comparison": getattr(rule, "comparison", "min"),
+        })
+    if rule_type == "required_assignment":
+        return monthly_rule_display_text({
+            "name": rule.name,
+            "employee": rule.employee,
+            "stores": list(rule.stores),
+            "day": getattr(rule, "day", 0),
+        })
+    return f"{rule.name}: {rule.description}"
+
+
 def advisor_candidate_limit(year: int, month: int) -> int:
     """顧問を候補として試算する最大日数。自動確定はしない。"""
     # 2026年5月はGWの希望休集中に加え、牧野さんの東口・西口単独NGを反映すると
@@ -3872,20 +3893,9 @@ if mode == "📊 経営者ビュー":
             if not employee:
                 continue
             if getattr(rule, "rule_type", "note") == "employee_store_count":
-                label = monthly_rule_display_text({
-                    "name": rule.name,
-                    "employee": rule.employee,
-                    "stores": list(rule.stores),
-                    "count": rule.count,
-                    "comparison": getattr(rule, "comparison", "min"),
-                })
+                label = custom_monthly_rule_display_text(rule)
             elif getattr(rule, "rule_type", "note") == "required_assignment":
-                label = monthly_rule_display_text({
-                    "name": rule.name,
-                    "employee": rule.employee,
-                    "stores": list(rule.stores),
-                    "day": getattr(rule, "day", 0),
-                })
+                label = custom_monthly_rule_display_text(rule)
             else:
                 label = f"月別メモ: {rule.name}"
             monthly_custom_by_employee.setdefault(employee, []).append(label)
@@ -3999,27 +4009,89 @@ if mode == "📊 経営者ビュー":
         else:
             st.caption("この月だけの追加ルールは未設定です。")
 
+        deletable_rules = [
+            rule for rule in current_custom_rules
+            if getattr(rule, "id", "")
+        ]
+        if deletable_rules:
+            with st.expander("追加済みルールを削除", expanded=False):
+                rule_labels = {
+                    rule.id: custom_monthly_rule_display_text(rule)
+                    for rule in deletable_rules
+                }
+                delete_rule_id = st.selectbox(
+                    "削除するルール",
+                    options=[rule.id for rule in deletable_rules],
+                    format_func=lambda rule_id: rule_labels.get(rule_id, rule_id),
+                    key=f"delete_monthly_rule_select_{int(target_year)}_{int(target_month)}",
+                )
+                st.caption(
+                    "削除すると、この月の生成・検証条件から外れます。"
+                    "提出データや作成済みシフトそのものは削除しません。"
+                )
+                if st.button(
+                    "選択した特別ルールを削除",
+                    key=f"delete_monthly_rule_button_{int(target_year)}_{int(target_month)}",
+                    type="secondary",
+                ):
+                    target_rule = next(
+                        (rule for rule in deletable_rules if rule.id == delete_rule_id),
+                        None,
+                    )
+                    next_cfg = RuleConfig(
+                        enabled_checks=dict(rule_cfg.enabled_checks),
+                        parameters=dict(rule_cfg.parameters),
+                        custom_rules=[
+                            rule for rule in rule_cfg.custom_rules
+                            if getattr(rule, "id", "") != delete_rule_id
+                        ],
+                    )
+                    rule_mgr.save(
+                        next_cfg,
+                        actor="管理者",
+                        note=(
+                            f"{int(target_year)}年{int(target_month)}月の特別ルール削除"
+                            + (f": {target_rule.name}" if target_rule else "")
+                        ),
+                    )
+                    st.success("選択した特別ルールを削除しました。")
+                    st.rerun()
+
+        st.markdown("##### 特別ルールを追加")
+        rule_mode = st.radio(
+            "反映方法",
+            ["メモとして残す", "生成にも反映する（月内回数）", "生成にも反映する（日付指定配置）"],
+            horizontal=True,
+            key=f"quick_monthly_rule_mode_{int(target_year)}_{int(target_month)}",
+            help=(
+                "月内回数は「月に3回以上」など、日付指定配置は「4日は大宮駅前」などを"
+                "シフト計算に渡します。文章の細かい条件は備考として残ります。"
+            ),
+        )
+
         with st.form(
             f"quick_monthly_rule_form_{int(target_year)}_{int(target_month)}",
             clear_on_submit=True,
         ):
-            st.markdown("##### 特別ルールを追加")
-            rule_mode = st.radio(
-                "反映方法",
-                ["メモとして残す", "生成にも反映する（月内回数）", "生成にも反映する（日付指定配置）"],
-                horizontal=True,
-                help=(
-                    "月内回数は「月に3回以上」など、日付指定配置は「4日は大宮駅前」などを"
-                    "シフト計算に渡します。文章の細かい条件は備考として残ります。"
-                ),
+            is_store_count_rule = rule_mode == "生成にも反映する（月内回数）"
+            is_required_assignment_rule = rule_mode == "生成にも反映する（日付指定配置）"
+            name_placeholder = (
+                "例: 春山さん4日大宮駅前"
+                if is_required_assignment_rule
+                else "例: 牧野さんの西口研修"
+            )
+            desc_placeholder = (
+                "例: 酒類小売販売研修のため、4日は春山さんを大宮駅前に固定する"
+                if is_required_assignment_rule
+                else "例: 牧野さんを研修のため、楯さんが西口勤務の時に一緒に3回だけ入れる"
             )
             quick_rule_name = st.text_input(
                 "見出し",
-                placeholder="例: 牧野さんの西口研修",
+                placeholder=name_placeholder,
             )
             quick_rule_desc = st.text_area(
                 "内容",
-                placeholder="例: 牧野さんを研修のため、楯さんが西口勤務の時に一緒に3回だけ入れる",
+                placeholder=desc_placeholder,
                 height=80,
             )
             employee_options = ["指定なし"] + shift_submission_employee_names()
@@ -4028,8 +4100,6 @@ if mode == "📊 経営者ビュー":
             quick_count = 0
             quick_comparison = "min"
             quick_day = 0
-            is_store_count_rule = rule_mode == "生成にも反映する（月内回数）"
-            is_required_assignment_rule = rule_mode == "生成にも反映する（日付指定配置）"
             if is_store_count_rule:
                 store_options = [s.name for s in Store if s != Store.OFF]
                 store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
@@ -4075,6 +4145,12 @@ if mode == "📊 経営者ビュー":
                 quick_stores = [quick_store]
                 quick_count = 1
                 quick_comparison = "exact"
+                if quick_employee != "指定なし":
+                    st.caption(
+                        "登録される生成条件: "
+                        f"{quick_employee} / {int(quick_day)}日 / "
+                        f"{monthly_rule_store_label(quick_stores)}に配置"
+                    )
             quick_severity = st.selectbox(
                 "重要度",
                 ["WARNING", "ERROR"],
@@ -4099,17 +4175,31 @@ if mode == "📊 経営者ビュー":
                         or quick_day <= 0
                     )
                 )
-                if not quick_rule_name or not quick_rule_desc:
+                if not quick_rule_name or (
+                    not quick_rule_desc
+                    and not (is_store_count_rule or is_required_assignment_rule)
+                ):
                     st.error("見出しと内容を入力してください。")
                 elif missing_structured:
                     st.error("生成にも反映する場合は、スタッフ・店舗・回数を入力してください。")
                 elif missing_required_assignment:
                     st.error("日付指定配置の場合は、スタッフ・日付・店舗を入力してください。")
                 else:
+                    auto_desc = ""
+                    if is_required_assignment_rule:
+                        auto_desc = (
+                            f"{quick_employee}を{int(target_month)}/{int(quick_day)}に"
+                            f"{monthly_rule_store_label(quick_stores)}へ配置する。"
+                        )
+                    elif is_store_count_rule:
+                        auto_desc = (
+                            f"{quick_employee}を{monthly_rule_store_label(quick_stores)}へ"
+                            f"{format_monthly_rule_condition({'count': quick_count, 'comparison': quick_comparison})}配置する。"
+                        )
                     new_rule = CustomRule(
                         id=f"monthly_{datetime.now().strftime('%Y%m%d%H%M%S')}",
                         name=quick_rule_name,
-                        description=quick_rule_desc,
+                        description=quick_rule_desc or auto_desc,
                         enabled=True,
                         severity=quick_severity,
                         created_at=datetime.now().isoformat(),
