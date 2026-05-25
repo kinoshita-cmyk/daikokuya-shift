@@ -585,7 +585,12 @@ def parse_natural_language_note(
             sentence_days = []
 
         is_total_holiday_sentence = any(
-            word in sentence for word in ("日間", "計", "合計", "平均", "有給", "有休", "月の休み")
+            word in sentence
+            for word in (
+                "日間", "計", "合計", "総計", "トータル", "平均",
+                "有給", "有休", "公休", "基本休", "通常休",
+                "月の休み", "休み日数", "休日数",
+            )
         )
         is_direct_off_sentence = bool(
             re.search(
