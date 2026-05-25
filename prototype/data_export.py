@@ -34,9 +34,10 @@ ZIP 構造:
 from __future__ import annotations
 import io
 import json
+import re
 import shutil
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -148,6 +149,8 @@ class RestoreResult:
     skipped_files: int
     errors: list[str]
     metadata: Optional[dict] = None
+    github_synced_files: int = 0
+    github_errors: list[str] = field(default_factory=list)
 
 
 def restore_from_zip(
@@ -168,10 +171,12 @@ def restore_from_zip(
     """
     result = RestoreResult(
         success=True, restored_files=0, skipped_files=0,
-        errors=[],
+        errors=[], github_errors=[],
     )
     try:
         buffer = io.BytesIO(zip_bytes)
+        restored_paths: list[Path] = []
+        sync_candidate_paths: list[Path] = []
         with zipfile.ZipFile(buffer, "r") as zf:
             # メタデータ読み込み（任意）
             try:
@@ -201,6 +206,8 @@ def restore_from_zip(
                 target_path = PROJECT_ROOT / info.filename
                 if target_path.exists() and not overwrite:
                     result.skipped_files += 1
+                    if not dry_run:
+                        sync_candidate_paths.append(target_path)
                     continue
 
                 if not dry_run:
@@ -210,7 +217,41 @@ def restore_from_zip(
                     with zf.open(info.filename) as src:
                         with open(target_path, "wb") as dst:
                             dst.write(src.read())
+                    restored_paths.append(target_path)
                 result.restored_files += 1
+        critical_paths = list(dict.fromkeys(restored_paths + sync_candidate_paths))
+        if not dry_run and critical_paths:
+            try:
+                from .github_backup import (
+                    is_github_backup_enabled,
+                    push_lock_to_github,
+                    push_shift_to_github,
+                )
+
+                if is_github_backup_enabled():
+                    for path in critical_paths:
+                        rel = path.relative_to(PROJECT_ROOT).as_posix()
+                        lock_match = re.fullmatch(r"locks/(\d{4})-(\d{2})\.lock", rel)
+                        finalized_match = re.fullmatch(
+                            r"backups/(\d{4})-(\d{2})/(shift_finalized.+\.json)",
+                            rel,
+                        )
+                        if lock_match:
+                            year, month = int(lock_match.group(1)), int(lock_match.group(2))
+                            ok, msg = push_lock_to_github(path, year, month, action="lock")
+                            if ok:
+                                result.github_synced_files += 1
+                            else:
+                                result.github_errors.append(f"{rel}: {msg}")
+                        elif finalized_match:
+                            year, month = int(finalized_match.group(1)), int(finalized_match.group(2))
+                            ok, msg = push_shift_to_github(path, year, month, kind="finalized")
+                            if ok:
+                                result.github_synced_files += 1
+                            else:
+                                result.github_errors.append(f"{rel}: {msg}")
+            except Exception as e:
+                result.github_errors.append(f"GitHub再同期: {type(e).__name__}: {e}")
     except zipfile.BadZipFile:
         result.success = False
         result.errors.append("ZIPファイルとして読み込めません（破損または不正な形式）")

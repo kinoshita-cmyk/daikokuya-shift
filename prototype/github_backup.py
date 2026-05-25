@@ -43,6 +43,7 @@ SECRET_GITHUB_BACKUP_REPO = "GITHUB_BACKUP_REPO"
 
 _SYNCED_PREFERENCE_MONTHS: set[str] = set()
 _SYNCED_CONFIG_NAMES: set[str] = set()
+_SYNCED_LOCK_MONTHS: set[str] = set()
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -137,6 +138,49 @@ def _push_file(
         return False, "タイムアウト"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _fetch_repo_file(repo_path: str, timeout: int = 8) -> tuple[bool, bytes, str]:
+    """GitHub上の1ファイルを取得する。"""
+    if not is_github_backup_enabled():
+        return False, b"", "未設定"
+    repo = _get_repo()
+    url = f"https://api.github.com/repos/{repo}/contents/{repo_path}"
+    try:
+        response = requests.get(url, headers=_github_headers(), timeout=timeout)
+        if response.status_code == 404:
+            return False, b"", "見つかりません"
+        if response.status_code != 200:
+            return False, b"", f"HTTP {response.status_code}"
+        data = response.json()
+        encoded = str(data.get("content", "")).replace("\n", "")
+        if not encoded:
+            return False, b"", "内容が空です"
+        return True, base64.b64decode(encoded), "OK"
+    except requests.exceptions.Timeout:
+        return False, b"", "タイムアウト"
+    except Exception as e:
+        return False, b"", f"{type(e).__name__}: {e}"
+
+
+def _fetch_github_item_content(item: dict, timeout: int = 8) -> tuple[bool, bytes, str]:
+    """GitHub contents API の item からファイル内容を取得する。"""
+    try:
+        file_url = item.get("url")
+        if not file_url:
+            return False, b"", "GitHub応答にURLがありません"
+        response = requests.get(file_url, headers=_github_headers(), timeout=timeout)
+        if response.status_code != 200:
+            return False, b"", f"HTTP {response.status_code}"
+        data = response.json()
+        encoded = str(data.get("content", "")).replace("\n", "")
+        if not encoded:
+            return False, b"", "内容が空です"
+        return True, base64.b64decode(encoded), "OK"
+    except requests.exceptions.Timeout:
+        return False, b"", "タイムアウト"
+    except Exception as e:
+        return False, b"", f"{type(e).__name__}: {e}"
 
 
 def sync_preferences_from_github(
@@ -314,6 +358,132 @@ def sync_latest_config_from_github(
         return False, f"{type(e).__name__}: {e}"
 
 
+def sync_latest_lock_and_snapshot_from_github(
+    year: int,
+    month: int,
+    local_backup_dir: Path,
+    local_lock_dir: Path,
+    timeout: int = 8,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """
+    GitHubバックアップ上のロック情報と確定シフト本体をローカルへ復元する。
+
+    Streamlit Cloud の再起動で locks/ や backups/ が消えても、
+    前月ロックを自動的に戻して連勤持ち越しへ使えるようにする。
+    """
+    if not is_github_backup_enabled():
+        return False, "未設定"
+
+    year = int(year)
+    month = int(month)
+    sync_key = f"{year:04d}-{month:02d}"
+    if not force and sync_key in _SYNCED_LOCK_MONTHS:
+        return False, "同期済み"
+
+    repo = _get_repo()
+    headers = _github_headers()
+    local_lock_dir = Path(local_lock_dir)
+    local_backup_dir = Path(local_backup_dir)
+    local_lock_dir.mkdir(parents=True, exist_ok=True)
+    local_month_dir = local_backup_dir / sync_key
+    local_month_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = local_lock_dir / f"{sync_key}.lock"
+
+    try:
+        selected_action = ""
+        selected_content: Optional[bytes] = None
+        history_url = f"https://api.github.com/repos/{repo}/contents/locks/{sync_key}"
+        history_response = requests.get(history_url, headers=headers, timeout=timeout)
+        if history_response.status_code == 200:
+            items = history_response.json()
+            if isinstance(items, list):
+                candidates = [
+                    item for item in items
+                    if str(item.get("name", "")).endswith(".json")
+                    and (
+                        str(item.get("name", "")).startswith("lock_")
+                        or str(item.get("name", "")).startswith("unlock_")
+                    )
+                ]
+                if candidates:
+                    selected = sorted(candidates, key=lambda item: str(item.get("name", "")))[-1]
+                    selected_action = "unlock" if str(selected.get("name", "")).startswith("unlock_") else "lock"
+                    ok, content, msg = _fetch_github_item_content(selected, timeout=timeout)
+                    if ok:
+                        selected_content = content
+                    else:
+                        return False, msg
+
+        # 旧実装/最新ミラー用。履歴がない場合だけ locks/YYYY-MM.lock を見る。
+        if selected_content is None:
+            ok, content, _msg = _fetch_repo_file(f"locks/{sync_key}.lock", timeout=timeout)
+            if ok:
+                selected_action = "lock"
+                selected_content = content
+
+        if selected_content is None:
+            _SYNCED_LOCK_MONTHS.add(sync_key)
+            return False, "GitHub上にロック情報なし"
+
+        if selected_action == "unlock":
+            if lock_path.exists():
+                archive_dir = local_lock_dir / "archive"
+                archive_dir.mkdir(parents=True, exist_ok=True)
+                archive_path = archive_dir / f"{sync_key}_unlocked_sync.json"
+                lock_path.replace(archive_path)
+            _SYNCED_LOCK_MONTHS.add(sync_key)
+            return True, f"{sync_key} はGitHub上でロック解除済み"
+
+        lock_data = json.loads(selected_content.decode("utf-8"))
+        snapshot_file = str(lock_data.get("snapshot_file", "")).strip()
+        if not snapshot_file:
+            return False, "ロック情報に確定シフト名がありません"
+        with open(lock_path, "wb") as f:
+            f.write(selected_content)
+
+        snapshot_path = local_month_dir / snapshot_file
+        if not snapshot_path.exists():
+            ok, content, _msg = _fetch_repo_file(
+                f"backups/{sync_key}/{snapshot_file}",
+                timeout=timeout,
+            )
+            if ok:
+                with open(snapshot_path, "wb") as f:
+                    f.write(content)
+            else:
+                shifts_url = f"https://api.github.com/repos/{repo}/contents/shifts/{sync_key}"
+                shifts_response = requests.get(shifts_url, headers=headers, timeout=timeout)
+                if shifts_response.status_code == 200:
+                    shift_items = shifts_response.json()
+                    if isinstance(shift_items, list):
+                        finalized = [
+                            item for item in shift_items
+                            if str(item.get("name", "")).startswith("finalized_")
+                            and str(item.get("name", "")).endswith(".json")
+                        ]
+                        if finalized:
+                            selected_shift = sorted(finalized, key=lambda item: str(item.get("name", "")))[-1]
+                            ok, content, msg = _fetch_github_item_content(
+                                selected_shift, timeout=timeout,
+                            )
+                            if ok:
+                                with open(snapshot_path, "wb") as f:
+                                    f.write(content)
+                            else:
+                                return False, msg
+
+        if not snapshot_path.exists():
+            return False, "ロックは復元しましたが、確定シフト本体が見つかりません"
+
+        _SYNCED_LOCK_MONTHS.add(sync_key)
+        return True, f"{sync_key} のロックと確定シフトを復元"
+    except requests.exceptions.Timeout:
+        return False, "タイムアウト"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
 # ============================================================
 # 公開 API（用途別バックアップ関数）
 # ============================================================
@@ -445,7 +615,9 @@ def push_shift_to_github(
     """
     確定シフトを GitHub にプッシュ。
 
-    保存先: shifts/YYYY-MM/{kind}_TIMESTAMP.json
+    保存先:
+      - backups/YYYY-MM/{ローカルファイル名}（アプリが復元時にそのまま読める主保存）
+      - shifts/YYYY-MM/{kind}_TIMESTAMP.json（履歴用の予備保存）
     """
     if not is_github_backup_enabled():
         return False, "未設定"
@@ -454,10 +626,26 @@ def push_shift_to_github(
         if not local_file_path.exists():
             return False, "ローカルファイルが見つからない"
         ts = now_jst().strftime("%Y%m%d-%H%M%S")
-        repo_path = f"shifts/{year:04d}-{month:02d}/{kind}_{ts}.json"
+        primary_repo_path = (
+            f"backups/{year:04d}-{month:02d}/"
+            f"{local_file_path.name}"
+        )
+        legacy_repo_path = f"shifts/{year:04d}-{month:02d}/{kind}_{ts}.json"
         content = local_file_path.read_bytes()
         commit_msg = f"Shift {kind}: {year}-{month:02d}"
-        return _push_file(repo_path, content, commit_msg)
+        primary_success, primary_msg = _push_file(
+            primary_repo_path, content, commit_msg,
+        )
+        legacy_success, legacy_msg = _push_file(
+            legacy_repo_path, content, commit_msg + " (history)",
+        )
+        if primary_success and legacy_success:
+            return True, f"{primary_repo_path} と {legacy_repo_path} に保存"
+        if primary_success:
+            return True, f"{primary_repo_path} に保存（履歴保存失敗: {legacy_msg}）"
+        if legacy_success:
+            return True, f"{legacy_repo_path} に保存（主保存失敗: {primary_msg}）"
+        return False, f"主保存失敗: {primary_msg} / 履歴保存失敗: {legacy_msg}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
@@ -487,12 +675,29 @@ def push_lock_to_github(
 ) -> tuple[bool, str]:
     """ロック/解除履歴ファイルを GitHub に保存する。"""
     ts = now_jst().strftime("%Y%m%d-%H%M%S")
-    repo_path = f"locks/{year:04d}-{month:02d}/{action}_{ts}.json"
-    return push_local_file_to_github(
+    history_path = f"locks/{year:04d}-{month:02d}/{action}_{ts}.json"
+    history_success, history_msg = push_local_file_to_github(
         local_file_path,
-        repo_path,
+        history_path,
         f"Lock {action}: {year}-{month:02d}",
     )
+    latest_success = False
+    latest_msg = ""
+    if action == "lock":
+        latest_success, latest_msg = push_local_file_to_github(
+            local_file_path,
+            f"locks/{year:04d}-{month:02d}.lock",
+            f"Lock latest: {year}-{month:02d}",
+        )
+    if action != "lock":
+        return history_success, history_msg
+    if history_success and latest_success:
+        return True, f"{history_path} と locks/{year:04d}-{month:02d}.lock に保存"
+    if history_success:
+        return True, f"{history_path} に保存（latest保存失敗: {latest_msg}）"
+    if latest_success:
+        return True, f"latestのみ保存（履歴保存失敗: {history_msg}）"
+    return False, f"履歴保存失敗: {history_msg} / latest保存失敗: {latest_msg}"
 
 
 def push_edit_log_to_github(

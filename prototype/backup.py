@@ -59,6 +59,7 @@ class ShiftBackup:
         kind: str = "draft",  # "draft" / "finalized"
         author: str = "system",
         note: str = "",
+        metadata: Optional[dict] = None,
     ) -> Path:
         """シフトをスナップショット化"""
         month_dir = self._get_month_dir(shift.year, shift.month)
@@ -85,6 +86,13 @@ class ShiftBackup:
                 for a in shift.assignments
             ],
         }
+        if metadata:
+            try:
+                data["metadata"] = json.loads(
+                    json.dumps(metadata, ensure_ascii=False, default=str)
+                )
+            except Exception:
+                data["metadata"] = {"note": "metadata serialization failed"}
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         return file_path
@@ -108,6 +116,16 @@ class ShiftBackup:
         ]
         return shift
 
+    def load_shift_metadata(self, file_path: Path) -> dict:
+        """スナップショットに保存された生成条件メタデータを返す。"""
+        try:
+            with open(file_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+        metadata = data.get("metadata", {})
+        return metadata if isinstance(metadata, dict) else {}
+
     def list_shifts(self, year: int, month: int) -> list[Path]:
         """その月のシフトスナップショット一覧（時系列順）"""
         month_dir = self._get_month_dir(year, month)
@@ -117,12 +135,21 @@ class ShiftBackup:
         self, year: int, month: int, kind: Optional[str] = None
     ) -> Optional[MonthlyShift]:
         """最新のシフトを取得（kind 指定可）"""
+        path = self.get_latest_shift_path(year, month, kind=kind)
+        if path is None:
+            return None
+        return self.load_shift(path)
+
+    def get_latest_shift_path(
+        self, year: int, month: int, kind: Optional[str] = None
+    ) -> Optional[Path]:
+        """最新のシフトスナップショットのパスを取得（kind 指定可）。"""
         files = self.list_shifts(year, month)
         if kind:
             files = [f for f in files if f.name.startswith(f"shift_{kind}_")]
         if not files:
             return None
-        return self.load_shift(files[-1])
+        return files[-1]
 
     # ============================================================
     # 希望データのバックアップ

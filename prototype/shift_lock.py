@@ -93,6 +93,16 @@ class ShiftLockManager:
     def get_lock_info(self, year: int, month: int) -> Optional[LockInfo]:
         """ロック情報を取得"""
         path = self._lock_path(year, month)
+        if not path.exists() and self.lock_dir == DEFAULT_LOCK_DIR:
+            try:
+                from .paths import BACKUP_DIR
+                from .github_backup import sync_latest_lock_and_snapshot_from_github
+
+                sync_latest_lock_and_snapshot_from_github(
+                    int(year), int(month), BACKUP_DIR, self.lock_dir,
+                )
+            except Exception:
+                pass
         if not path.exists():
             return None
         with open(path, encoding="utf-8") as f:
