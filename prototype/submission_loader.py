@@ -452,7 +452,8 @@ def parse_natural_language_note(
             r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日",
             r"(?:休み|休日|休暇)(?:は|を)?\s*(\d{1,2})\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
             r"(?:休み|休日|休暇)日数\s*(\d{1,2})\s*(?:日)?\s*(?:希望)?",
-            r"(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:お)?休み",
+            r"(?:計|合計|総計|トータル)\s*(\d{1,2})\s*日(?:間)?\s*(?:お)?休み",
+            r"(?:計|合計|総計|トータル)\s*(\d{1,2})\s*日(?:間)?\s*(?:希望|お願い|いただきたい|ください)",
             r"(?:有給|有休)[^。\n]{0,24}?(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:希望|お願い|いただきたい)",
             r"(\d{1,2})\s*日間\s*(?:お)?休み",
             r"月の休みは\s*(\d{1,2})\s*回",
@@ -460,6 +461,16 @@ def parse_natural_language_note(
         ],
         normalized,
     )
+    if requested_holidays is None and paid is not None:
+        public_holidays = _extract_number(
+            [
+                r"(?:公休|平均|基本休|通常休|休み)\s*(\d{1,2})\s*日\s*(?:\+|プラス)",
+                r"(?:公休|平均|基本休|通常休|休み)\s*(\d{1,2})\s*日[^。\n]{0,12}?(?:有給|有休)",
+            ],
+            normalized,
+        )
+        if public_holidays is not None:
+            requested_holidays = public_holidays + paid
     requested_work_days = _extract_number(
         [
             r"出勤(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
