@@ -2048,10 +2048,18 @@ def summarize_natural_language_note_for_review(
                 f"{int(required_count)}日出勤{store_text}"
             )
 
-    if parsed_note.paid_leave_days is not None:
-        auto_labels.append(f"希望有給日数: {int(parsed_note.paid_leave_days)}日")
-    if parsed_note.requested_holiday_days is not None:
+    if (
+        parsed_note.requested_holiday_days is not None
+        and parsed_note.paid_leave_days is not None
+    ):
+        auto_labels.append(
+            f"希望休日数: 合計{int(parsed_note.requested_holiday_days)}日"
+            f"（うち有給{int(parsed_note.paid_leave_days)}日）"
+        )
+    elif parsed_note.requested_holiday_days is not None:
         auto_labels.append(f"希望休日数: 合計{int(parsed_note.requested_holiday_days)}日")
+    elif parsed_note.paid_leave_days is not None:
+        auto_labels.append(f"希望有給日数: {int(parsed_note.paid_leave_days)}日")
     if parsed_note.max_consecutive_work_days is not None:
         auto_labels.append(f"連勤上限: {int(parsed_note.max_consecutive_work_days)}連勤まで")
     if parsed_note.max_consecutive_off_days is not None:
@@ -3503,7 +3511,13 @@ if mode == "📊 経営者ビュー":
                     leave_label += f"（管理者+{admin_leave}日）"
                 note_applied = []
                 if s.get("requested_holiday_days"):
-                    note_applied.append(f"休み計{s['requested_holiday_days']}日")
+                    if submitted_leave:
+                        note_applied.append(
+                            f"休み計{s['requested_holiday_days']}日"
+                            f"（うち有給{submitted_leave}日）"
+                        )
+                    else:
+                        note_applied.append(f"休み計{s['requested_holiday_days']}日")
                 if s.get("max_consecutive_work_days"):
                     note_applied.append(f"{s['max_consecutive_work_days']}連勤まで")
                 if s.get("max_consecutive_off_days"):
@@ -3511,7 +3525,10 @@ if mode == "📊 経営者ビュー":
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
                 note_applied.extend(s.get("work_request_group_labels", []))
-                note_applied.extend(s.get("note_auto_labels", []))
+                note_applied.extend(
+                    label for label in s.get("note_auto_labels", [])
+                    if not str(label).startswith(("希望休日数:", "希望有給日数:"))
+                )
                 note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
                 note_adjustment = note_adjustments_by_employee.get(emp_name)
                 if note_adjustment and note_adjustment.get("corrected_text"):
