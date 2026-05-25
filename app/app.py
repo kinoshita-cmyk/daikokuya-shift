@@ -225,7 +225,7 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
         {
             "分類": "運用設定",
             "項目": "ソルバー最大実行時間",
-            "現在値": f"{parameters.get('solver_time_limit_seconds', 180)}秒",
+            "現在値": f"{parameters.get('solver_time_limit_seconds', 240)}秒",
             "備考": "シフト自動生成に使う最大時間。",
         },
         {
@@ -631,7 +631,7 @@ if is_manager():
 
 st.sidebar.markdown("---")
 st.sidebar.caption("v0.1 プロトタイプ")
-st.sidebar.caption(f"今日: {date.today()}")
+st.sidebar.caption(f"今日: {now_jst().date()}")
 
 
 # ============================================================
@@ -3151,7 +3151,7 @@ if mode == "📊 経営者ビュー":
     # ============================================================
     # 対象年月の決定（デフォルト＝翌月）
     # ============================================================
-    today = date.today()
+    today = now_jst().date()
     # 翌月の年・月を計算
     if today.month == 12:
         next_month_year, next_month_month = today.year + 1, 1
@@ -6353,7 +6353,7 @@ elif mode == "👤 従業員ビュー":
     # - 従業員リンクでは、原則「翌月の希望提出」と「今月の確定シフト確認」だけ。
     # - 過去月・翌々月などのテスト操作は、管理者プレビュー時だけ折りたたみ内に残す。
     # ============================================================
-    today = date.today()
+    today = now_jst().date()
     # 翌月計算
     if today.month == 12:
         next_year, next_month = today.year + 1, 1
@@ -7564,7 +7564,7 @@ elif mode == "⚙️ 設定":
             },
             "solver_time_limit_seconds": {
                 "label": "ソルバー最大実行時間（秒）",
-                "min": 10, "max": 600, "default": 240,
+                "min": 240, "max": 600, "default": 240,
                 "help": "シフト生成に使う最大秒数です。",
                 "safe": None,
             },
@@ -7593,8 +7593,9 @@ elif mode == "⚙️ 設定":
             for key in check_labels:
                 st.session_state[f"chk_{key}"] = source_cfg.enabled_checks.get(key, True)
             for key, spec in param_specs.items():
-                st.session_state[f"param_{key}"] = int(
-                    source_cfg.parameters.get(key, spec["default"])
+                raw_value = int(source_cfg.parameters.get(key, spec["default"]))
+                st.session_state[f"param_{key}"] = min(
+                    int(spec["max"]), max(int(spec["min"]), raw_value)
                 )
             for rule in source_cfg.custom_rules:
                 st.session_state[f"rule_en_{rule.id}"] = rule.enabled
@@ -7611,8 +7612,9 @@ elif mode == "⚙️ 設定":
             for key, spec in param_specs.items():
                 state_key = f"param_{key}"
                 if state_key not in st.session_state:
-                    st.session_state[state_key] = int(
-                        source_cfg.parameters.get(key, spec["default"])
+                    raw_value = int(source_cfg.parameters.get(key, spec["default"]))
+                    st.session_state[state_key] = min(
+                        int(spec["max"]), max(int(spec["min"]), raw_value)
                     )
             st.session_state.setdefault("rule_added_custom_rules", [])
             st.session_state.setdefault("rule_deleted_ids", [])
