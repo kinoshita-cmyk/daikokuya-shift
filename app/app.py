@@ -87,6 +87,7 @@ def get_anthropic_api_key() -> Optional[str]:
 
 
 ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
+NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
 RULE_LEDGER_FILE = CONFIG_DIR / "rule_ledger_v1_0.json"
 
 
@@ -280,6 +281,121 @@ def push_admin_paid_leave_to_github() -> None:
         )
     except Exception:
         pass
+
+
+def load_note_adjustment_data() -> dict:
+    """自由記載に対する管理者補正メモを読み込む。"""
+    try:
+        from prototype.github_backup import sync_latest_config_from_github
+
+        sync_latest_config_from_github("natural_language_adjustments", CONFIG_DIR)
+    except Exception:
+        pass
+    if not NOTE_ADJUSTMENT_FILE.exists():
+        return {"version": 1, "adjustments": []}
+    try:
+        with open(NOTE_ADJUSTMENT_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {"version": 1, "adjustments": []}
+    if not isinstance(data, dict):
+        return {"version": 1, "adjustments": []}
+    adjustments = data.get("adjustments", [])
+    if not isinstance(adjustments, list):
+        adjustments = []
+    data["version"] = int(data.get("version", 1) or 1)
+    data["adjustments"] = adjustments
+    return data
+
+
+def save_note_adjustment_data(data: dict, actor: str = "管理者") -> Path:
+    """自由記載に対する管理者補正メモを保存する。"""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now().isoformat(),
+        "updated_by": actor,
+        "adjustments": data.get("adjustments", []),
+    }
+    with open(NOTE_ADJUSTMENT_FILE, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    try:
+        from prototype.github_backup import push_config_to_github
+
+        push_config_to_github("natural_language_adjustments", payload)
+    except Exception:
+        pass
+    return NOTE_ADJUSTMENT_FILE
+
+
+def note_adjustments_for_month(year: int, month: int) -> list[dict]:
+    """指定年月の自由記載補正だけを返す。"""
+    data = load_note_adjustment_data()
+    return [
+        adj for adj in data.get("adjustments", [])
+        if int(adj.get("year", 0) or 0) == int(year)
+        and int(adj.get("month", 0) or 0) == int(month)
+        and not bool(adj.get("deleted", False))
+    ]
+
+
+def latest_note_adjustments_by_employee(year: int, month: int) -> dict[str, dict]:
+    """従業員ごとの最新の自由記載補正を返す。"""
+    latest: dict[str, dict] = {}
+    for adj in note_adjustments_for_month(year, month):
+        employee = str(adj.get("employee", "")).strip()
+        if not employee:
+            continue
+        if (
+            employee not in latest
+            or str(adj.get("updated_at") or adj.get("created_at") or "")
+            >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
+        ):
+            latest[employee] = adj
+    return latest
+
+
+def upsert_note_adjustment(
+    year: int,
+    month: int,
+    employee: str,
+    status: str,
+    corrected_text: str,
+    memo: str = "",
+    actor: str = "管理者",
+) -> None:
+    """自由記載補正を従業員・月単位で追加/更新する。"""
+    data = load_note_adjustment_data()
+    adjustments = data.setdefault("adjustments", [])
+    now = datetime.now().isoformat()
+    target = None
+    for adj in adjustments:
+        if (
+            int(adj.get("year", 0) or 0) == int(year)
+            and int(adj.get("month", 0) or 0) == int(month)
+            and str(adj.get("employee", "")) == str(employee)
+            and not bool(adj.get("deleted", False))
+        ):
+            target = adj
+            break
+    if target is None:
+        target = {
+            "id": f"note_adjust_{int(year)}{int(month):02d}_{employee}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "year": int(year),
+            "month": int(month),
+            "employee": str(employee),
+            "created_at": now,
+            "created_by": actor,
+        }
+        adjustments.append(target)
+    target.update({
+        "status": status,
+        "corrected_text": corrected_text,
+        "memo": memo,
+        "updated_at": now,
+        "updated_by": actor,
+    })
+    save_note_adjustment_data(data, actor=actor)
 
 
 def parse_day_list_text(text: str, days_in_month: int) -> list[int]:
@@ -3180,17 +3296,92 @@ if mode == "📊 経営者ビュー":
         if s.get("has_note")
     ]
     if all_note_items:
+        note_adjustments_by_employee = latest_note_adjustments_by_employee(
+            int(target_year), int(target_month),
+        )
         with st.expander("📝 自由記載レビュー一覧（原文・自動反映・要確認）", expanded=False):
             note_rows = []
             for s in all_note_items:
+                adj = note_adjustments_by_employee.get(s.get("employee", "")) or {}
                 note_rows.append({
                     "氏名": s.get("employee", ""),
                     "判定": s.get("note_parse_status", ""),
                     "自動反映": " / ".join(s.get("note_auto_labels", [])) or "-",
                     "要確認": " / ".join(s.get("note_review_labels", [])) or "-",
+                    "管理者補正": adj.get("corrected_text", "") or "-",
+                    "補正状態": adj.get("status", "") or "-",
                     "原文": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             st.dataframe(note_rows, width="stretch", hide_index=True)
+            st.caption(
+                "管理者補正は、現時点ではメモとして保存します。"
+                "生成条件への反映は次の段階で、確認済みのものだけを対象にします。"
+            )
+            with st.form(
+                f"note_adjustment_form_{int(target_year)}_{int(target_month)}",
+                clear_on_submit=False,
+            ):
+                note_employee_options = [s.get("employee", "") for s in all_note_items]
+                selected_note_employee = st.selectbox(
+                    "補正するスタッフ",
+                    note_employee_options,
+                    key=f"note_adjust_employee_{int(target_year)}_{int(target_month)}",
+                )
+                existing_adjustment = note_adjustments_by_employee.get(selected_note_employee, {})
+                original_note = next(
+                    (
+                        s.get("note", "") or s.get("note_excerpt", "")
+                        for s in all_note_items
+                        if s.get("employee", "") == selected_note_employee
+                    ),
+                    "",
+                )
+                st.text_area(
+                    "原文（変更不可）",
+                    value=original_note,
+                    height=100,
+                    disabled=True,
+                    key=f"note_adjust_original_{int(target_year)}_{int(target_month)}",
+                )
+                correction_status = st.selectbox(
+                    "補正状態",
+                    ["要確認", "確認済み", "反映しない"],
+                    index=["要確認", "確認済み", "反映しない"].index(
+                        existing_adjustment.get("status", "要確認")
+                        if existing_adjustment.get("status", "要確認") in ["要確認", "確認済み", "反映しない"]
+                        else "要確認"
+                    ),
+                    key=f"note_adjust_status_{int(target_year)}_{int(target_month)}",
+                )
+                corrected_text = st.text_area(
+                    "管理者補正メモ",
+                    value=existing_adjustment.get("corrected_text", ""),
+                    placeholder="例: 1日は休み希望として扱う / 合計12〜13日勤務希望として確認 / 4日は研修途中抜けのため手動確認",
+                    height=90,
+                    key=f"note_adjust_text_{int(target_year)}_{int(target_month)}",
+                )
+                correction_memo = st.text_input(
+                    "補足メモ",
+                    value=existing_adjustment.get("memo", ""),
+                    placeholder="例: 本人確認済み、今回は手動調整で対応",
+                    key=f"note_adjust_memo_{int(target_year)}_{int(target_month)}",
+                )
+                if st.form_submit_button("管理者補正を保存"):
+                    if not selected_note_employee:
+                        st.error("スタッフを選択してください。")
+                    elif not corrected_text.strip() and correction_status != "反映しない":
+                        st.error("管理者補正メモを入力してください。")
+                    else:
+                        upsert_note_adjustment(
+                            int(target_year),
+                            int(target_month),
+                            selected_note_employee,
+                            correction_status,
+                            corrected_text.strip(),
+                            correction_memo.strip(),
+                        )
+                        st.success("管理者補正を保存しました。")
+                        st.rerun()
 
     # 詳細表示（折りたたみ式）
     with st.expander(
@@ -3277,6 +3468,9 @@ if mode == "📊 経営者ビュー":
         admin_leave_by_employee = admin_paid_leave_days_for_month(
             int(target_year), int(target_month),
         )
+        note_adjustments_by_employee = latest_note_adjustments_by_employee(
+            int(target_year), int(target_month),
+        )
         monthly_custom_by_employee: dict[str, list[str]] = {}
         for rule in active_monthly_custom_rules(rule_cfg, int(target_year), int(target_month)):
             employee = getattr(rule, "employee", "") or ""
@@ -3315,6 +3509,12 @@ if mode == "📊 経営者ビュー":
                 note_applied.extend(s.get("work_request_group_labels", []))
                 note_applied.extend(s.get("note_auto_labels", []))
                 note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
+                note_adjustment = note_adjustments_by_employee.get(emp_name)
+                if note_adjustment and note_adjustment.get("corrected_text"):
+                    note_applied.append(
+                        f"管理者補正({note_adjustment.get('status', '要確認')}): "
+                        f"{note_adjustment.get('corrected_text')}"
+                    )
                 note_applied = list(dict.fromkeys(note_applied))
                 request_rows.append({
                     "氏名": emp_name,
