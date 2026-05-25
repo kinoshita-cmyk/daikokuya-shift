@@ -2727,6 +2727,13 @@ def save_shift_snapshot_with_github(
     metadata: Optional[dict] = None,
 ) -> Path:
     """シフトをローカル保存し、設定済みならGitHubにも自動保存する。"""
+    if metadata is None:
+        try:
+            metadata = current_or_remembered_generation_metadata_for_month(
+                int(shift.year), int(shift.month),
+            )
+        except Exception:
+            metadata = None
     path = backup_mgr.save_shift(
         shift, kind=kind, author=author, note=note, metadata=metadata,
     )
@@ -2743,9 +2750,43 @@ def build_generation_metadata(message: str, input_summary: dict) -> dict:
     return {
         "schema": "generation_metadata_v1",
         "saved_at": datetime.now().isoformat(),
+        "ym": (
+            f"{int(input_summary.get('year')):04d}-{int(input_summary.get('month')):02d}"
+            if input_summary.get("year") and input_summary.get("month")
+            else ""
+        ),
         "message": message or "",
         "input_summary": input_summary or {},
     }
+
+
+def remember_generation_metadata_for_month(
+    year: int, month: int, metadata: Optional[dict],
+) -> None:
+    """月ごとの生成条件メタデータを画面遷移後も参照できるように保持する。"""
+    if not metadata:
+        return
+    key = shift_session_key(year, month)
+    metadata_by_month = dict(st.session_state.get("generation_metadata_by_month", {}))
+    metadata_by_month[key] = metadata
+    st.session_state["generation_metadata_by_month"] = metadata_by_month
+    st.session_state["loaded_shift_metadata"] = metadata
+
+
+def remembered_generation_metadata_for_month(year: int, month: int) -> dict:
+    """セッションに保持している月別生成条件メタデータを返す。"""
+    metadata_by_month = st.session_state.get("generation_metadata_by_month", {})
+    metadata = metadata_by_month.get(shift_session_key(year, month), {})
+    return metadata if isinstance(metadata, dict) else {}
+
+
+def current_or_remembered_generation_metadata_for_month(year: int, month: int) -> dict:
+    """直近生成結果または復元済みメタデータから、その月の生成条件を返す。"""
+    metadata = current_generation_metadata_for_month(year, month)
+    if metadata:
+        remember_generation_metadata_for_month(year, month, metadata)
+        return metadata
+    return remembered_generation_metadata_for_month(year, month)
 
 
 def current_generation_metadata_for_month(year: int, month: int) -> dict:
@@ -2759,6 +2800,47 @@ def current_generation_metadata_for_month(year: int, month: int) -> dict:
         str(last_gen.get("message", "")),
         dict(last_gen.get("input_summary", {})),
     )
+
+
+def load_generation_metadata_for_display(
+    backup_mgr: ShiftBackup,
+    year: int,
+    month: int,
+    lock_info: Optional[object],
+) -> tuple[dict, str]:
+    """現在表示中の月について、復元後も確認できる生成条件を探す。"""
+    if lock_info:
+        try:
+            locked_snapshot = (
+                backup_mgr.backup_dir
+                / f"{int(lock_info.year)}-{int(lock_info.month):02d}"
+                / lock_info.snapshot_file
+            )
+            metadata = backup_mgr.load_shift_metadata(locked_snapshot)
+            if metadata:
+                remember_generation_metadata_for_month(year, month, metadata)
+                return metadata, "ロック済み確定版の生成条件"
+        except Exception:
+            pass
+
+    metadata = current_or_remembered_generation_metadata_for_month(year, month)
+    if metadata:
+        return metadata, "表示中シフトの生成条件"
+
+    if get_session_shift_for_month(year, month) is not None:
+        try:
+            latest_draft_path = backup_mgr.get_latest_shift_path(
+                int(year), int(month), kind="draft",
+            )
+            if latest_draft_path is not None:
+                metadata = backup_mgr.load_shift_metadata(latest_draft_path)
+                if metadata:
+                    remember_generation_metadata_for_month(year, month, metadata)
+                    return metadata, "自動保存下書きの生成条件"
+        except Exception:
+            pass
+
+    return {}, ""
 
 
 def render_generation_metadata_summary(metadata: dict, title: str = "保存済みシフトの生成条件") -> None:
@@ -3360,18 +3442,6 @@ if mode == "📊 経営者ビュー":
             f'</div>',
             unsafe_allow_html=True,
         )
-        try:
-            locked_snapshot = (
-                backup_mgr.backup_dir
-                / f"{lock_info.year}-{lock_info.month:02d}"
-                / lock_info.snapshot_file
-            )
-            render_generation_metadata_summary(
-                backup_mgr.load_shift_metadata(locked_snapshot),
-                title="ロック済み確定版の生成条件",
-            )
-        except Exception:
-            pass
     else:
         st.markdown(
             '<div style="background:#fef3c7; padding:10px; border-radius:6px; '
@@ -3381,10 +3451,16 @@ if mode == "📊 経営者ビュー":
             unsafe_allow_html=True,
         )
 
-    if st.session_state.get("loaded_shift_metadata"):
+    display_metadata, display_metadata_title = load_generation_metadata_for_display(
+        backup_mgr,
+        int(target_year),
+        int(target_month),
+        lock_info,
+    )
+    if display_metadata:
         render_generation_metadata_summary(
-            st.session_state.get("loaded_shift_metadata", {}),
-            title="復元したシフトの生成条件",
+            display_metadata,
+            title=display_metadata_title,
         )
 
     # ============================================================
@@ -4685,6 +4761,8 @@ if mode == "📊 経営者ビュー":
 
                 # 入力データのサマリ（成功・失敗どちらでも残す）
                 _input_summary = {
+                    "year": int(_saved_target_year),
+                    "month": int(_saved_target_month),
                     "submission_count": int(sub_data.submission_count),
                     "pending_count": int(len(sub_data.pending_employees)),
                     "submitted_employees": list(sub_data.submitted_employees),
@@ -5880,6 +5958,12 @@ if mode == "📊 経営者ビュー":
                 "📝 「📋 シフト表」タブで入力したコメントと注意書きが反映されます。"
                 "未入力の場合は空欄になります。"
             )
+            color_output = st.checkbox(
+                "店舗記号に色を付けて出力する",
+                value=True,
+                key=f"export_color_output_{int(shift.year)}_{int(shift.month)}",
+                help="オフにすると、従来に近い白黒のExcel・PDFとして出力します。",
+            )
 
             col_x, col_p = st.columns(2)
             with col_x:
@@ -5893,6 +5977,7 @@ if mode == "📊 経営者ビュー":
                         footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
                         key_warnings_by_store=key_warnings_for_export,
+                        color_output=color_output,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 xlsx_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
@@ -5917,6 +6002,7 @@ if mode == "📊 経営者ビュー":
                         footer_notes=footer_notes if footer_notes else None,
                         short_staff_days=short_staff_for_export,
                         key_warnings_by_store=key_warnings_for_export,
+                        color_output=color_output,
                     )
                     st.success(f"✅ 保存先: {file_path}")
                 pdf_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
@@ -7168,7 +7254,7 @@ elif mode == "⚙️ 設定":
                     "年",
                     min_value=2020,
                     max_value=2100,
-                    value=int(st.session_state.get("target_year", date.today().year)),
+                    value=int(st.session_state.get("target_year", now_jst().date().year)),
                     step=1,
                     key="admin_leave_year",
                 )
@@ -7177,7 +7263,7 @@ elif mode == "⚙️ 設定":
                     "月",
                     min_value=1,
                     max_value=12,
-                    value=int(st.session_state.get("target_month", date.today().month)),
+                    value=int(st.session_state.get("target_month", now_jst().date().month)),
                     step=1,
                     key="admin_leave_month",
                 )
@@ -7611,17 +7697,26 @@ elif mode == "⚙️ 設定":
                     st.session_state[state_key] = source_cfg.enabled_checks.get(key, True)
             for key, spec in param_specs.items():
                 state_key = f"param_{key}"
+                min_value = int(spec["min"])
+                max_value = int(spec["max"])
                 if state_key not in st.session_state:
                     raw_value = int(source_cfg.parameters.get(key, spec["default"]))
-                    st.session_state[state_key] = min(
-                        int(spec["max"]), max(int(spec["min"]), raw_value)
-                    )
+                    st.session_state[state_key] = min(max_value, max(min_value, raw_value))
+                else:
+                    try:
+                        current_value = int(st.session_state[state_key])
+                    except (TypeError, ValueError):
+                        current_value = int(spec["default"])
+                    if current_value < min_value or current_value > max_value:
+                        st.session_state[state_key] = min(
+                            max_value, max(min_value, current_value)
+                        )
             st.session_state.setdefault("rule_added_custom_rules", [])
             st.session_state.setdefault("rule_deleted_ids", [])
             st.session_state.setdefault("rule_apply_confirm", False)
 
         cfg_signature = repr(cfg.to_dict())
-        rule_widget_state_version = 3
+        rule_widget_state_version = 4
         discard_requested = st.session_state.pop("rule_discard_requested", False)
         default_draft_requested = st.session_state.pop("rule_default_draft_requested", False)
         if default_draft_requested:
@@ -8195,14 +8290,14 @@ elif mode == "⚙️ 設定":
                 "対象年",
                 min_value=2025,
                 max_value=2035,
-                value=int(st.session_state.get("target_year", date.today().year)),
+                value=int(st.session_state.get("target_year", now_jst().date().year)),
                 key="rule_consistency_year",
             ))
         with check_col2:
             consistency_month = int(st.selectbox(
                 "対象月",
                 list(range(1, 13)),
-                index=max(0, int(st.session_state.get("target_month", date.today().month)) - 1),
+                index=max(0, int(st.session_state.get("target_month", now_jst().date().month)) - 1),
                 key="rule_consistency_month",
             ))
         with check_col3:
@@ -8511,7 +8606,7 @@ elif mode == "⚙️ 設定":
                 )
             with ret_col2:
                 retire_date = st.date_input(
-                    "退職日", value=date.today(), key="retire_date",
+                    "退職日", value=now_jst().date(), key="retire_date",
                 )
             with ret_col3:
                 st.write("")
@@ -8585,7 +8680,7 @@ elif mode == "⚙️ 設定":
                         format_func=store_select_label,
                     )
                     new_hired_date = st.date_input(
-                        "入社日", value=date.today(),
+                        "入社日", value=now_jst().date(),
                     )
                     new_target = st.number_input(
                         "年間目標出勤日数（パートなら0）",
