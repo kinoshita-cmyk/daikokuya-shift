@@ -154,6 +154,12 @@ class RuleConfigManager:
 
     def load(self) -> RuleConfig:
         """現在のアクティブ設定を読み込む（無ければデフォルト）"""
+        try:
+            from .github_backup import sync_latest_config_from_github
+
+            sync_latest_config_from_github("rule_config", self.config_dir)
+        except Exception:
+            pass
         if not self.config_file.exists():
             return RuleConfig()
         with open(self.config_file, encoding="utf-8") as f:
@@ -178,6 +184,12 @@ class RuleConfigManager:
         new_config.updated_by = actor
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(new_config.to_dict(), f, ensure_ascii=False, indent=2)
+        try:
+            from .github_backup import push_config_to_github
+
+            push_config_to_github("rule_config", new_config.to_dict())
+        except Exception:
+            pass
         return changes
 
     def _compute_diff(

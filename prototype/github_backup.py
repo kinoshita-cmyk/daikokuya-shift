@@ -42,6 +42,7 @@ SECRET_GITHUB_TOKEN = "GITHUB_TOKEN"
 SECRET_GITHUB_BACKUP_REPO = "GITHUB_BACKUP_REPO"
 
 _SYNCED_PREFERENCE_MONTHS: set[str] = set()
+_SYNCED_CONFIG_NAMES: set[str] = set()
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -220,6 +221,97 @@ def sync_preferences_from_github(
         return 0, "タイムアウト"
     except Exception as e:
         return 0, f"{type(e).__name__}: {e}"
+
+
+def sync_latest_config_from_github(
+    config_name: str,
+    local_config_dir: Path,
+    timeout: int = 8,
+    force: bool = False,
+) -> tuple[bool, str]:
+    """
+    GitHubバックアップ上の最新設定ファイルをローカルへ復元する。
+
+    Streamlit Cloud は再起動時に実行環境内の設定変更が巻き戻るため、
+    rule_config などの運用設定を読む前にこの同期を行う。
+    """
+    if not is_github_backup_enabled():
+        return False, "未設定"
+
+    config_name = str(config_name).strip()
+    if not config_name:
+        return False, "設定名が空です"
+    if not force and config_name in _SYNCED_CONFIG_NAMES:
+        return False, "同期済み"
+
+    repo = _get_repo()
+    headers = _github_headers()
+    local_config_dir = Path(local_config_dir)
+    local_config_dir.mkdir(parents=True, exist_ok=True)
+    local_path = local_config_dir / f"{config_name}.json"
+
+    try:
+        candidates = []
+        # 新しい実装では latest を最優先する。
+        latest_url = (
+            f"https://api.github.com/repos/{repo}/contents/"
+            f"config/{config_name}_latest.json"
+        )
+        latest_response = requests.get(latest_url, headers=headers, timeout=timeout)
+        if latest_response.status_code == 200:
+            candidates.append(latest_response.json())
+
+        # 古い実装の timestamp 付き設定バックアップも拾う。
+        list_url = f"https://api.github.com/repos/{repo}/contents/config"
+        list_response = requests.get(list_url, headers=headers, timeout=timeout)
+        if list_response.status_code == 200:
+            items = list_response.json()
+            if isinstance(items, list):
+                prefix = f"{config_name}_"
+                for item in items:
+                    name = str(item.get("name", ""))
+                    if (
+                        name.startswith(prefix)
+                        and name.endswith(".json")
+                        and name != f"{config_name}_latest.json"
+                    ):
+                        candidates.append(item)
+
+        if not candidates:
+            _SYNCED_CONFIG_NAMES.add(config_name)
+            return False, "GitHub上に設定バックアップなし"
+
+        # latest がある場合は先頭、それ以外はファイル名順で最新を採用。
+        selected = candidates[0]
+        if str(selected.get("name", "")) != f"{config_name}_latest.json":
+            selected = sorted(
+                candidates,
+                key=lambda item: str(item.get("name", "")),
+                reverse=True,
+            )[0]
+
+        file_url = selected.get("url")
+        if not file_url:
+            return False, "GitHub応答にURLがありません"
+        file_response = requests.get(file_url, headers=headers, timeout=timeout)
+        if file_response.status_code != 200:
+            return False, f"HTTP {file_response.status_code}"
+        file_data = file_response.json()
+        encoded = str(file_data.get("content", "")).replace("\n", "")
+        if not encoded:
+            return False, "設定ファイルの内容が空です"
+
+        content = base64.b64decode(encoded)
+        # JSONとして読めることだけ確認してから置き換える。
+        json.loads(content.decode("utf-8"))
+        with open(local_path, "wb") as f:
+            f.write(content)
+        _SYNCED_CONFIG_NAMES.add(config_name)
+        return True, f"{selected.get('name')} を復元"
+    except requests.exceptions.Timeout:
+        return False, "タイムアウト"
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
 
 
 # ============================================================
@@ -431,12 +523,25 @@ def push_config_to_github(
         return False, "未設定"
     try:
         ts = now_jst().strftime("%Y%m%d-%H%M%S")
-        repo_path = f"config/{config_name}_{ts}.json"
         content = json.dumps(
             config_data, ensure_ascii=False, indent=2,
         ).encode("utf-8")
         commit_msg = f"Config update: {config_name}"
-        return _push_file(repo_path, content, commit_msg)
+        history_path = f"config/{config_name}_{ts}.json"
+        latest_path = f"config/{config_name}_latest.json"
+        history_success, history_msg = _push_file(
+            history_path, content, commit_msg,
+        )
+        latest_success, latest_msg = _push_file(
+            latest_path, content, commit_msg + " (latest)",
+        )
+        if history_success and latest_success:
+            return True, f"{history_path} と {latest_path} に保存"
+        if latest_success:
+            return True, f"{latest_path} に保存（履歴保存失敗: {history_msg}）"
+        if history_success:
+            return True, f"{history_path} に保存（latest保存失敗: {latest_msg}）"
+        return False, f"履歴保存失敗: {history_msg} / latest保存失敗: {latest_msg}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 
