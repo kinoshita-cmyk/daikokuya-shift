@@ -144,6 +144,15 @@ class ShiftBackup:
         self, year: int, month: int, kind: Optional[str] = None
     ) -> Optional[Path]:
         """最新のシフトスナップショットのパスを取得（kind 指定可）。"""
+        if self.backup_dir.resolve() == DEFAULT_BACKUP_DIR.resolve():
+            try:
+                from .github_backup import sync_shift_snapshots_from_github
+
+                sync_shift_snapshots_from_github(
+                    int(year), int(month), self.backup_dir, kind=kind,
+                )
+            except Exception:
+                pass
         files = self.list_shifts(year, month)
         if kind:
             files = [f for f in files if f.name.startswith(f"shift_{kind}_")]

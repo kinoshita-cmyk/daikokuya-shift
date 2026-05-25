@@ -44,6 +44,7 @@ SECRET_GITHUB_BACKUP_REPO = "GITHUB_BACKUP_REPO"
 _SYNCED_PREFERENCE_MONTHS: set[str] = set()
 _SYNCED_CONFIG_NAMES: set[str] = set()
 _SYNCED_LOCK_MONTHS: set[str] = set()
+_SYNCED_SHIFT_MONTHS: set[str] = set()
 
 
 def _get_secret(key: str, default: str = "") -> str:
@@ -482,6 +483,144 @@ def sync_latest_lock_and_snapshot_from_github(
         return False, "タイムアウト"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
+
+
+def _github_shift_name_matches(name: str, kind: Optional[str]) -> bool:
+    """GitHub上のシフトファイル名が復元対象か判定する。"""
+    if not name.endswith(".json"):
+        return False
+    if kind:
+        return (
+            name.startswith(f"shift_{kind}_")
+            or name.startswith(f"{kind}_")
+        )
+    return (
+        name.startswith("shift_draft_")
+        or name.startswith("shift_finalized_")
+        or name.startswith("draft_")
+        or name.startswith("finalized_")
+    )
+
+
+def _local_shift_snapshot_name(name: str) -> str:
+    """
+    GitHubの旧保存名を、ローカルの ShiftBackup が読める名前にそろえる。
+
+    旧: shifts/YYYY-MM/draft_20260525-123456.json
+    新: backups/YYYY-MM/shift_draft_2026-05-25_123456.json
+    """
+    if name.startswith("shift_"):
+        return name
+
+    for kind in ("draft", "finalized"):
+        prefix = f"{kind}_"
+        if not name.startswith(prefix) or not name.endswith(".json"):
+            continue
+        raw_ts = name[len(prefix):-5]
+        try:
+            parsed = datetime.strptime(raw_ts, "%Y%m%d-%H%M%S")
+            return f"shift_{kind}_{parsed.strftime('%Y-%m-%d_%H%M%S')}.json"
+        except ValueError:
+            safe_ts = "".join(c if c.isalnum() else "_" for c in raw_ts)
+            return f"shift_{kind}_github_{safe_ts}.json"
+    return name
+
+
+def sync_shift_snapshots_from_github(
+    year: int,
+    month: int,
+    local_backup_dir: Path,
+    kind: Optional[str] = None,
+    timeout: int = 8,
+    force: bool = False,
+) -> tuple[int, str]:
+    """
+    GitHubバックアップ上の生成済みシフト下書き・確定版をローカルへ復元する。
+
+    Streamlit Cloud の再起動で backups/ が消えても、管理画面で
+    「自動保存の下書きを復元」できるようにする。
+    """
+    if not is_github_backup_enabled():
+        return 0, "未設定"
+
+    year = int(year)
+    month = int(month)
+    sync_key = f"{year:04d}-{month:02d}"
+    kind_key = kind or "all"
+    cache_key = f"{sync_key}:{kind_key}"
+    local_month_dir = Path(local_backup_dir) / sync_key
+    local_month_dir.mkdir(parents=True, exist_ok=True)
+
+    if not force and cache_key in _SYNCED_SHIFT_MONTHS:
+        return 0, "同期済み"
+
+    repo = _get_repo()
+    headers = _github_headers()
+    repo_dirs = [
+        f"backups/{sync_key}",
+        # 旧実装の保存先。ここにしか下書きがない場合も復元する。
+        f"shifts/{sync_key}",
+    ]
+
+    restored = 0
+    checked: list[str] = []
+    errors: list[str] = []
+
+    try:
+        for repo_dir in repo_dirs:
+            checked.append(repo_dir)
+            url = f"https://api.github.com/repos/{repo}/contents/{repo_dir}"
+            response = requests.get(url, headers=headers, timeout=timeout)
+            if response.status_code == 404:
+                continue
+            if response.status_code != 200:
+                errors.append(f"{repo_dir}: HTTP {response.status_code}")
+                continue
+
+            items = response.json()
+            if not isinstance(items, list):
+                errors.append(f"{repo_dir}: GitHub応答形式が不正")
+                continue
+
+            for item in items:
+                name = str(item.get("name", ""))
+                if item.get("type") not in (None, "file"):
+                    continue
+                if not _github_shift_name_matches(name, kind):
+                    continue
+
+                local_name = _local_shift_snapshot_name(name)
+                local_path = local_month_dir / local_name
+                if local_path.exists():
+                    continue
+
+                ok, content, msg = _fetch_github_item_content(
+                    item, timeout=timeout,
+                )
+                if not ok:
+                    errors.append(f"{repo_dir}/{name}: {msg}")
+                    continue
+
+                try:
+                    json.loads(content.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    errors.append(f"{repo_dir}/{name}: JSONとして読めません")
+                    continue
+
+                with open(local_path, "wb") as f:
+                    f.write(content)
+                restored += 1
+
+        _SYNCED_SHIFT_MONTHS.add(cache_key)
+        if restored:
+            return restored, f"{restored}件復元（確認先: {', '.join(checked)}）"
+        if errors:
+            return 0, " / ".join(errors[:3])
+        return 0, f"復元対象なし（確認先: {', '.join(checked)}）"
+    except requests.exceptions.Timeout:
+        return restored, "タイムアウト"
+    except Exception as e:
+        return restored, f"{type(e).__name__}: {e}"
 
 
 # ============================================================
