@@ -288,7 +288,8 @@ def _extract_choice_days_from_sentence(sentence: str, days_in_month: int) -> lis
     normalized = _normalize_note_text(sentence)
     pattern = (
         r"(?P<candidates>\d{1,2}\s*日?"
-        r"(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*\d{1,2}\s*日?)+)"
+        r"(?:(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*|\s+)"
+        r"\d{1,2}\s*日?)+)"
         r"\s*(?:の)?(?:いずれか|どちらか|どれか)"
     )
     days: list[int] = []
@@ -332,6 +333,27 @@ def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
                 continue
             if value >= 2:
                 return value - 1
+    return None
+
+
+def _extract_allowed_consecutive_limit(text: str, label: str) -> Optional[int]:
+    """「最大6連勤まで許容」のような許容上限を拾う。"""
+    normalized = _normalize_note_text(text)
+    allowed_words = r"(?:可|可能|許容|大丈夫|OK|お?っ?けー|いけます|出勤可能)"
+    patterns = [
+        rf"(?:最大|最長)?\s*(\d{{1,2}})\s*{label}\s*(?:まで)?[^。\n]{{0,16}}?{allowed_words}",
+        rf"{allowed_words}[^。\n]{{0,16}}?(?:最大|最長)?\s*(\d{{1,2}})\s*{label}",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if value >= 1:
+            return value
     return None
 
 
@@ -379,9 +401,10 @@ def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> li
 
     pattern = (
         r"(?P<candidates>\d{1,2}\s*日?"
-        r"(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*\d{1,2}\s*日?)+)"
+        r"(?:(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*|\s+)"
+        r"\d{1,2}\s*日?)+)"
         r"\s*(?:の)?(?:いずれか|どちらか|どれか)"
-        r".*?(?P<count>\d{1,2})\s*日"
+        r"(?:(?!。|\n).*?(?P<count>\d{1,2})\s*日)?"
     )
     results: list[tuple[list[int], int]] = []
     for match in re.finditer(pattern, normalized):
@@ -390,7 +413,7 @@ def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> li
             day = _safe_day(day_str, days_in_month)
             if day is not None:
                 candidates.append(day)
-        required = int(match.group("count"))
+        required = int(match.group("count") or 1)
         if candidates and required > 0:
             results.append((sorted(set(candidates)), required))
     return results
@@ -458,6 +481,7 @@ def parse_natural_language_note(
             r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日",
             r"(?:休み|休日|休暇)(?:は|を)?\s*(\d{1,2})\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
             r"(?:休み|休日|休暇)日数\s*(\d{1,2})\s*(?:日)?\s*(?:希望)?",
+            r"(?:計|合計|総計|トータル)?\s*(?:の)?\s*(?:休み|休日|休暇)日数(?:は|を)?\s*(\d{1,2})\s*(?:日)?",
             r"(?:計|合計|総計|トータル)\s*(\d{1,2})\s*日(?:間)?\s*(?:お)?休み",
             r"(?:計|合計|総計|トータル)\s*(\d{1,2})\s*日(?:間)?\s*(?:希望|お願い|いただきたい|ください)",
             r"(?:有給|有休)[^。\n]{0,24}?(?:計|合計)\s*(\d{1,2})\s*日(?:間)?\s*(?:希望|お願い|いただきたい)",
@@ -493,9 +517,13 @@ def parse_natural_language_note(
         result.requested_holiday_days = requested_holidays
 
     max_consecutive_work = _extract_ng_consecutive_limit(normalized, "連勤")
+    if max_consecutive_work is None:
+        max_consecutive_work = _extract_allowed_consecutive_limit(normalized, "連勤")
     if max_consecutive_work is not None:
         result.max_consecutive_work_days = max_consecutive_work
     max_consecutive_off = _extract_ng_consecutive_limit(normalized, "連休")
+    if max_consecutive_off is None:
+        max_consecutive_off = _extract_allowed_consecutive_limit(normalized, "連休")
     if max_consecutive_off is not None:
         result.max_consecutive_off_days = max_consecutive_off
 
@@ -555,9 +583,18 @@ def parse_natural_language_note(
         is_total_holiday_sentence = any(
             word in sentence for word in ("日間", "計", "合計", "平均", "有給", "有休", "月の休み")
         )
+        is_direct_off_sentence = bool(
+            re.search(
+                r"\d{1,2}\s*日(?:は|を|が)?[^。\n]{0,10}(?:休み|休日|休暇)",
+                sentence,
+            )
+        ) or "休みとして扱う" in sentence
         if (
             not is_total_holiday_sentence
-            and any(word in sentence for word in ("休み希望", "休日希望", "休みたい", "休暇希望"))
+            and (
+                is_direct_off_sentence
+                or any(word in sentence for word in ("休み希望", "休日希望", "休みたい", "休暇希望"))
+            )
         ):
             result.off_requests.extend(sentence_days)
 
