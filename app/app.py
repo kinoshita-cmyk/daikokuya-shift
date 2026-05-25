@@ -89,6 +89,7 @@ def get_anthropic_api_key() -> Optional[str]:
 ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
 NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
 RULE_LEDGER_FILE = CONFIG_DIR / "rule_ledger_v1_0.json"
+NOTE_ADJUSTMENT_STATUS_OPTIONS = ["要確認", "確認済み", "補正のみ反映", "反映しない"]
 
 
 def load_rule_ledger_v1() -> dict:
@@ -2116,6 +2117,84 @@ def summarize_natural_language_note_for_review(
     }
 
 
+def _unique_label_list(labels: list[str]) -> list[str]:
+    """表示用ラベルの重複を順序を保って取り除く。"""
+    result = []
+    seen = set()
+    for label in labels:
+        text = str(label or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def build_note_reflection_review(
+    original_note: str,
+    adjustment: dict,
+    year: int,
+    month: int,
+) -> dict:
+    """自由記載が最終的に生成条件へどう入るかを表示用に整理する。"""
+    original_summary = summarize_natural_language_note_for_review(
+        original_note or "", year, month,
+    )
+    status = str(adjustment.get("status", "") or "-")
+    corrected_text = str(adjustment.get("corrected_text", "") or "")
+    correction_summary = (
+        summarize_natural_language_note_for_review(corrected_text, year, month)
+        if corrected_text.strip() else {
+            "auto_labels": [],
+            "review_labels": [],
+            "status": "補正なし",
+        }
+    )
+    original_labels = list(original_summary.get("auto_labels", []))
+    correction_labels = list(correction_summary.get("auto_labels", []))
+    notes: list[str] = []
+
+    if status == "確認済み":
+        final_labels = _unique_label_list(original_labels + correction_labels)
+        source_label = "自動反映 + 管理者補正"
+        if corrected_text.strip() and not correction_labels:
+            notes.append("管理者補正メモが生成条件として読めていません")
+    elif status == "補正のみ反映":
+        final_labels = _unique_label_list(correction_labels)
+        source_label = "管理者補正のみ"
+        if corrected_text.strip() and not correction_labels:
+            notes.append("補正のみ反映ですが、補正メモが生成条件として読めていません")
+        if not corrected_text.strip():
+            notes.append("補正のみ反映にするには、補正メモが必要です")
+    elif status == "反映しない":
+        final_labels = []
+        source_label = "生成条件に入れない"
+        if original_labels or correction_labels:
+            notes.append("自動反映・管理者補正とも生成条件から外します")
+    else:
+        final_labels = _unique_label_list(original_labels)
+        source_label = "自動反映のみ"
+        if corrected_text.strip():
+            notes.append("補正メモは保存済みですが、確認済みではないため未反映です")
+
+    if original_summary.get("review_labels"):
+        notes.extend(str(x) for x in original_summary.get("review_labels", []))
+    if status in {"確認済み", "補正のみ反映"} and correction_summary.get("review_labels"):
+        notes.extend(
+            f"補正確認: {x}" for x in correction_summary.get("review_labels", [])
+        )
+
+    return {
+        "status": status,
+        "source_label": source_label,
+        "original_auto_labels": original_labels,
+        "correction_auto_labels": correction_labels,
+        "final_labels": final_labels,
+        "notes": _unique_label_list(notes),
+        "correction_status": correction_summary.get("status", ""),
+    }
+
+
 def render_scrollable_request_table(rows: list[dict]) -> None:
     """本人提出希望を横スクロール可能な表で表示する。"""
     if not rows:
@@ -3389,18 +3468,30 @@ if mode == "📊 経営者ビュー":
             note_rows = []
             for s in all_note_items:
                 adj = note_adjustments_by_employee.get(s.get("employee", "")) or {}
+                reflection = build_note_reflection_review(
+                    s.get("note", "") or s.get("note_excerpt", ""),
+                    adj,
+                    int(target_year),
+                    int(target_month),
+                )
                 note_rows.append({
                     "氏名": s.get("employee", ""),
                     "判定": s.get("note_parse_status", ""),
                     "自動反映": " / ".join(s.get("note_auto_labels", [])) or "-",
                     "要確認": " / ".join(s.get("note_review_labels", [])) or "-",
                     "管理者補正": adj.get("corrected_text", "") or "-",
+                    "補正の読取": " / ".join(reflection.get("correction_auto_labels", [])) or "-",
+                    "最終反映条件": " / ".join(reflection.get("final_labels", [])) or "-",
+                    "反映方式": reflection.get("source_label", "-"),
+                    "確認メモ": " / ".join(reflection.get("notes", [])) or "-",
                     "補正状態": adj.get("status", "") or "-",
                     "原文": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             st.dataframe(note_rows, width="stretch", hide_index=True)
             st.caption(
-                "管理者補正は、補正状態を「確認済み」にしたものだけ生成条件へ反映します。"
+                "補正状態が「確認済み」の場合は自動反映に管理者補正を追加します。"
+                "「補正のみ反映」は自動反映を外して管理者補正だけを使います。"
+                "「反映しない」は自由記載由来の条件を生成に入れません。"
                 "反映内容はシフト保存時の生成条件にも記録します。"
             )
             note_employee_options = [s.get("employee", "") for s in all_note_items]
@@ -3426,6 +3517,23 @@ if mode == "📊 経営者ビュー":
                 f'{escape(original_note or "自由記載なし")}</div>',
                 unsafe_allow_html=True,
             )
+            current_reflection = build_note_reflection_review(
+                original_note,
+                existing_adjustment,
+                int(target_year),
+                int(target_month),
+            )
+            st.markdown("**現在の最終反映条件**")
+            st.dataframe(
+                [{
+                    "反映方式": current_reflection.get("source_label", "-"),
+                    "補正の読取": " / ".join(current_reflection.get("correction_auto_labels", [])) or "-",
+                    "生成に渡る条件": " / ".join(current_reflection.get("final_labels", [])) or "-",
+                    "確認メモ": " / ".join(current_reflection.get("notes", [])) or "-",
+                }],
+                width="stretch",
+                hide_index=True,
+            )
             note_widget_suffix = (
                 f"{int(target_year)}_{int(target_month)}_{selected_note_employee}"
             )
@@ -3435,13 +3543,18 @@ if mode == "📊 経営者ビュー":
             ):
                 correction_status = st.selectbox(
                     "補正状態",
-                    ["要確認", "確認済み", "反映しない"],
-                    index=["要確認", "確認済み", "反映しない"].index(
+                    NOTE_ADJUSTMENT_STATUS_OPTIONS,
+                    index=NOTE_ADJUSTMENT_STATUS_OPTIONS.index(
                         existing_adjustment.get("status", "要確認")
-                        if existing_adjustment.get("status", "要確認") in ["要確認", "確認済み", "反映しない"]
+                        if existing_adjustment.get("status", "要確認") in NOTE_ADJUSTMENT_STATUS_OPTIONS
                         else "要確認"
                     ),
                     key=f"note_adjust_status_{note_widget_suffix}",
+                    help=(
+                        "確認済み: 自動反映 + 補正 / "
+                        "補正のみ反映: 自動反映を外して補正だけ / "
+                        "反映しない: 自由記載由来の条件を入れない"
+                    ),
                 )
                 corrected_text = st.text_area(
                     "管理者補正メモ",
@@ -3459,7 +3572,10 @@ if mode == "📊 経営者ビュー":
                 if st.form_submit_button("管理者補正を保存"):
                     if not selected_note_employee:
                         st.error("スタッフを選択してください。")
-                    elif not corrected_text.strip() and correction_status != "反映しない":
+                    elif (
+                        correction_status in {"確認済み", "補正のみ反映"}
+                        and not corrected_text.strip()
+                    ):
                         st.error("管理者補正メモを入力してください。")
                     else:
                         upsert_note_adjustment(
