@@ -16,6 +16,7 @@ import sys
 import os
 import json
 import inspect
+import re
 from pathlib import Path
 from typing import Optional
 from html import escape
@@ -1853,6 +1854,38 @@ def summarize_natural_language_note_for_review(
             "review_labels": [],
             "status": "自由記載なし",
         }
+    _note_normalize_trans = str.maketrans({
+        **{chr(ord("０") + i): str(i) for i in range(10)},
+        "，": ",",
+        "、": ",",
+        "．": ".",
+        "：": ":",
+        "　": " ",
+        "〜": "-",
+        "～": "-",
+        "－": "-",
+        "―": "-",
+        "–": "-",
+        "—": "-",
+        "＋": "+",
+        "➕": "+",
+    })
+    normalized_note = note_text.translate(_note_normalize_trans)
+    greeting_cleaned = normalized_note
+    for greeting in (
+        "よろしくお願いいたします", "よろしくお願い致します", "よろしくお願いします",
+        "宜しくお願いいたします", "宜しくお願い致します", "宜しくお願いします",
+        "お願いします", "お願いいたします", "お願い致します",
+    ):
+        greeting_cleaned = greeting_cleaned.replace(greeting, "")
+    greeting_cleaned = re.sub(r"[\s。．.,、!！?？]+", "", greeting_cleaned)
+    if not greeting_cleaned:
+        return {
+            "has_note": True,
+            "auto_labels": [],
+            "review_labels": [],
+            "status": "連絡文のみ",
+        }
 
     try:
         from prototype.submission_loader import parse_natural_language_note
@@ -1914,13 +1947,6 @@ def summarize_natural_language_note_for_review(
             f"任意出勤候補: {_day_list_label(parsed_note.ignored_optional_work_days)}"
         )
 
-    normalized_note = note_text.translate(str.maketrans({
-        "，": ",",
-        "、": ",",
-        "．": ".",
-        "：": ":",
-        "　": " ",
-    }))
     review_keywords = {
         "程度": "日数が目安表現です",
         "くらい": "日数が目安表現です",
@@ -1936,10 +1962,21 @@ def summarize_natural_language_note_for_review(
         "必要人数にはカウントしない": "人数カウント除外は管理者確認が必要です",
         "割合": "配属割合の指定は管理者確認が必要です",
         "半々": "配属割合の指定は管理者確認が必要です",
+        "月末からの連勤": "連勤回避による休み希望か管理者確認が必要です",
+        "連勤になる": "連勤回避による休み希望か管理者確認が必要です",
+        "出勤可能になるかも": "後日変更の可能性があるため管理者確認が必要です",
+        "途中抜け": "勤務途中の不在時間は管理者確認が必要です",
+        "研修": "研修・途中抜けは管理者確認が必要です",
     }
     seen_review_reasons: set[str] = set()
     for keyword, reason in review_keywords.items():
         if keyword in normalized_note and reason not in seen_review_reasons:
+            review_labels.append(reason)
+            seen_review_reasons.add(reason)
+
+    if re.search(r"\d{1,2}\s*-\s*\d{1,2}\s*日(?:間)?", normalized_note):
+        reason = "日数が範囲指定です"
+        if reason not in seen_review_reasons:
             review_labels.append(reason)
             seen_review_reasons.add(reason)
 
@@ -3137,6 +3174,23 @@ if mode == "📊 経営者ビュー":
                 if s.get("note_auto_labels"):
                     st.caption("自動反映: " + " / ".join(s.get("note_auto_labels", [])))
                 st.caption("原文: " + (s.get("note", "") or s.get("note_excerpt", "")))
+
+    all_note_items = [
+        s for s in submission_status.get("submitted", [])
+        if s.get("has_note")
+    ]
+    if all_note_items:
+        with st.expander("📝 自由記載レビュー一覧（原文・自動反映・要確認）", expanded=False):
+            note_rows = []
+            for s in all_note_items:
+                note_rows.append({
+                    "氏名": s.get("employee", ""),
+                    "判定": s.get("note_parse_status", ""),
+                    "自動反映": " / ".join(s.get("note_auto_labels", [])) or "-",
+                    "要確認": " / ".join(s.get("note_review_labels", [])) or "-",
+                    "原文": s.get("note", "") or s.get("note_excerpt", ""),
+                })
+            st.dataframe(note_rows, width="stretch", hide_index=True)
 
     # 詳細表示（折りたたみ式）
     with st.expander(
