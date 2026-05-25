@@ -3336,12 +3336,16 @@ if mode == "📊 経営者ビュー":
                     ),
                     "",
                 )
-                st.text_area(
-                    "原文（変更不可）",
-                    value=original_note,
-                    height=100,
-                    disabled=True,
-                    key=f"note_adjust_original_{int(target_year)}_{int(target_month)}",
+                st.markdown("**原文（変更不可）**")
+                st.markdown(
+                    f'<div style="background:#f8fafc; border:1px solid #cbd5e1; '
+                    f'border-radius:8px; padding:10px 12px; white-space:pre-wrap; '
+                    f'font-size:13px; line-height:1.6; color:#111827;">'
+                    f'{escape(original_note or "自由記載なし")}</div>',
+                    unsafe_allow_html=True,
+                )
+                note_widget_suffix = (
+                    f"{int(target_year)}_{int(target_month)}_{selected_note_employee}"
                 )
                 correction_status = st.selectbox(
                     "補正状態",
@@ -3351,20 +3355,20 @@ if mode == "📊 経営者ビュー":
                         if existing_adjustment.get("status", "要確認") in ["要確認", "確認済み", "反映しない"]
                         else "要確認"
                     ),
-                    key=f"note_adjust_status_{int(target_year)}_{int(target_month)}",
+                    key=f"note_adjust_status_{note_widget_suffix}",
                 )
                 corrected_text = st.text_area(
                     "管理者補正メモ",
                     value=existing_adjustment.get("corrected_text", ""),
                     placeholder="例: 1日は休み希望として扱う / 合計12〜13日勤務希望として確認 / 4日は研修途中抜けのため手動確認",
                     height=90,
-                    key=f"note_adjust_text_{int(target_year)}_{int(target_month)}",
+                    key=f"note_adjust_text_{note_widget_suffix}",
                 )
                 correction_memo = st.text_input(
                     "補足メモ",
                     value=existing_adjustment.get("memo", ""),
                     placeholder="例: 本人確認済み、今回は手動調整で対応",
-                    key=f"note_adjust_memo_{int(target_year)}_{int(target_month)}",
+                    key=f"note_adjust_memo_{note_widget_suffix}",
                 )
                 if st.form_submit_button("管理者補正を保存"):
                     if not selected_note_employee:
