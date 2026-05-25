@@ -3317,36 +3317,36 @@ if mode == "📊 経営者ビュー":
                 "管理者補正は、現時点ではメモとして保存します。"
                 "生成条件への反映は次の段階で、確認済みのものだけを対象にします。"
             )
+            note_employee_options = [s.get("employee", "") for s in all_note_items]
+            selected_note_employee = st.selectbox(
+                "補正するスタッフ",
+                note_employee_options,
+                key=f"note_adjust_employee_{int(target_year)}_{int(target_month)}",
+            )
+            existing_adjustment = note_adjustments_by_employee.get(selected_note_employee, {})
+            original_note = next(
+                (
+                    s.get("note", "") or s.get("note_excerpt", "")
+                    for s in all_note_items
+                    if s.get("employee", "") == selected_note_employee
+                ),
+                "",
+            )
+            st.markdown("**原文（変更不可）**")
+            st.markdown(
+                f'<div style="background:#f8fafc; border:1px solid #cbd5e1; '
+                f'border-radius:8px; padding:10px 12px; white-space:pre-wrap; '
+                f'font-size:13px; line-height:1.6; color:#111827;">'
+                f'{escape(original_note or "自由記載なし")}</div>',
+                unsafe_allow_html=True,
+            )
+            note_widget_suffix = (
+                f"{int(target_year)}_{int(target_month)}_{selected_note_employee}"
+            )
             with st.form(
-                f"note_adjustment_form_{int(target_year)}_{int(target_month)}",
+                f"note_adjustment_form_{note_widget_suffix}",
                 clear_on_submit=False,
             ):
-                note_employee_options = [s.get("employee", "") for s in all_note_items]
-                selected_note_employee = st.selectbox(
-                    "補正するスタッフ",
-                    note_employee_options,
-                    key=f"note_adjust_employee_{int(target_year)}_{int(target_month)}",
-                )
-                existing_adjustment = note_adjustments_by_employee.get(selected_note_employee, {})
-                original_note = next(
-                    (
-                        s.get("note", "") or s.get("note_excerpt", "")
-                        for s in all_note_items
-                        if s.get("employee", "") == selected_note_employee
-                    ),
-                    "",
-                )
-                st.markdown("**原文（変更不可）**")
-                st.markdown(
-                    f'<div style="background:#f8fafc; border:1px solid #cbd5e1; '
-                    f'border-radius:8px; padding:10px 12px; white-space:pre-wrap; '
-                    f'font-size:13px; line-height:1.6; color:#111827;">'
-                    f'{escape(original_note or "自由記載なし")}</div>',
-                    unsafe_allow_html=True,
-                )
-                note_widget_suffix = (
-                    f"{int(target_year)}_{int(target_month)}_{selected_note_employee}"
-                )
                 correction_status = st.selectbox(
                     "補正状態",
                     ["要確認", "確認済み", "反映しない"],
