@@ -31,7 +31,10 @@ from .models import (
     MonthlyShift, ShiftAssignment, Store, Skill, OperationMode, Affinity,
     PreviousMonthCarryover, Role,
 )
-from .employees import ALL_EMPLOYEES, ECO_STAFF, TICKET_STAFF, get_employee, shift_active_employees
+from .employees import (
+    ALL_EMPLOYEES, ECO_STAFF, TICKET_STAFF, get_employee,
+    is_probationary_employee, shift_active_employees,
+)
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
@@ -169,6 +172,7 @@ def generate_shift(
     preferred_work_groups: Optional[list[tuple[str, list[int], int, Optional[Store]]]] = None,
     preferred_consecutive_off: Optional[list[tuple[str, int]]] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
+    required_assignments: Optional[list[dict]] = None,
     historical_actual_preferences: Optional[list[tuple[str, int, Store]]] = None,
     strict_warning_constraints: bool = True,
     advisor_max_days: Optional[int] = 0,
@@ -200,6 +204,7 @@ def generate_shift(
     preferred_work_groups = preferred_work_groups or []
     preferred_consecutive_off = preferred_consecutive_off or []
     monthly_store_count_rules = monthly_store_count_rules or []
+    required_assignments = required_assignments or []
     historical_actual_preferences = historical_actual_preferences or []
     operation_modes = operation_modes or determine_operation_modes(year, month)
     consec_exceptions = consec_exceptions or []
@@ -207,7 +212,9 @@ def generate_shift(
     # 主要なメイン稼働メンバーリスト（山本を除く）。
     # 顧問は基本的に自動投入しない。必要な場合だけ advisor_max_days を上げる。
     main_employees = [
-        e for e in shift_active_employees() if not e.is_auxiliary
+        e for e in shift_active_employees()
+        if not e.is_auxiliary
+        and not is_probationary_employee(e, year, month)
     ]
     advisor = next((e for e in ALL_EMPLOYEES if e.name == "顧問"), None)
     if advisor is not None and all(e.name != "顧問" for e in main_employees):
@@ -326,6 +333,32 @@ def generate_shift(
         for name, value in employee_max_consecutive_off.items()
         if str(value).isdigit() and 1 <= int(value) <= days_in_month
     }
+    normalized_required_assignments = []
+    for rule in required_assignments:
+        if not rule or not rule.get("employee"):
+            continue
+        name = str(rule.get("employee"))
+        try:
+            day = int(rule.get("day") or rule.get("target_day") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= day <= days_in_month):
+            continue
+        raw_store = rule.get("store")
+        if raw_store is None:
+            stores = rule.get("stores") or []
+            raw_store = stores[0] if stores else None
+        store = _store_from_rule_value(raw_store)
+        if store is None or store == Store.OFF:
+            continue
+        normalized_required_assignments.append({
+            "name": rule.get("name") or "月別日付指定配置",
+            "employee": name,
+            "day": day,
+            "store": store,
+            "severity": str(rule.get("severity") or "ERROR").upper(),
+        })
+    required_assignments = normalized_required_assignments
 
     # ============================================================
     # CP-SAT モデルの構築
@@ -495,6 +528,17 @@ def generate_shift(
                         model.Add(
                             x[first_name][d][store] + x[second_name][d][store] <= 1
                         )
+
+    # 月別ルール: 指定日の指定店舗に特定スタッフを配置する。
+    # ERROR は必須条件、WARNING は後段の目的関数で強く優先する。
+    for rule in required_assignments:
+        name = str(rule.get("employee") or "")
+        day = int(rule.get("day") or 0)
+        store = rule.get("store")
+        if name not in main_employee_names or store not in main_stores:
+            continue
+        if str(rule.get("severity") or "ERROR").upper() == "ERROR":
+            model.Add(x[name][day][store] == 1)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -971,6 +1015,16 @@ def generate_shift(
                 capped = model.NewIntVar(0, required_count, f"monthly_rule_{name}_{len(monthly_rule_terms)}")
                 model.AddMinEquality(capped, [actual_count, model.NewConstant(required_count)])
                 monthly_rule_terms.append(capped)
+
+    # 月別ルール: 日付指定配置の WARNING は「必ず」ではなく強い優先条件として扱う。
+    for rule in required_assignments:
+        if str(rule.get("severity") or "ERROR").upper() == "ERROR":
+            continue
+        name = str(rule.get("employee") or "")
+        day = int(rule.get("day") or 0)
+        store = rule.get("store")
+        if name in main_employee_names and store in main_stores:
+            monthly_rule_terms.append(x[name][day][store])
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {

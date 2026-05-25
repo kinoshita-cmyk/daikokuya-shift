@@ -225,6 +225,7 @@ def validate(
     max_consec: Optional[int] = None,
     allow_omiya_short: bool = True,
     monthly_store_count_rules: Optional[list[dict]] = None,
+    required_assignments: Optional[list[dict]] = None,
     preferred_work_requests: Optional[list] = None,
     preferred_work_groups: Optional[list] = None,
 ) -> ValidationResult:
@@ -252,6 +253,7 @@ def validate(
     employee_max_consecutive_work = employee_max_consecutive_work or {}
     employee_max_consecutive_off = employee_max_consecutive_off or {}
     monthly_store_count_rules = monthly_store_count_rules or []
+    required_assignments = required_assignments or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
 
@@ -320,13 +322,16 @@ def validate(
     # 15. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 16. 牧野さんの東口・西口研修ルールチェック
+    # 16. 月別の日付指定配置ルールチェック
+    _check_required_assignment_rules(shift, result, required_assignments)
+
+    # 17. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 17. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 18. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 18. 月間勤務日数バランスチェック
+    # 19. 月間勤務日数バランスチェック
     _check_monthly_workday_balance(
         shift,
         result,
@@ -336,7 +341,7 @@ def validate(
         exact_holiday_days,
     )
 
-    # 19. 統計情報の集計
+    # 20. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -1363,6 +1368,50 @@ def _check_monthly_store_count_rules(
                 f"{rule.get('name') or '月別追加ルール'}: "
                 f"{store_names}への勤務が{actual_count}日です。"
                 f"条件は{condition_text}です。"
+            ),
+        ))
+
+
+def _check_required_assignment_rules(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    rules: list[dict],
+) -> None:
+    """月別追加ルール（日付指定で特定店舗へ配置）を検証する。"""
+    days_in_month = monthrange(shift.year, shift.month)[1]
+    for rule in rules:
+        if not rule or not rule.get("employee"):
+            continue
+        emp_name = str(rule.get("employee"))
+        try:
+            day = int(rule.get("day") or rule.get("target_day") or 0)
+        except (TypeError, ValueError):
+            continue
+        if not (1 <= day <= days_in_month):
+            continue
+        raw_store = rule.get("store")
+        if raw_store is None:
+            stores = rule.get("stores") or []
+            raw_store = stores[0] if stores else None
+        store = _store_from_rule_value(raw_store)
+        if store is None or store == Store.OFF:
+            continue
+
+        assignment = shift.get_assignment(emp_name, day)
+        actual_store = assignment.store if assignment is not None else Store.OFF
+        if actual_store == store:
+            continue
+
+        severity = str(rule.get("severity") or "ERROR").upper()
+        result.issues.append(Issue(
+            severity="ERROR" if severity == "ERROR" else "WARNING",
+            category="月別ルール",
+            day=day,
+            employee=emp_name,
+            message=(
+                f"{rule.get('name') or '月別日付指定配置'}: "
+                f"{store.display_name}への配置指定です。"
+                f"現在は{actual_store.display_name}です。"
             ),
         ))
 
