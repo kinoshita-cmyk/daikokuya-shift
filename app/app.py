@@ -3360,7 +3360,7 @@ if mode == "📊 経営者ビュー":
                 corrected_text = st.text_area(
                     "管理者補正メモ",
                     value=existing_adjustment.get("corrected_text", ""),
-                    placeholder="例: 1日は休み希望として扱う / 合計12〜13日勤務希望として確認 / 4日は研修途中抜けのため手動確認",
+                    placeholder="例: 1日は休み希望として扱う / 13日勤務希望として扱う / 4日は研修途中抜けのため手動確認",
                     height=90,
                     key=f"note_adjust_text_{note_widget_suffix}",
                 )
@@ -3882,6 +3882,12 @@ if mode == "📊 経営者ビュー":
                                     f"\n⚠ 自由記載に管理者確認が必要な提出があります: "
                                     f"{'、'.join(note_review_names)}"
                                 )
+                        admin_note_adjustments = getattr(sub_data, "admin_note_adjustments", {})
+                        if admin_note_adjustments:
+                            data_source_msg += (
+                                f"\n管理者が確認済みにした自由記載補正 "
+                                f"{len(admin_note_adjustments)}名分を生成条件に反映しました。"
+                            )
                         if sub_data.pending_employees:
                             data_source_msg += (
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
@@ -4174,6 +4180,9 @@ if mode == "📊 経営者ビュー":
                     "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
+                    ),
+                    "admin_note_adjustments": dict(
+                        getattr(sub_data, "admin_note_adjustments", {})
                     ),
                     "days_in_month": days_in_m,
                     "total_off_days_requested": sum(
