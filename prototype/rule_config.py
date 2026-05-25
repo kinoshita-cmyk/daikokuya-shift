@@ -106,6 +106,21 @@ class RuleConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RuleConfig":
+        parameters = {
+            **DEFAULT_PARAMETERS,
+            **data.get("parameters", {}),
+        }
+        try:
+            min_solver_seconds = int(DEFAULT_PARAMETERS["solver_time_limit_seconds"])
+            current_solver_seconds = int(
+                parameters.get("solver_time_limit_seconds", min_solver_seconds)
+            )
+            if current_solver_seconds < min_solver_seconds:
+                parameters["solver_time_limit_seconds"] = min_solver_seconds
+        except (TypeError, ValueError):
+            parameters["solver_time_limit_seconds"] = DEFAULT_PARAMETERS[
+                "solver_time_limit_seconds"
+            ]
         return cls(
             version=data.get("version", 1),
             updated_at=data.get("updated_at", ""),
@@ -114,10 +129,7 @@ class RuleConfig:
                 **DEFAULT_ENABLED_CHECKS,
                 **data.get("enabled_checks", {}),
             },
-            parameters={
-                **DEFAULT_PARAMETERS,
-                **data.get("parameters", {}),
-            },
+            parameters=parameters,
             custom_rules=[
                 CustomRule(**r) for r in data.get("custom_rules", [])
             ],
