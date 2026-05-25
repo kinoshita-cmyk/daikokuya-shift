@@ -74,8 +74,8 @@ def _is_only_on_request_employee(name: str) -> bool:
 NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
 
 
-def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
-    """管理者が確認済みにした自由記載補正を読み込む。"""
+def _load_latest_note_adjustments(year: int, month: int) -> dict[str, dict]:
+    """従業員ごとの最新の自由記載補正を読み込む。"""
     try:
         from .github_backup import sync_latest_config_from_github
 
@@ -99,11 +99,8 @@ def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
             continue
         if int(adj.get("month", 0) or 0) != int(month):
             continue
-        if str(adj.get("status", "")) != "確認済み":
-            continue
         employee = str(adj.get("employee", "")).strip()
-        corrected_text = str(adj.get("corrected_text", "")).strip()
-        if not employee or not corrected_text:
+        if not employee:
             continue
         if (
             employee not in latest
@@ -111,9 +108,18 @@ def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
             >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
         ):
             latest[employee] = adj
+    return latest
+
+
+def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
+    """管理者が確認済みにした自由記載補正を読み込む。"""
+    latest = _load_latest_note_adjustments(year, month)
+    confirmed_statuses = {"確認済み", "補正のみ反映"}
     return {
         employee: str(adj.get("corrected_text", "")).strip()
         for employee, adj in latest.items()
+        if str(adj.get("status", "")) in confirmed_statuses
+        and str(adj.get("corrected_text", "")).strip()
     }
 
 
@@ -751,6 +757,8 @@ def load_submissions_for_month(
             data.pending_employees = list(expected_employees)
         return data
 
+    latest_note_adjustments = _load_latest_note_adjustments(year, month)
+
     # 各従業員の最新提出を取得
     latest: dict[str, dict] = {}
     for f in candidate_files:
@@ -814,7 +822,15 @@ def load_submissions_for_month(
         if paid:
             data.paid_leave_days[author] = int(paid)
 
-        parsed_note = parse_natural_language_note(note_text, year, month)
+        note_adjustment = latest_note_adjustments.get(author, {})
+        note_adjustment_status = str(note_adjustment.get("status", ""))
+        skip_original_note = note_adjustment_status in {"補正のみ反映", "反映しない"}
+
+        parsed_note = (
+            ParsedNaturalLanguageNote()
+            if skip_original_note
+            else parse_natural_language_note(note_text, year, month)
+        )
         if (
             author == "大塚"
             and parsed_note.requested_holiday_days is not None
@@ -937,8 +953,14 @@ def load_submissions_for_month(
 
         data.submitted_employees.append(author)
 
-    confirmed_adjustments = _load_confirmed_note_adjustments(year, month)
-    for author, corrected_text in confirmed_adjustments.items():
+    confirmed_statuses = {"確認済み", "補正のみ反映"}
+    for author, adjustment in latest_note_adjustments.items():
+        status = str(adjustment.get("status", ""))
+        if status not in confirmed_statuses:
+            continue
+        corrected_text = str(adjustment.get("corrected_text", "")).strip()
+        if not corrected_text:
+            continue
         if expected_employees and author not in expected_employees:
             continue
         parsed_adjustment = parse_natural_language_note(corrected_text, year, month)
