@@ -488,7 +488,7 @@ from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employ
 from prototype.generator import generate_shift, determine_operation_modes
 from prototype.validator import validate
 from prototype.backup import ShiftBackup
-from prototype.carryover import load_locked_previous_month_carryover
+from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
 from prototype.excel_loader import load_shift_from_excel
 from prototype.excel_exporter import export_shift_to_excel, EXPORT_COLUMN_ORDER
 from prototype.pdf_exporter import export_shift_to_pdf
@@ -2557,15 +2557,70 @@ def save_shift_snapshot_with_github(
     kind: str,
     author: str,
     note: str = "",
+    metadata: Optional[dict] = None,
 ) -> Path:
     """シフトをローカル保存し、設定済みならGitHubにも自動保存する。"""
-    path = backup_mgr.save_shift(shift, kind=kind, author=author, note=note)
+    path = backup_mgr.save_shift(
+        shift, kind=kind, author=author, note=note, metadata=metadata,
+    )
     try:
         from prototype.github_backup import push_shift_to_github
         push_shift_to_github(path, int(shift.year), int(shift.month), kind=kind)
     except Exception:
         pass
     return path
+
+
+def build_generation_metadata(message: str, input_summary: dict) -> dict:
+    """保存済みシフトに、生成時に使った入力条件を残す。"""
+    return {
+        "schema": "generation_metadata_v1",
+        "saved_at": datetime.now().isoformat(),
+        "message": message or "",
+        "input_summary": input_summary or {},
+    }
+
+
+def current_generation_metadata_for_month(year: int, month: int) -> dict:
+    """現在の画面に残っている直近生成結果から、保存用メタデータを作る。"""
+    last_gen = st.session_state.get("last_gen_result") or {}
+    if last_gen.get("ym") != f"{int(year):04d}-{int(month):02d}":
+        return {}
+    if not last_gen.get("input_summary"):
+        return {}
+    return build_generation_metadata(
+        str(last_gen.get("message", "")),
+        dict(last_gen.get("input_summary", {})),
+    )
+
+
+def render_generation_metadata_summary(metadata: dict, title: str = "保存済みシフトの生成条件") -> None:
+    """保存済みシフトに含めた生成条件を、復元後も確認できるように表示する。"""
+    if not metadata:
+        return
+    input_summary = metadata.get("input_summary") or {}
+    admin_adjustments = input_summary.get("admin_note_adjustments") or {}
+    parsed_notes = input_summary.get("parsed_note_summaries") or {}
+    if not admin_adjustments and not parsed_notes and not metadata.get("message"):
+        return
+    st.info(
+        f"🧾 {title}: "
+        f"自由記載自動反映 {len(parsed_notes)}名分 / "
+        f"管理者補正 {len(admin_adjustments)}名分"
+    )
+    with st.expander(f"{title}の詳細を見る", expanded=False):
+        if metadata.get("message"):
+            st.write(str(metadata.get("message")))
+        if admin_adjustments:
+            st.markdown("**管理者補正（確認済みとして生成条件に使った内容）**")
+            for emp, text in admin_adjustments.items():
+                st.write(f"- {emp}: {text}")
+        if input_summary.get("holiday_overrides"):
+            st.write(f"- 月内目標休日数（有給・補正込み）: {input_summary['holiday_overrides']}")
+        if input_summary.get("exact_holiday_days"):
+            st.write(f"- 休日日数の固定指定: {input_summary['exact_holiday_days']}")
+        if input_summary.get("employee_max_consecutive_work"):
+            st.write(f"- 個別の連勤上限: {input_summary['employee_max_consecutive_work']}")
 
 
 def push_lock_file_to_github(lock_path: Path, year: int, month: int, action: str) -> None:
@@ -3055,6 +3110,11 @@ if mode == "📊 経営者ビュー":
 
     # ロック状態を確認・表示
     lock_info = lock_mgr.get_lock_info(int(target_year), int(target_month))
+    try:
+        prev_year, prev_month = previous_year_month(int(target_year), int(target_month))
+        lock_mgr.get_lock_info(prev_year, prev_month)
+    except Exception:
+        pass
     if lock_info:
         st.markdown(
             f'<div style="background:#dbeafe; padding:10px; border-radius:6px; '
@@ -3066,6 +3126,18 @@ if mode == "📊 経営者ビュー":
             f'</div>',
             unsafe_allow_html=True,
         )
+        try:
+            locked_snapshot = (
+                backup_mgr.backup_dir
+                / f"{lock_info.year}-{lock_info.month:02d}"
+                / lock_info.snapshot_file
+            )
+            render_generation_metadata_summary(
+                backup_mgr.load_shift_metadata(locked_snapshot),
+                title="ロック済み確定版の生成条件",
+            )
+        except Exception:
+            pass
     else:
         st.markdown(
             '<div style="background:#fef3c7; padding:10px; border-radius:6px; '
@@ -3073,6 +3145,12 @@ if mode == "📊 経営者ビュー":
             '🔓 ロックなし（生成・編集可能）'
             '</div>',
             unsafe_allow_html=True,
+        )
+
+    if st.session_state.get("loaded_shift_metadata"):
+        render_generation_metadata_summary(
+            st.session_state.get("loaded_shift_metadata", {}),
+            title="復元したシフトの生成条件",
         )
 
     # ============================================================
@@ -3322,8 +3400,8 @@ if mode == "📊 経営者ビュー":
                 })
             st.dataframe(note_rows, width="stretch", hide_index=True)
             st.caption(
-                "管理者補正は、現時点ではメモとして保存します。"
-                "生成条件への反映は次の段階で、確認済みのものだけを対象にします。"
+                "管理者補正は、補正状態を「確認済み」にしたものだけ生成条件へ反映します。"
+                "反映内容はシフト保存時の生成条件にも記録します。"
             )
             note_employee_options = [s.get("employee", "") for s in all_note_items]
             selected_note_employee = st.selectbox(
@@ -4209,6 +4287,9 @@ if mode == "📊 経営者ビュー":
 
                 if shift is not None:
                     save_session_shift(shift)
+                    st.session_state["loaded_shift_metadata"] = build_generation_metadata(
+                        data_source_msg, _input_summary,
+                    )
                     try:
                         save_shift_snapshot_with_github(
                             backup_mgr,
@@ -4216,6 +4297,9 @@ if mode == "📊 経営者ビュー":
                             kind="draft",
                             author="自動保存",
                             note="シフト生成直後の下書き",
+                            metadata=build_generation_metadata(
+                                data_source_msg, _input_summary,
+                            ),
                         )
                     except Exception:
                         pass
@@ -4340,6 +4424,9 @@ if mode == "📊 経営者ビュー":
                 if snapshot_path.exists():
                     loaded = backup_mgr.load_shift(snapshot_path)
                     save_session_shift(loaded)
+                    st.session_state["loaded_shift_metadata"] = (
+                        backup_mgr.load_shift_metadata(snapshot_path)
+                    )
                     try:
                         restore_validation_context_for_month(
                             int(target_year), int(target_month), rule_cfg,
@@ -4423,6 +4510,9 @@ if mode == "📊 経営者ビュー":
                     backup_mgr,
                     current_shift, kind="finalized",
                     author=lock_author, note=lock_note,
+                    metadata=current_generation_metadata_for_month(
+                        int(target_year), int(target_month),
+                    ),
                 )
                 # ロック登録
                 lock_path = lock_mgr.lock(
@@ -4485,10 +4575,15 @@ if mode == "📊 経営者ビュー":
     if shift is None:
         st.info("👆 上のボタンを押してシフトを生成してください")
         try:
-            latest_draft = backup_mgr.get_latest_shift(
+            latest_draft_path = backup_mgr.get_latest_shift_path(
                 int(target_year), int(target_month), kind="draft",
             )
+            latest_draft = (
+                backup_mgr.load_shift(latest_draft_path)
+                if latest_draft_path is not None else None
+            )
         except Exception:
+            latest_draft_path = None
             latest_draft = None
         if latest_draft is not None:
             if st.button(
@@ -4496,6 +4591,10 @@ if mode == "📊 経営者ビュー":
                 key="restore_latest_draft_shift",
             ):
                 save_session_shift(latest_draft)
+                if latest_draft_path is not None:
+                    st.session_state["loaded_shift_metadata"] = (
+                        backup_mgr.load_shift_metadata(latest_draft_path)
+                    )
                 try:
                     restore_validation_context_for_month(
                         int(target_year), int(target_month), rule_cfg,
@@ -8428,6 +8527,16 @@ elif mode == "⚙️ 設定":
                         if result.metadata:
                             exported_at = result.metadata.get("exported_at", "")
                             st.caption(f"バックアップ作成日時: {exported_at[:19]}")
+                        if getattr(result, "github_synced_files", 0):
+                            st.caption(
+                                f"GitHubバックアップへ再同期: "
+                                f"{result.github_synced_files}件"
+                            )
+                        if getattr(result, "github_errors", []):
+                            st.warning(
+                                "⚠ GitHubへの再同期で一部失敗しました:\n"
+                                + "\n".join(f"- {e}" for e in result.github_errors[:10])
+                            )
                         if result.errors:
                             st.warning(
                                 f"⚠ 一部エラーがありました:\n"
