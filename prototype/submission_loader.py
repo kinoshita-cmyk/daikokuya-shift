@@ -244,6 +244,10 @@ def _strip_total_count_phrases(text: str) -> str:
         r"出勤(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日(?:間)?",
         r"出勤\s*\d{1,2}\s*日(?:間)?",
         r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日",
+        r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:お)?(?:休み|休日|休暇)",
+        r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:希望|お願い|いただきたい|ください)",
+        r"(?:公休|平均|基本休|通常休|休み)\s*\d{1,2}\s*日\s*(?:\+|プラス)",
+        r"(?:公休|平均|基本休|通常休|休み)\s*\d{1,2}\s*日[^。\n]{0,12}?(?:有給|有休)",
         r"(?:休み|休日|休暇)(?:は|を)?\s*\d{1,2}\s*日(?:間)?\s*(?:いただきたい|ほしい|欲しい|希望)",
         r"(?:計|合計)\s*\d{1,2}\s*日(?:間)?\s*(?:お)?休み",
         r"\d{1,2}\s*日間\s*(?:お)?休み",
@@ -659,23 +663,60 @@ def _apply_parsed_note_to_submission_data(
             "sources": [],
         })
         summary.setdefault("sources", []).append(source_label)
-        summary.setdefault("off_requests", []).extend(parsed_note.off_requests)
-        summary.setdefault("work_requests", []).extend([
-            {"day": day, "store": store.name if store else None}
-            for day, store in parsed_note.work_requests
-        ])
-        summary.setdefault("work_groups", []).extend([
-            {
-                "candidate_days": list(candidate_days),
-                "required_count": required_count,
-                "store": store.name if store else None,
-            }
-            for candidate_days, required_count, store in parsed_note.work_groups
-        ])
-        summary.setdefault("flexible_off", []).extend([
-            {"candidate_days": days, "n_required": n}
-            for days, n in parsed_note.flexible_off
-        ])
+        existing_summary_off = set(summary.setdefault("off_requests", []))
+        existing_summary_off.update(parsed_note.off_requests)
+        summary["off_requests"] = sorted(existing_summary_off)
+
+        existing_summary_work = {
+            (int(item.get("day")), item.get("store"))
+            for item in summary.setdefault("work_requests", [])
+            if isinstance(item, dict) and str(item.get("day")).isdigit()
+        }
+        for day, store in parsed_note.work_requests:
+            key = (int(day), store.name if store else None)
+            if key not in existing_summary_work:
+                summary["work_requests"].append({"day": key[0], "store": key[1]})
+                existing_summary_work.add(key)
+
+        existing_summary_groups = {
+            (
+                tuple(sorted(int(day) for day in item.get("candidate_days", []))),
+                int(item.get("required_count", 0) or 0),
+                item.get("store"),
+            )
+            for item in summary.setdefault("work_groups", [])
+            if isinstance(item, dict)
+        }
+        for candidate_days, required_count, store in parsed_note.work_groups:
+            key = (
+                tuple(sorted(set(int(day) for day in candidate_days))),
+                int(required_count),
+                store.name if store else None,
+            )
+            if key not in existing_summary_groups:
+                summary["work_groups"].append({
+                    "candidate_days": list(key[0]),
+                    "required_count": key[1],
+                    "store": key[2],
+                })
+                existing_summary_groups.add(key)
+
+        existing_summary_flex = {
+            (
+                tuple(sorted(int(day) for day in item.get("candidate_days", []))),
+                int(item.get("n_required", 0) or 0),
+            )
+            for item in summary.setdefault("flexible_off", [])
+            if isinstance(item, dict)
+        }
+        for days, n in parsed_note.flexible_off:
+            key = (tuple(sorted(set(int(day) for day in days))), int(n))
+            if key not in existing_summary_flex:
+                summary["flexible_off"].append({
+                    "candidate_days": list(key[0]),
+                    "n_required": key[1],
+                })
+                existing_summary_flex.add(key)
         if parsed_note.paid_leave_days is not None:
             summary["paid_leave_days"] = parsed_note.paid_leave_days
         if parsed_note.requested_holiday_days is not None:
