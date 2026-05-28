@@ -1516,13 +1516,7 @@ def _check_monthly_workday_balance(
         )
         if base_target is None:
             continue
-        if emp.name in exact_holiday_days:
-            target = max(0, days - int(exact_holiday_days[emp.name]))
-        elif emp.name in holiday_overrides:
-            target = max(0, days - int(holiday_overrides[emp.name]))
-        else:
-            requested_off_count = len(set(off_requests.get(emp.name, [])))
-            target = min(int(base_target), max(0, days - requested_off_count))
+        target = int(base_target)
 
         actual = sum(
             1
@@ -1535,6 +1529,11 @@ def _check_monthly_workday_balance(
         diff = actual - target
         if diff <= -warning_diff:
             severity = "ERROR" if abs(diff) >= error_diff else "WARNING"
+            note = ""
+            if emp.name in exact_holiday_days:
+                note = f" 指定休日数は{int(exact_holiday_days[emp.name])}日です。"
+            elif emp.name in holiday_overrides:
+                note = f" 目標休日数は{int(holiday_overrides[emp.name])}日です。"
             result.issues.append(Issue(
                 severity=severity,
                 category="月間勤務日数不足",
@@ -1543,10 +1542,16 @@ def _check_monthly_workday_balance(
                 message=(
                     f"出勤{actual}日 / 基準{target}日（{abs(diff)}日不足）。"
                     "月別例外がなければ、出勤日数を増やしてください。"
+                    f"{note}"
                 ),
             ))
         elif diff >= warning_diff:
             severity = "ERROR" if diff >= error_diff else "WARNING"
+            note = ""
+            if emp.name in exact_holiday_days:
+                note = f" 指定休日数は{int(exact_holiday_days[emp.name])}日です。"
+            elif emp.name in holiday_overrides:
+                note = f" 目標休日数は{int(holiday_overrides[emp.name])}日です。"
             result.issues.append(Issue(
                 severity=severity,
                 category="月間勤務日数超過",
@@ -1555,6 +1560,7 @@ def _check_monthly_workday_balance(
                 message=(
                     f"出勤{actual}日 / 基準{target}日（{diff}日超過）。"
                     "人数が余る月でなければ、休みに寄せてください。"
+                    f"{note}"
                 ),
             ))
 
