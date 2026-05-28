@@ -45,7 +45,8 @@ except Exception:
     HAS_AGGRID = False
 
 from prototype.paths import (
-    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, MAY_2026_SHIFT_XLSX,
+    PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, LOCK_DIR,
+    MAY_2026_SHIFT_XLSX,
 )
 from prototype.submission_window import (
     format_timestamp_jst, is_submission_in_window, now_jst, timestamp_sort_key,
