@@ -4,11 +4,13 @@
 2026年5月時点の在籍19名（シフト稼働対象）+ 顧問1名 + 代表1名 を定義します。
 
 データソース:
-- /data/rules_2026_05.txt の「■5. 在勤割合」セクション
+- config/employees.json の現在ルール
+- /data/rules_2026_05.txt は初期資料として保管（最新チャット・設定を優先）
 - 年間基準出勤日数の表（2025年7月〜2026年6月）
 - 5月のシフト表（決定版）
 
 注意:
+- 通常運用では config/employees.json を優先。このファイルは設定JSONが読めない時の予備初期値
 - 専務 → 5月1日付で「非常勤取締役顧問」に役職変更（緊急時のみ稼働）
 - 代表（あなた）はシステム管理者で、シフトには入らない
 """
@@ -37,13 +39,13 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.AKABANE: Affinity.STRONG,
-            Store.HIGASHIGUCHI: Affinity.WEAK,    # 月1回のみ
-            Store.NISHIGUCHI: Affinity.WEAK,      # 不足時補填
-            Store.OMIYA: Affinity.WEAK,           # 巡回・応援で少数あり
-            Store.SUZURAN: Affinity.WEAK,         # 巡回・応援で少数あり
+            Store.HIGASHIGUCHI: Affinity.MEDIUM,
+            Store.NISHIGUCHI: Affinity.MEDIUM,
+            Store.SUZURAN: Affinity.MEDIUM,
+            Store.OMIYA: Affinity.WEAK,
         },
         annual_target_days=280,
-        notes="赤羽駅前店店長。赤羽強、月1回東口、西口不足時補填。月数回は他店舗巡回あり",
+        notes="主担当: 赤羽。通常対応可: 東口・西口・すずらん。応援・巡回可: 大宮。絶対配置不可なし。赤羽の割合を高く。",
     ),
     Employee(
         name="鈴木",
@@ -56,10 +58,10 @@ ECO_STAFF: list[Employee] = [
             Store.SUZURAN: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 配置不可
             Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
-            Store.OMIYA: Affinity.NONE,
+            Store.OMIYA: Affinity.WEAK,
         },
         annual_target_days=267,
-        notes="赤羽中、すずらん弱、東口・西口不可",
+        notes="通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="楯",
@@ -68,16 +70,16 @@ ECO_STAFF: list[Employee] = [
         role=Role.MANAGER,
         skill=Skill.ECO,
         home_store=Store.NISHIGUCHI,
-        station_type=StationType.FIXED,  # 西口店長
+        station_type=StationType.FLEXIBLE,
         affinities={
             Store.NISHIGUCHI: Affinity.STRONG,
-            Store.HIGASHIGUCHI: Affinity.WEAK,    # 月1回のみ
-            Store.AKABANE: Affinity.NONE,
+            Store.HIGASHIGUCHI: Affinity.MEDIUM,
+            Store.AKABANE: Affinity.WEAK,
             Store.OMIYA: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
         annual_target_days=270,
-        notes="大宮西口店店長。西口強、月1回東口（牧野とのペア）",
+        notes="主担当: 西口。通常対応可: 東口。応援・巡回可: 赤羽。配置不可なし。",
     ),
     Employee(
         name="牧野",
@@ -90,10 +92,10 @@ ECO_STAFF: list[Employee] = [
             Store.AKABANE: Affinity.MEDIUM,
             Store.OMIYA: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 当面、東口1名体制は不可
-            Store.NISHIGUCHI: Affinity.NONE,      # 通常不可。月次ルールの研修例外のみ
+            Store.NISHIGUCHI: Affinity.NONE,      # 通常不可。研修は手動・月別例外で扱う
         },
         annual_target_days=268,
-        notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽3回以上・すずらん3回以上。研修として楯と西口に入ることがある。",
+        notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽2回以上・すずらん2回以上。",
     ),
     Employee(
         name="春山",
@@ -103,13 +105,13 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.OMIYA: Affinity.STRONG,
-            Store.HIGASHIGUCHI: Affinity.WEAK,    # 月2回
-            Store.SUZURAN: Affinity.WEAK,         # 不足時補填
-            Store.AKABANE: Affinity.NONE,
-            Store.NISHIGUCHI: Affinity.WEAK,      # 楯不在時・研修時の代替
+            Store.SUZURAN: Affinity.MEDIUM,
+            Store.HIGASHIGUCHI: Affinity.WEAK,
+            Store.NISHIGUCHI: Affinity.WEAK,
+            Store.AKABANE: Affinity.WEAK,
         },
         annual_target_days=268,
-        notes="大宮強、東口2回、すずらん不足時補填。楯不在時・研修時は西口代替あり",
+        notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 西口・東口・赤羽。配置不可なし。",
     ),
     Employee(
         name="下地",
@@ -139,13 +141,13 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.SUZURAN: Affinity.STRONG,
-            Store.HIGASHIGUCHI: Affinity.WEAK,    # 月2回
-            Store.NISHIGUCHI: Affinity.WEAK,      # 月2回
+            Store.HIGASHIGUCHI: Affinity.WEAK,
+            Store.NISHIGUCHI: Affinity.WEAK,
+            Store.OMIYA: Affinity.WEAK,
             Store.AKABANE: Affinity.NONE,
-            Store.OMIYA: Affinity.NONE,
         },
         annual_target_days=271,
-        notes="大宮すずらん通り店店長。すずらん強、東口2回、西口2回",
+        notes="主担当: すずらん。応援・巡回可: 東口・西口・大宮。配置不可なし。",
     ),
     Employee(
         name="土井",
@@ -202,8 +204,8 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=265,  # 新入社員。将来的には265-7=258日に調整予定
-        notes="赤羽強、大宮+すずらん合わせて弱。新入社員（将来的には258日に調整予定）",
+        annual_target_days=265,
+        notes="主担当: 赤羽。通常対応可: すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="岩野",
@@ -214,12 +216,12 @@ TICKET_STAFF: list[Employee] = [
         affinities={
             Store.AKABANE: Affinity.MEDIUM,
             Store.SUZURAN: Affinity.MEDIUM,
-            Store.OMIYA: Affinity.NONE,
+            Store.OMIYA: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
         annual_target_days=260,
-        notes="赤羽中、すずらん中。野澤不在時はすずらんで補填",
+        notes="通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="大類",
@@ -277,13 +279,13 @@ TICKET_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.SUZURAN: Affinity.STRONG,
-            Store.OMIYA: Affinity.WEAK,
-            Store.NISHIGUCHI: Affinity.WEAK,    # 1日の総人数過剰時の調整先
+            Store.OMIYA: Affinity.MEDIUM,
+            Store.NISHIGUCHI: Affinity.NONE,
             Store.AKABANE: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=265,  # 新入社員。将来的には265-7=258日に調整予定
-        notes="すずらん強、大宮弱、赤羽弱。1日の総人数過剰時は西口へ移動。新入社員（将来的には258日に調整予定）",
+        annual_target_days=265,
+        notes="主担当: すずらん。通常対応可: 大宮。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: 赤羽1回以上・大宮1回以上",
     ),
     Employee(
         name="南",
@@ -310,13 +312,13 @@ TICKET_STAFF: list[Employee] = [
         affinities={
             Store.SUZURAN: Affinity.MEDIUM,
             Store.OMIYA: Affinity.MEDIUM,
-            Store.AKABANE: Affinity.MEDIUM,
+            Store.AKABANE: Affinity.WEAK,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
         employment_status=EmploymentStatus.PART_TIME,  # パート・アルバイト
         constraint_check_excluded=True,
-        notes="パート・アルバイト。年間基準出勤日数は定めなし。最大4連勤チェックのみ適用",
+        notes="パート・アルバイト。通常対応可: 大宮・すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。年間基準出勤日数は定めなし。最大4連勤チェックのみ適用。",
     ),
     Employee(
         name="山本",

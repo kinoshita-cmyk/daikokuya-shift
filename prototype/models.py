@@ -238,7 +238,7 @@ class StoreRequirement:
     store: Store
     eco_required: int          # 必要なエコ要員数
     ticket_required: int       # 必要なチケット要員数
-    eco_max: Optional[int] = None      # エコ最大数（東口の月3回エコ2など）
+    eco_max: Optional[int] = None      # エコ最大数（店舗ごとの例外上限）
     closed_days_of_week: list[int] = field(default_factory=list)  # 休店曜日（0=月）
 
     @property

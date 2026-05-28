@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from .employee_config import get_all_employees_including_retired
@@ -33,6 +34,33 @@ from .rules import (
 )
 from .shift_lock import ShiftLockManager
 from .carryover import previous_year_month
+
+
+STALE_RULE_TEXT_PATTERNS = {
+    "メイン店舗以外への月3日勤務": "今津・楯・春山・長尾の固定月3回巡回条件は現行ルールでは使いません。",
+    "楯さん・春山さん・長尾さんは月3日": "古い月3回巡回ルールの説明です。",
+    "月1回東口": "古い東口巡回回数の説明です。",
+    "東口2回": "古い東口巡回回数の説明です。",
+    "西口2回": "古い西口巡回回数の説明です。",
+    "春山さんの西口代替・研修": "春山さんの研修固定条件は現行では月別ルールまたは手動調整で扱います。",
+    "楯不在時・研修時は西口代替": "古い春山さんの西口代替説明です。",
+    "研修として楯と西口": "西口研修は固定ルールから外し、月別例外または手動調整で扱います。",
+    "将来的には258": "古い新入社員の年間目標日数メモです。",
+    "1日の総人数過剰時は西口へ移動": "下田さんの古い西口調整メモです。",
+    "higashi_eco2_max_per_month": "未使用の古い東口エコ2回数パラメータです。",
+    "東口エコ2配置": "未使用の古い東口エコ2配置ルールです。",
+}
+
+STALE_RULE_SCAN_FILES = (
+    "app/app.py",
+    "config/employees.json",
+    "config/rule_config.json",
+    "config/rule_ledger_v1_0.json",
+    "prototype/employees.py",
+    "prototype/models.py",
+    "prototype/rule_config.py",
+    "README.md",
+)
 
 
 @dataclass(frozen=True)
@@ -120,6 +148,31 @@ def _store_from_value(value) -> Optional[Store]:
         if text in (store.value, store.display_name):
             return store
     return None
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _check_stale_rule_text(issues: list[ConsistencyIssue]) -> None:
+    """設定画面・台帳・予備マスタに残った古いルール説明を検出する。"""
+    root = _repo_root()
+    for rel_path in STALE_RULE_SCAN_FILES:
+        path = root / rel_path
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for pattern, detail in STALE_RULE_TEXT_PATTERNS.items():
+            if pattern not in text:
+                continue
+            _issue(
+                issues, "WARNING", "古いルール文言", rel_path,
+                "現行ルールでは使わない可能性が高い説明文が残っています。",
+                f"{pattern} / {detail}",
+            )
 
 
 def _monthly_rule_applies(rule, year: int, month: int) -> bool:
@@ -515,6 +568,7 @@ def run_rule_consistency_checks(
     _check_employee_master(issues, employees)
     _check_monthly_targets(issues, employees, cfg, year, month)
     _check_custom_rules(issues, employees, cfg, year, month)
+    _check_stale_rule_text(issues)
     if include_operational_checks:
         _check_previous_month_lock(issues, year, month)
 

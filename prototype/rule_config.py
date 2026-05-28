@@ -54,7 +54,6 @@ DEFAULT_PARAMETERS = {
     "default_holiday_days": 8,           # 月内最低休日数（既定）
     "min_2off_per_month": 1,             # 2連休 月内最低回数
     "max_2off_per_month": 2,             # 2連休 月内最大回数
-    "higashi_eco2_max_per_month": 3,     # 東口エコ2配置の月内最大回数
     "solver_seed": 42,                   # ソルバーシード（再現性用）
     "solver_time_limit_seconds": 240,    # ソルバーの最大実行時間
 }
@@ -106,10 +105,10 @@ class RuleConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "RuleConfig":
-        parameters = {
-            **DEFAULT_PARAMETERS,
-            **data.get("parameters", {}),
-        }
+        parameters = dict(DEFAULT_PARAMETERS)
+        for key, value in data.get("parameters", {}).items():
+            if key in DEFAULT_PARAMETERS:
+                parameters[key] = value
         try:
             min_solver_seconds = int(DEFAULT_PARAMETERS["solver_time_limit_seconds"])
             current_solver_seconds = int(
