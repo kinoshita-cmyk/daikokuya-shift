@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-18T00:00:00",
+  "updated_at": "2026-05-28T00:00:00",
   "updated_by": "Codex",
   "employees": [
     {
@@ -14,12 +14,12 @@
       "affinities": {
         "AKABANE": "強",
         "HIGASHIGUCHI": "中",
-        "OMIYA": "中",
+        "OMIYA": "弱",
         "NISHIGUCHI": "中",
         "SUZURAN": "中"
       },
       "annual_target_days": 280,
-      "notes": "主担当: 赤羽。通常対応可: 東口・大宮・西口・すずらん。絶対配置不可なし。",
+      "notes": "主担当: 赤羽。通常対応可: 東口・西口・すずらん。応援・巡回可: 大宮。絶対配置不可なし。赤羽の割合を高く。",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -44,7 +44,7 @@
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": 267,
-      "notes": "通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。研修として楯と西口に入ることがある。",
+      "notes": "通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -64,12 +64,10 @@
       "affinities": {
         "NISHIGUCHI": "強",
         "HIGASHIGUCHI": "中",
-        "AKABANE": "弱",
-        "SUZURAN": "弱",
-        "OMIYA": "弱"
+        "AKABANE": "弱"
       },
       "annual_target_days": 270,
-      "notes": "主担当: 西口。通常対応可: 東口。応援・巡回可: 赤羽・すずらん。配置不可なし。",
+      "notes": "主担当: 西口。通常対応可: 東口。応援・巡回可: 赤羽。配置不可なし。",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -94,7 +92,7 @@
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": 268,
-      "notes": "主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽3回以上・すずらん3回以上。研修として楯と西口に入ることがある。",
+      "notes": "主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽2回以上・すずらん2回以上。",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -163,13 +161,12 @@
       "station_type": "流動",
       "affinities": {
         "SUZURAN": "強",
-        "AKABANE": "弱",
         "HIGASHIGUCHI": "弱",
         "NISHIGUCHI": "弱",
         "OMIYA": "弱"
       },
       "annual_target_days": 271,
-      "notes": "主担当: すずらん。応援・巡回可: 赤羽・東口・西口・大宮。配置不可なし。",
+      "notes": "主担当: すずらん。応援・巡回可: 東口・西口・大宮。配置不可なし。",
       "employment_status": "正社員",
       "hired_at": null,
       "retired_at": null,
@@ -412,14 +409,14 @@
       "home_store": null,
       "station_type": "流動",
       "affinities": {
-        "AKABANE": "中",
+        "AKABANE": "弱",
         "OMIYA": "中",
         "SUZURAN": "中",
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": null,
-      "notes": "パート・アルバイト。通常対応可: 赤羽・大宮・すずらん。絶対配置不可: 東口・西口。年間基準出勤日数は定めなし。最大4連勤チェックのみ適用。",
+      "notes": "パート・アルバイト。通常対応可: 大宮・すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。年間基準出勤日数は定めなし。最大4連勤チェックのみ適用。",
       "employment_status": "パート",
       "hired_at": null,
       "retired_at": null,
