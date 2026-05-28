@@ -202,7 +202,7 @@ def _check_parameters(
     min_2off = int(params.get("min_2off_per_month", 1))
     max_2off = int(params.get("max_2off_per_month", 2))
     default_holidays = int(params.get("default_holiday_days", 8))
-    solver_time = int(params.get("solver_time_limit_seconds", 180))
+    solver_time = int(params.get("solver_time_limit_seconds", 240))
 
     if soft_consec > max_consec:
         _issue(
