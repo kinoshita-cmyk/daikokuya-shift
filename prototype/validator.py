@@ -38,7 +38,9 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    WORK_TARGET_WARNING_DIFF_DAYS, WORK_TARGET_ERROR_DIFF_DAYS,
+    WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
+    WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
+    WORK_TARGET_ERROR_DIFF_DAYS,
 )
 
 
@@ -1509,7 +1511,8 @@ def _check_monthly_workday_balance(
     exact_holiday_days: dict[str, int],
 ) -> None:
     """月間基準勤務日数から大きく外れていないか確認する。"""
-    warning_diff = int(WORK_TARGET_WARNING_DIFF_DAYS)
+    shortfall_warning_diff = int(WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS)
+    overage_warning_diff = int(WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS)
     error_diff = int(WORK_TARGET_ERROR_DIFF_DAYS)
     for emp in _validation_employees():
         if emp.is_auxiliary or emp.annual_target_days is None:
@@ -1534,7 +1537,7 @@ def _check_monthly_workday_balance(
             )
         )
         diff = actual - target
-        if diff <= -warning_diff:
+        if diff <= -shortfall_warning_diff:
             severity = "ERROR" if abs(diff) >= error_diff else "WARNING"
             note = ""
             if emp.name in exact_holiday_days:
@@ -1552,7 +1555,7 @@ def _check_monthly_workday_balance(
                     f"{note}"
                 ),
             ))
-        elif diff >= warning_diff:
+        elif diff >= overage_warning_diff:
             severity = "ERROR" if diff >= error_diff else "WARNING"
             note = ""
             if emp.name in exact_holiday_days:

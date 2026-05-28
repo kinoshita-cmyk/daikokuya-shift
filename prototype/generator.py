@@ -46,7 +46,8 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    WORK_TARGET_IDEAL_TOLERANCE_DAYS, WORK_TARGET_WARNING_DIFF_DAYS,
+    WORK_TARGET_IDEAL_TOLERANCE_DAYS,
+    WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
 
 
@@ -1146,7 +1147,7 @@ def generate_shift(
         )
         model.Add(
             large_shortfall
-            >= target_monthly - (int(WORK_TARGET_WARNING_DIFF_DAYS) - 1) - actual
+            >= target_monthly - (int(WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS) - 1) - actual
         )
         model.Add(large_shortfall >= 0)
         target_large_shortfall_terms.append(large_shortfall)

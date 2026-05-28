@@ -113,9 +113,10 @@ GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
 
 # 月間勤務日数バランス。
 # 会社側の月別基準勤務日数にできる限り一致させる。
-# 1日でも不足・超過した場合は警告、3日以上ずれる場合はエラーにする。
+# 不足は2日以上で警告、超過は1日以上で警告、3日以上ずれる場合はエラーにする。
 WORK_TARGET_IDEAL_TOLERANCE_DAYS = 0
-WORK_TARGET_WARNING_DIFF_DAYS = 1
+WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS = 2
+WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS = 1
 WORK_TARGET_ERROR_DIFF_DAYS = 3
 
 
