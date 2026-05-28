@@ -38,7 +38,7 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    WORK_TARGET_WARNING_DIFF_DAYS,
+    WORK_TARGET_WARNING_DIFF_DAYS, WORK_TARGET_ERROR_DIFF_DAYS,
 )
 
 
@@ -1503,6 +1503,7 @@ def _check_monthly_workday_balance(
 ) -> None:
     """月間基準勤務日数から大きく外れていないか確認する。"""
     warning_diff = int(WORK_TARGET_WARNING_DIFF_DAYS)
+    error_diff = int(WORK_TARGET_ERROR_DIFF_DAYS)
     for emp in _validation_employees():
         if emp.is_auxiliary or emp.annual_target_days is None:
             continue
@@ -1533,8 +1534,9 @@ def _check_monthly_workday_balance(
         )
         diff = actual - target
         if diff <= -warning_diff:
+            severity = "ERROR" if abs(diff) >= error_diff else "WARNING"
             result.issues.append(Issue(
-                severity="WARNING",
+                severity=severity,
                 category="月間勤務日数不足",
                 day=None,
                 employee=emp.name,
@@ -1544,8 +1546,9 @@ def _check_monthly_workday_balance(
                 ),
             ))
         elif diff >= warning_diff:
+            severity = "ERROR" if diff >= error_diff else "WARNING"
             result.issues.append(Issue(
-                severity="WARNING",
+                severity=severity,
                 category="月間勤務日数超過",
                 day=None,
                 employee=emp.name,

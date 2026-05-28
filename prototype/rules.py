@@ -113,9 +113,10 @@ GLOBAL_DAILY_STAFFING_LIMIT = DailyStaffingLimit(
 
 # 月間勤務日数バランス。
 # ぴったり一致は絶対条件にせず、通常は目標±1日を目指す。
-# 目標から3日以上ずれる場合は、検証画面で警告する。
+# 目標から2日以上ずれる場合は警告、3日以上ずれる場合はエラーにする。
 WORK_TARGET_IDEAL_TOLERANCE_DAYS = 1
-WORK_TARGET_WARNING_DIFF_DAYS = 3
+WORK_TARGET_WARNING_DIFF_DAYS = 2
+WORK_TARGET_ERROR_DIFF_DAYS = 3
 
 
 # 月別の目標出勤日数（2025年7月〜2026年6月）。

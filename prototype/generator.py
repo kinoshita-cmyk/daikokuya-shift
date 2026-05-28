@@ -139,13 +139,13 @@ def _monthly_rule_allows_employee_store(
             return True
     return False
 
-# 実運用では「月間の基準勤務日数」から大きく外れると、
-# 警告ゼロでも使いにくいシフトになるため、店舗嗜好より強く寄せる。
+# 実運用では「月間の基準勤務日数」から外れると使いにくいシフトになるため、
+# 不足・超過の両方を店舗嗜好より強く避ける。
 TARGET_SHORTFALL_PENALTY = 1400
-TARGET_OVERAGE_PENALTY = 120
+TARGET_OVERAGE_PENALTY = 900
 TARGET_SHORTFALL_BEYOND_IDEAL_PENALTY = 3200
 TARGET_LARGE_SHORTFALL_PENALTY = 8000
-TARGET_OVERAGE_BEYOND_IDEAL_PENALTY = 1000
+TARGET_OVERAGE_BEYOND_IDEAL_PENALTY = 2800
 
 # 月次ルールは「その月だけの運用指示」なので、通常の在勤嗜好より強く扱う。
 MONTHLY_RULE_REWARD = 1800
