@@ -45,6 +45,7 @@ _SYNCED_PREFERENCE_MONTHS: set[str] = set()
 _SYNCED_CONFIG_NAMES: set[str] = set()
 _SYNCED_LOCK_MONTHS: set[str] = set()
 _SYNCED_SHIFT_MONTHS: set[str] = set()
+_SYNCED_LOCK_INDEX = False
 
 
 def _sanitize_debug_value(value: Any) -> Any:
@@ -583,6 +584,67 @@ def sync_latest_lock_and_snapshot_from_github(
             error=str(e),
         )
         return False, f"{type(e).__name__}: {e}"
+
+
+def sync_all_latest_locks_from_github(
+    local_backup_dir: Path,
+    local_lock_dir: Path,
+    timeout: int = 8,
+    force: bool = False,
+) -> tuple[int, str]:
+    """
+    GitHubバックアップ上にある latest ロックをまとめてローカルへ復元する。
+
+    ダッシュボードのロック一覧はローカル locks/ を読むため、Streamlit再起動後に
+    GitHub上のロックを先に戻しておく。
+    """
+    global _SYNCED_LOCK_INDEX
+    _debug_log("sync_all_locks_start", force=force)
+    if not is_github_backup_enabled():
+        _debug_log("sync_all_locks_skipped", reason="not_configured")
+        return 0, "未設定"
+    if _SYNCED_LOCK_INDEX and not force:
+        _debug_log("sync_all_locks_skipped", reason="already_synced")
+        return 0, "同期済み"
+
+    ok, items, msg = _list_repo_dir("locks", timeout=timeout)
+    if not ok:
+        _debug_log("sync_all_locks_failed", message=msg)
+        return 0, msg
+
+    restored = 0
+    errors: list[str] = []
+    for item in items:
+        name = str(item.get("name", ""))
+        if item.get("type") not in (None, "file"):
+            continue
+        if not name.endswith(".lock"):
+            continue
+        try:
+            year_text, month_text = name[:-5].split("-", 1)
+            year = int(year_text)
+            month = int(month_text)
+        except ValueError:
+            continue
+        synced, sync_msg = sync_latest_lock_and_snapshot_from_github(
+            year,
+            month,
+            local_backup_dir,
+            local_lock_dir,
+            timeout=timeout,
+            force=force,
+        )
+        if synced:
+            restored += 1
+        elif sync_msg not in ("同期済み",):
+            errors.append(f"{year:04d}-{month:02d}: {sync_msg}")
+
+    _SYNCED_LOCK_INDEX = True
+    if errors:
+        _debug_log("sync_all_locks_partial", restored=restored, errors=errors[:5])
+        return restored, f"{restored}件復元 / 一部エラー: " + " / ".join(errors[:3])
+    _debug_log("sync_all_locks_success", restored=restored)
+    return restored, f"{restored}件復元"
 
 
 def _github_shift_name_matches(name: str, kind: Optional[str]) -> bool:

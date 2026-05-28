@@ -111,6 +111,14 @@ class ShiftLockManager:
 
     def list_locks(self) -> list[LockInfo]:
         """全てのロック情報を一覧"""
+        if self.lock_dir == DEFAULT_LOCK_DIR:
+            try:
+                from .paths import BACKUP_DIR
+                from .github_backup import sync_all_latest_locks_from_github
+
+                sync_all_latest_locks_from_github(BACKUP_DIR, self.lock_dir)
+            except Exception:
+                pass
         result = []
         for path in sorted(self.lock_dir.glob("*.lock")):
             with open(path, encoding="utf-8") as f:
