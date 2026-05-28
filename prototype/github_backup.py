@@ -48,6 +48,38 @@ _SYNCED_SHIFT_MONTHS: set[str] = set()
 _SYNCED_LOCK_INDEX = False
 
 
+def _lock_history_entry(item: dict | str) -> Optional[dict[str, str]]:
+    """lock_/unlock_ 履歴ファイル名から、日時順で比較できる情報を取り出す。"""
+    name = str(item.get("name", "") if isinstance(item, dict) else item)
+    if not name.endswith(".json"):
+        return None
+    if name.startswith("lock_"):
+        action = "lock"
+        ts = name[len("lock_"):-len(".json")]
+    elif name.startswith("unlock_"):
+        action = "unlock"
+        ts = name[len("unlock_"):-len(".json")]
+    else:
+        return None
+    # 現行の履歴名は YYYYMMDD-HHMMSS。想定外でも診断できるよう空文字にはしない。
+    return {"name": name, "action": action, "timestamp": ts or name}
+
+
+def _latest_lock_history_item(items: list[dict]) -> tuple[Optional[dict], list[dict[str, str]]]:
+    """GitHubの履歴一覧から、ファイル名ではなく履歴日時で最新のロック操作を選ぶ。"""
+    entries: list[tuple[dict[str, str], dict]] = []
+    for item in items:
+        parsed = _lock_history_entry(item)
+        if parsed is not None:
+            entries.append((parsed, item))
+    if not entries:
+        return None, []
+    # 以前はファイル名全体で並べていたため、日時に関係なく unlock_ が lock_ より
+    # 後ろに来てしまうことがあった。ここでは timestamp を主キーにして最新操作を選ぶ。
+    entries.sort(key=lambda pair: (pair[0]["timestamp"], pair[0]["action"]))
+    return entries[-1][1], [entry for entry, _ in entries]
+
+
 def _sanitize_debug_value(value: Any) -> Any:
     """バックアップ診断ログに秘密情報を書かないための簡易サニタイズ。"""
     if isinstance(value, dict):
@@ -463,34 +495,66 @@ def sync_latest_lock_and_snapshot_from_github(
 
     try:
         selected_action = ""
+        selected_name = ""
         selected_content: Optional[bytes] = None
         history_url = f"https://api.github.com/repos/{repo}/contents/locks/{sync_key}"
         history_response = requests.get(history_url, headers=headers, timeout=timeout)
+        _debug_log(
+            "sync_lock_history_response",
+            year=year,
+            month=month,
+            status_code=history_response.status_code,
+        )
         if history_response.status_code == 200:
             items = history_response.json()
             if isinstance(items, list):
-                candidates = [
-                    item for item in items
-                    if str(item.get("name", "")).endswith(".json")
-                    and (
-                        str(item.get("name", "")).startswith("lock_")
-                        or str(item.get("name", "")).startswith("unlock_")
-                    )
-                ]
-                if candidates:
-                    selected = sorted(candidates, key=lambda item: str(item.get("name", "")))[-1]
-                    selected_action = "unlock" if str(selected.get("name", "")).startswith("unlock_") else "lock"
+                selected, parsed_candidates = _latest_lock_history_item(items)
+                _debug_log(
+                    "sync_lock_history_candidates",
+                    year=year,
+                    month=month,
+                    candidates=parsed_candidates[-20:],
+                    candidate_count=len(parsed_candidates),
+                    selected_name=str(selected.get("name", "")) if selected else "",
+                )
+                if selected:
+                    selected_name = str(selected.get("name", ""))
+                    parsed_selected = _lock_history_entry(selected) or {}
+                    selected_action = parsed_selected.get("action", "")
                     ok, content, msg = _fetch_github_item_content(selected, timeout=timeout)
                     if ok:
                         selected_content = content
+                        _debug_log(
+                            "sync_lock_history_selected",
+                            year=year,
+                            month=month,
+                            selected_name=selected_name,
+                            selected_action=selected_action,
+                            selected_timestamp=parsed_selected.get("timestamp", ""),
+                        )
                     else:
+                        _debug_log(
+                            "sync_lock_history_fetch_failed",
+                            year=year,
+                            month=month,
+                            selected_name=selected_name,
+                            message=msg,
+                        )
                         return False, msg
 
         # 旧実装/最新ミラー用。履歴がない場合だけ locks/YYYY-MM.lock を見る。
         if selected_content is None:
             ok, content, _msg = _fetch_repo_file(f"locks/{sync_key}.lock", timeout=timeout)
+            _debug_log(
+                "sync_lock_latest_mirror_checked",
+                year=year,
+                month=month,
+                ok=ok,
+                message=_msg,
+            )
             if ok:
                 selected_action = "lock"
+                selected_name = f"locks/{sync_key}.lock"
                 selected_content = content
 
         if selected_content is None:
@@ -505,16 +569,37 @@ def sync_latest_lock_and_snapshot_from_github(
                 archive_path = archive_dir / f"{sync_key}_unlocked_sync.json"
                 lock_path.replace(archive_path)
             _SYNCED_LOCK_MONTHS.add(sync_key)
-            _debug_log("sync_lock_unlocked", year=year, month=month)
+            _debug_log(
+                "sync_lock_unlocked",
+                year=year,
+                month=month,
+                selected_name=selected_name,
+                lock_path=lock_path,
+            )
             return True, f"{sync_key} はGitHub上でロック解除済み"
 
         lock_data = json.loads(selected_content.decode("utf-8"))
         snapshot_file = str(lock_data.get("snapshot_file", "")).strip()
         if not snapshot_file:
-            _debug_log("sync_lock_failed", year=year, month=month, reason="missing_snapshot_file")
+            _debug_log(
+                "sync_lock_failed",
+                year=year,
+                month=month,
+                reason="missing_snapshot_file",
+                selected_name=selected_name,
+                lock_data_keys=sorted(lock_data.keys()),
+            )
             return False, "ロック情報に確定シフト名がありません"
         with open(lock_path, "wb") as f:
             f.write(selected_content)
+        _debug_log(
+            "sync_lock_local_lock_written",
+            year=year,
+            month=month,
+            selected_name=selected_name,
+            lock_path=lock_path,
+            snapshot_file=snapshot_file,
+        )
 
         snapshot_path = local_month_dir / snapshot_file
         if not snapshot_path.exists():
@@ -522,12 +607,33 @@ def sync_latest_lock_and_snapshot_from_github(
                 f"backups/{sync_key}/{snapshot_file}",
                 timeout=timeout,
             )
+            _debug_log(
+                "sync_lock_snapshot_primary_checked",
+                year=year,
+                month=month,
+                repo_path=f"backups/{sync_key}/{snapshot_file}",
+                ok=ok,
+                message=_msg,
+            )
             if ok:
                 with open(snapshot_path, "wb") as f:
                     f.write(content)
+                _debug_log(
+                    "sync_lock_snapshot_written",
+                    year=year,
+                    month=month,
+                    source="backups",
+                    snapshot_path=snapshot_path,
+                )
             else:
                 shifts_url = f"https://api.github.com/repos/{repo}/contents/shifts/{sync_key}"
                 shifts_response = requests.get(shifts_url, headers=headers, timeout=timeout)
+                _debug_log(
+                    "sync_lock_legacy_shifts_checked",
+                    year=year,
+                    month=month,
+                    status_code=shifts_response.status_code,
+                )
                 if shifts_response.status_code == 200:
                     shift_items = shifts_response.json()
                     if isinstance(shift_items, list):
@@ -544,6 +650,14 @@ def sync_latest_lock_and_snapshot_from_github(
                             if ok:
                                 with open(snapshot_path, "wb") as f:
                                     f.write(content)
+                                _debug_log(
+                                    "sync_lock_snapshot_written",
+                                    year=year,
+                                    month=month,
+                                    source="legacy_shifts",
+                                    selected_shift=str(selected_shift.get("name", "")),
+                                    snapshot_path=snapshot_path,
+                                )
                             else:
                                 _debug_log(
                                     "sync_lock_failed",
@@ -569,7 +683,10 @@ def sync_latest_lock_and_snapshot_from_github(
             "sync_lock_success",
             year=year,
             month=month,
+            selected_name=selected_name,
             snapshot_file=snapshot_file,
+            lock_path=lock_path,
+            snapshot_path=snapshot_path,
         )
         return True, f"{sync_key} のロックと確定シフトを復元"
     except requests.exceptions.Timeout:
@@ -1153,12 +1270,24 @@ def diagnose_github_backup_month(
     ok, items, msg = _list_repo_dir(f"locks/{sync_key}", timeout=timeout)
     if ok:
         lock_files = [str(item.get("name", "")) for item in items if str(item.get("name", "")).endswith(".json")]
+        latest_history_item, parsed_history = _latest_lock_history_item(items)
+        latest_history = (
+            _lock_history_entry(latest_history_item)
+            if latest_history_item is not None else None
+        )
         result["lock_history_files"] = lock_files
         result["lock_history_count"] = sum(1 for name in lock_files if name.startswith("lock_"))
         result["unlock_history_count"] = sum(1 for name in lock_files if name.startswith("unlock_"))
+        result["latest_lock_history"] = latest_history or {}
+        result["lock_history_entries"] = parsed_history[-20:]
         result["messages"].append(
             f"locks/{sync_key}/: lock履歴{result['lock_history_count']}件 / unlock履歴{result['unlock_history_count']}件"
         )
+        if latest_history:
+            action_label = "ロック" if latest_history.get("action") == "lock" else "解除"
+            result["messages"].append(
+                f"最新履歴判定: {action_label} / {latest_history.get('name', '')}"
+            )
     else:
         result["messages"].append(f"locks/{sync_key}/: {msg}")
 
