@@ -37,7 +37,7 @@ from .rules import (
     get_monthly_work_target,
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
-    MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
+    MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     WORK_TARGET_WARNING_DIFF_DAYS,
 )
 
@@ -313,25 +313,31 @@ def validate(
     # 12. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 13. 東口の月曜休店チェック
+    # 13. 月末月初の大宮駅前固定チェック
+    _check_month_end_start_omiya(shift, result, days_in_month, off_requests)
+
+    # 14. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 14. 月内の最低巡回条件チェック
+    # 15. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
 
-    # 15. 月別の追加配置ルールチェック
+    # 16. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 16. 月別の日付指定配置ルールチェック
+    # 17. 月別の日付指定配置ルールチェック
     _check_required_assignment_rules(shift, result, required_assignments)
 
-    # 17. 牧野さんの東口・西口研修ルールチェック
+    # 18. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 18. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 19. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 19. 月間勤務日数バランスチェック
+    # 20. 主担当なし・通常対応可複数店舗の偏りチェック
+    _check_balanced_normal_store_assignments(shift, result)
+
+    # 21. 月間勤務日数バランスチェック
     _check_monthly_workday_balance(
         shift,
         result,
@@ -341,7 +347,7 @@ def validate(
         exact_holiday_days,
     )
 
-    # 20. 統計情報の集計
+    # 22. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -1129,6 +1135,33 @@ def _check_omiya_anchor(shift: MonthlyShift, result: ValidationResult, days: int
                 ))
 
 
+def _check_month_end_start_omiya(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    off_requests: dict[str, list[int]],
+) -> None:
+    """下地・春山は月初1日と月末最終日に大宮駅前へ配置する。"""
+    for emp_name in MONTH_END_START_OMIYA_STAFF:
+        for day in (1, days):
+            if day in set(off_requests.get(emp_name, [])):
+                continue
+            assignment = shift.get_assignment(emp_name, day)
+            actual_store = assignment.store if assignment is not None else Store.OFF
+            if actual_store == Store.OMIYA:
+                continue
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="月末月初大宮",
+                day=day,
+                employee=emp_name,
+                message=(
+                    f"{emp_name}は月初1日・月末最終日は大宮駅前店勤務です。"
+                    f"現在は{actual_store.display_name}です。"
+                ),
+            ))
+
+
 def _check_higashiguchi_monday_closed(
     shift: MonthlyShift, result: ValidationResult, days: int,
 ) -> None:
@@ -1173,6 +1206,50 @@ def _check_store_rotation_minimums(
                     f"最低{min_count}日必要です。"
                 ),
             ))
+
+
+def _check_balanced_normal_store_assignments(
+    shift: MonthlyShift,
+    result: ValidationResult,
+) -> None:
+    """主担当なし・通常対応可複数店舗の配置偏りを確認する。"""
+    for emp in _validation_employees():
+        if getattr(emp, "home_store", None) is not None:
+            continue
+        normal_stores = [
+            store for store, affinity in (getattr(emp, "affinities", {}) or {}).items()
+            if affinity == Affinity.MEDIUM
+        ]
+        if len(normal_stores) < 2:
+            continue
+        counts = {
+            store: sum(
+                1
+                for assignment in shift.assignments
+                if assignment.employee == emp.name and assignment.store == store
+            )
+            for store in normal_stores
+        }
+        worked_total = sum(counts.values())
+        if worked_total < 6:
+            continue
+        max_count = max(counts.values())
+        min_count = min(counts.values())
+        if max_count - min_count < 4:
+            continue
+        count_text = " / ".join(
+            f"{store.display_name}:{count}日" for store, count in counts.items()
+        )
+        result.issues.append(Issue(
+            severity="WARNING",
+            category="店舗バランス",
+            day=None,
+            employee=emp.name,
+            message=(
+                "主担当なし・通常対応可複数店舗の配置に偏りがあります。"
+                f"内訳: {count_text}"
+            ),
+        ))
 
 
 def _employee_names_at_store(shift: MonthlyShift, day: int, store: Store) -> list[str]:

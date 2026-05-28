@@ -40,11 +40,12 @@ from .rules import (
     HARD_CONSTRAINTS, OMIYA_ANCHOR_STAFF, HIGASHIGUCHI_ALLOWED_STAFF,
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
+    STORE_ASSIGNMENT_EXTRA_WEIGHTS,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
-    MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
+    MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS, WORK_TARGET_WARNING_DIFF_DAYS,
 )
 
@@ -149,6 +150,10 @@ TARGET_OVERAGE_BEYOND_IDEAL_PENALTY = 1000
 # 月次ルールは「その月だけの運用指示」なので、通常の在勤嗜好より強く扱う。
 MONTHLY_RULE_REWARD = 1800
 MONTHLY_RULE_PENALTY = 2200
+
+# 主担当なし・通常対応可が複数あるスタッフは、同じ店舗に偏りすぎないよう
+# 通常対応可店舗間の配属回数差を避ける。
+BALANCED_NORMAL_STORE_DIFF_PENALTY = 160
 
 # 南さんのような「出勤希望日のみ稼働」のパートは年間目標日数を持たないため、
 # 放っておくと全体人数を削る最適化で全休になりやすい。過去実績に合わせ、
@@ -539,6 +544,18 @@ def generate_shift(
             continue
         if str(rule.get("severity") or "ERROR").upper() == "ERROR":
             model.Add(x[name][day][store] == 1)
+
+    # 月末月初の大宮駅前固定。
+    # 本人の×休み希望がある日は休み希望を最優先する。
+    month_edge_days = {1, days_in_month}
+    for name in MONTH_END_START_OMIYA_STAFF:
+        if name not in main_employee_names:
+            continue
+        requested_off_days = set(off_requests.get(name, []))
+        for d in month_edge_days:
+            if d in requested_off_days:
+                continue
+            model.Add(x[name][d][Store.OMIYA] == 1)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -1033,6 +1050,7 @@ def generate_shift(
         Affinity.WEAK: 1,       # 弱：少しだけ
         Affinity.NONE: 0,       # 不可：配置しない（既にハード制約で除外）
     }
+    balanced_normal_store_diff_terms = []
     for e in main_employees:
         for s in main_stores:
             aff = e.affinities.get(s, Affinity.NONE)
@@ -1041,6 +1059,37 @@ def generate_shift(
                 # その店舗の出勤回数 × 重み を加算
                 for d in days:
                     objective_terms.append(weight * x[e.name][d][s])
+            extra_weight = STORE_ASSIGNMENT_EXTRA_WEIGHTS.get((e.name, s), 0)
+            if extra_weight > 0:
+                # 個別に「少し寄せたい」店舗の追加スコア。
+                for d in days:
+                    objective_terms.append(extra_weight * x[e.name][d][s])
+        normal_stores = [
+            s for s in main_stores
+            if e.affinities.get(s) == Affinity.MEDIUM
+        ]
+        if e.home_store is None and len(normal_stores) >= 2:
+            normal_counts = {
+                s: sum(x[e.name][d][s] for d in days)
+                for s in normal_stores
+            }
+            for idx, first_store in enumerate(normal_stores):
+                for second_store in normal_stores[idx + 1:]:
+                    diff = model.NewIntVar(
+                        -days_in_month,
+                        days_in_month,
+                        f"normal_store_diff_{e.name}_{first_store.name}_{second_store.name}",
+                    )
+                    abs_diff = model.NewIntVar(
+                        0,
+                        days_in_month,
+                        f"normal_store_abs_diff_{e.name}_{first_store.name}_{second_store.name}",
+                    )
+                    model.Add(
+                        diff == normal_counts[first_store] - normal_counts[second_store]
+                    )
+                    model.AddAbsEquality(abs_diff, diff)
+                    balanced_normal_store_diff_terms.append(abs_diff)
 
     # 目標出勤日数への近づき度（不足分を強くペナルティ）
     target_penalty_terms = []
@@ -1175,6 +1224,12 @@ def generate_shift(
         obj = obj + MONTHLY_RULE_REWARD * sum(monthly_rule_terms)
     if monthly_rule_penalty_terms:
         obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
+    if balanced_normal_store_diff_terms:
+        obj = (
+            obj
+            - BALANCED_NORMAL_STORE_DIFF_PENALTY
+            * sum(balanced_normal_store_diff_terms)
+        )
     if historical_actual_terms:
         obj = obj + sum(historical_actual_terms)
     if affinity_none_assignments:

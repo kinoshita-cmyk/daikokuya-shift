@@ -234,6 +234,7 @@ HARD_CONSTRAINTS = {
     "forbidden_same_store_pairings": True, # 指定メンバー同士の同店舗勤務NG
     "forbidden_same_store_groups": True,   # 指定グループ内の同店舗勤務NG
     "mandatory_work_on_request": True,     # 指定スタッフの出勤希望日は必ず出勤
+    "month_end_start_omiya": True,         # 下地・春山は月初1日と月末最終日に大宮（×希望日は除外）
     "no_ticket_zero_at": [                 # チケット0NG店舗
         Store.AKABANE, Store.OMIYA, Store.SUZURAN
     ],
@@ -241,6 +242,10 @@ HARD_CONSTRAINTS = {
 
 # 大宮店の追加制約：春山・下地どちらか1人は必ず在勤
 OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
+
+# 月末月初の大宮駅前固定メンバー。
+# 本人の×休み希望がある日は休み希望を最優先し、強制配置しない。
+MONTH_END_START_OMIYA_STAFF: tuple[str, ...] = ("下地", "春山")
 
 # 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
 HIGASHIGUCHI_PRIMARY_STAFF = "土井"
@@ -263,8 +268,13 @@ MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {
     "黒澤": [((Store.SUZURAN,), 5)],
-    "牧野": [((Store.AKABANE,), 3), ((Store.SUZURAN,), 3)],
+    "牧野": [((Store.AKABANE,), 2), ((Store.SUZURAN,), 2)],
     "下田": [((Store.AKABANE,), 1), ((Store.OMIYA,), 1)],
+}
+
+# 個別に少し寄せたい店舗。絶対条件ではなく、生成時の追加スコアとして扱う。
+STORE_ASSIGNMENT_EXTRA_WEIGHTS: dict[tuple[str, Store], int] = {
+    ("今津", Store.AKABANE): 6,
 }
 
 # 出勤希望日を必ず勤務にする従業員。
