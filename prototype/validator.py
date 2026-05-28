@@ -753,12 +753,19 @@ def _check_holiday_days(
         )
         if emp.name in exact_holiday_days:
             expected = int(exact_holiday_days[emp.name])
-            if actual_off != expected:
+            if actual_off < expected:
                 result.issues.append(Issue(
                     severity="ERROR",
                     category="休日数",
                     day=None, employee=emp.name,
-                    message=f"休日{actual_off}日（指定{expected}日）",
+                    message=f"休日{actual_off}日（指定{expected}日、{expected - actual_off}日不足）",
+                ))
+            elif actual_off > expected:
+                result.issues.append(Issue(
+                    severity="WARNING",
+                    category="休日数",
+                    day=None, employee=emp.name,
+                    message=f"休日{actual_off}日（指定{expected}日、{actual_off - expected}日多い）",
                 ))
         elif actual_off < required:
             result.issues.append(Issue(
