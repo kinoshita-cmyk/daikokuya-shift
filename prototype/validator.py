@@ -1150,7 +1150,7 @@ def _check_month_end_start_omiya(
     days: int,
     off_requests: dict[str, list[int]],
 ) -> None:
-    """下地・春山は月初1日と月末最終日に大宮駅前へ配置する。"""
+    """下地・春山・黒澤は月初1日と月末最終日に大宮駅前へ配置する。"""
     for emp_name in MONTH_END_START_OMIYA_STAFF:
         for day in (1, days):
             if day in set(off_requests.get(emp_name, [])):

@@ -236,7 +236,7 @@ HARD_CONSTRAINTS = {
     "forbidden_same_store_pairings": True, # 指定メンバー同士の同店舗勤務NG
     "forbidden_same_store_groups": True,   # 指定グループ内の同店舗勤務NG
     "mandatory_work_on_request": True,     # 指定スタッフの出勤希望日は必ず出勤
-    "month_end_start_omiya": True,         # 下地・春山は月初1日と月末最終日に大宮（×希望日は除外）
+    "month_end_start_omiya": True,         # 下地・春山・黒澤は月初1日と月末最終日に大宮（×希望日は除外）
     "no_ticket_zero_at": [                 # チケット0NG店舗
         Store.AKABANE, Store.OMIYA, Store.SUZURAN
     ],
@@ -247,7 +247,7 @@ OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
 
 # 月末月初の大宮駅前固定メンバー。
 # 本人の×休み希望がある日は休み希望を最優先し、強制配置しない。
-MONTH_END_START_OMIYA_STAFF: tuple[str, ...] = ("下地", "春山")
+MONTH_END_START_OMIYA_STAFF: tuple[str, ...] = ("下地", "春山", "黒澤")
 
 # 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
 HIGASHIGUCHI_PRIMARY_STAFF = "土井"
