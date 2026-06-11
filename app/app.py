@@ -887,7 +887,7 @@ def render_key_warning_marks(statuses: dict[Store, str]) -> str:
         prefix = "応" if is_support else "鍵"
         color = "#2563eb" if is_support else "#b45309"
         bg = "#eff6ff" if is_support else "#fff7ed"
-        title = escape(f"{'すずらん鍵応援' if is_support else '鍵担当不在'}: {name}")
+        title = escape(f"{'すずらん鍵応援' if is_support else '鍵担当不在'}: {_name}")
         chips.append(
             f'<span style="display:inline-flex; align-items:center; gap:2px; '
             f'justify-content:center; min-width:30px; height:22px; '
@@ -2738,9 +2738,25 @@ def save_shift_snapshot_with_github(
     path = backup_mgr.save_shift(
         shift, kind=kind, author=author, note=note, metadata=metadata,
     )
+    github_success = None
+    github_message = "GitHubバックアップ未実行"
     try:
         from prototype.github_backup import push_shift_to_github
-        push_shift_to_github(path, int(shift.year), int(shift.month), kind=kind)
+        github_success, github_message = push_shift_to_github(
+            path, int(shift.year), int(shift.month), kind=kind,
+        )
+    except Exception as e:
+        github_success = False
+        github_message = f"{type(e).__name__}: {e}"
+    try:
+        st.session_state["last_shift_github_backup_result"] = {
+            "year": int(shift.year),
+            "month": int(shift.month),
+            "kind": kind,
+            "success": github_success,
+            "message": github_message,
+            "local_file": str(path),
+        }
     except Exception:
         pass
     return path
@@ -3506,6 +3522,21 @@ if mode == "📊 経営者ビュー":
         f'</div>',
         unsafe_allow_html=True,
     )
+    _last_shift_backup = st.session_state.get("last_shift_github_backup_result")
+    if (
+        isinstance(_last_shift_backup, dict)
+        and int(_last_shift_backup.get("year", 0) or 0) == int(target_year)
+        and int(_last_shift_backup.get("month", 0) or 0) == int(target_month)
+        and _last_shift_backup.get("success") is False
+    ):
+        st.warning(
+            "⚠ シフトは画面上では保存されていますが、GitHubバックアップへの保存に失敗しました。"
+            "リブート前に、設定画面のバックアップ作成またはGitHub手動同期を実行してください。"
+        )
+        with st.expander("GitHubバックアップ失敗の詳細", expanded=False):
+            st.write(f"対象: {target_year}年{target_month}月 / {_last_shift_backup.get('kind', '')}")
+            st.write(f"理由: {_last_shift_backup.get('message', '')}")
+            st.write(f"ローカル保存先: {_last_shift_backup.get('local_file', '')}")
 
     # ロック状態を確認・表示
     lock_info = lock_mgr.get_lock_info(int(target_year), int(target_month))
@@ -3660,6 +3691,16 @@ if mode == "📊 経営者ビュー":
         backup_mgr, int(target_year), int(target_month), submission_status,
     )
     summary = submission_status["summary"]
+    if submission_status.get("warnings"):
+        st.warning(
+            "⚠ 提出状況の読み込みで確認が必要なファイルがあります。"
+            "対象外または破損した提出ファイルは人数カウントから除外しています。"
+        )
+        with st.expander("提出状況読み込み警告", expanded=False):
+            for msg in submission_status.get("warnings", [])[:30]:
+                st.write(f"- {msg}")
+            if len(submission_status.get("warnings", [])) > 30:
+                st.write(f"...ほか {len(submission_status.get('warnings', [])) - 30} 件")
     current_ym_label = f"{int(target_year):04d}-{int(target_month):02d}"
     available_preference_months: list[str] = []
     try:
@@ -4467,6 +4508,16 @@ if mode == "📊 経営者ビュー":
                     sub_data = load_submissions_for_month(
                         _saved_target_year, _saved_target_month, expected_employees,
                     )
+                    if getattr(sub_data, "load_warnings", None):
+                        st.warning(
+                            "⚠ 提出データの読み込みで確認が必要なファイルがあります。"
+                            "対象外の提出者や壊れたファイルは生成条件から除外しています。"
+                        )
+                        with st.expander("提出データ読み込み警告", expanded=False):
+                            for msg in sub_data.load_warnings[:30]:
+                                st.write(f"- {msg}")
+                            if len(sub_data.load_warnings) > 30:
+                                st.write(f"...ほか {len(sub_data.load_warnings) - 30} 件")
                     progress_area.info(
                         f"⏳ ステップ 2/4: 提出データを処理中... "
                         f"（提出 {sub_data.submission_count}名 / 未提出 {len(sub_data.pending_employees)}名）"
@@ -7608,7 +7659,7 @@ elif mode == "⚙️ 設定":
                 "Streamlit Cloud の Settings → Secrets で設定するか、"
                 "ローカル開発時は環境変数 `MAGIC_LINK_SALT` を設定してください。\n\n"
                 "**例（Streamlit Secrets）**:\n"
-                "```\nMAGIC_LINK_SALT = \"daikokuya-secret-salt-2026\"\n```\n\n"
+                "```\nMAGIC_LINK_SALT = \"ここに長いランダム文字列を入れる\"\n```\n\n"
                 "塩を変更すると全URLが一括無効化されます（一斉再発行に使えます）。"
             )
         else:
