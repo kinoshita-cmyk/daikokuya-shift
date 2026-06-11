@@ -50,6 +50,13 @@ class ShiftBackup:
     def _timestamp(self) -> str:
         return now_jst().strftime("%Y-%m-%d_%H%M%S")
 
+    def _write_json_atomic(self, file_path: Path, data: dict) -> None:
+        """途中終了でJSONが壊れないよう、一時ファイルから置き換える。"""
+        tmp_path = file_path.with_name(f"{file_path.name}.tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(file_path)
+
     # ============================================================
     # シフトのバックアップ
     # ============================================================
@@ -93,8 +100,7 @@ class ShiftBackup:
                 )
             except Exception:
                 data["metadata"] = {"note": "metadata serialization failed"}
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_json_atomic(file_path, data)
         return file_path
 
     def load_shift(self, file_path: Path) -> MonthlyShift:
@@ -194,8 +200,7 @@ class ShiftBackup:
             ],
             "natural_language_notes": natural_language_notes,
         }
-        with open(file_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        self._write_json_atomic(file_path, data)
         return file_path
 
     def load_preferences(self, file_path: Path) -> dict:
@@ -282,6 +287,8 @@ class ShiftBackup:
             pass
 
         submission_map: dict[str, dict] = {}  # 従業員名 → 最新の提出情報
+        expected_set = set(expected_employees or [])
+        load_warnings: list[str] = []
 
         def _safe_days(values) -> list[int]:
             days = []
@@ -344,6 +351,11 @@ class ShiftBackup:
                 author = data.get("author", "")
                 if not author or author == "system":
                     continue
+                if expected_set and author not in expected_set:
+                    load_warnings.append(
+                        f"{file.name}: 対象外の提出者「{author}」のため提出状況から除外しました。"
+                    )
+                    continue
                 saved_at = data.get("saved_at", "")
                 if not is_submission_in_window(year, month, saved_at):
                     continue
@@ -380,7 +392,10 @@ class ShiftBackup:
                         "note": note_text,
                         "note_excerpt": note_text[:50] + ("..." if len(note_text) > 50 else ""),
                     }
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as e:
+                load_warnings.append(
+                    f"{file.name}: 提出ファイルを読み込めませんでした（{type(e).__name__}）。"
+                )
                 continue
 
         # 提出済み・未提出の振り分け
@@ -407,6 +422,7 @@ class ShiftBackup:
                     total_submitted / total_expected if total_expected > 0 else 0
                 ),
             },
+            "warnings": load_warnings,
         }
 
 

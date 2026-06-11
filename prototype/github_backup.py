@@ -181,36 +181,41 @@ def _push_file(
     url = f"https://api.github.com/repos/{repo}/contents/{file_path_in_repo}"
     headers = _github_headers()
 
-    # 既存ファイルの SHA 取得（上書き時に必要）
-    existing_sha: Optional[str] = None
-    try:
-        check = requests.get(url, headers=headers, timeout=timeout)
-        if check.status_code == 200:
-            existing_sha = check.json().get("sha")
-    except Exception:
-        pass  # 失敗したら新規作成として扱う
-
     # base64 エンコード
     content_b64 = base64.b64encode(content).decode("utf-8")
-    payload = {
-        "message": commit_message,
-        "content": content_b64,
-        "branch": "main",
-    }
-    if existing_sha:
-        payload["sha"] = existing_sha
 
-    # PUT 送信
-    try:
-        response = requests.put(url, headers=headers, json=payload, timeout=timeout)
-        if response.status_code in (200, 201):
-            return True, f"OK ({response.status_code})"
-        else:
-            return False, f"HTTP {response.status_code}: {response.text[:200]}"
-    except requests.exceptions.Timeout:
-        return False, "タイムアウト"
-    except Exception as e:
-        return False, f"{type(e).__name__}: {e}"
+    last_message = ""
+    for attempt in range(3):
+        # 既存ファイルの SHA 取得（上書き時に必要）。409競合時は再取得して再送する。
+        existing_sha: Optional[str] = None
+        try:
+            check = requests.get(url, headers=headers, timeout=timeout)
+            if check.status_code == 200:
+                existing_sha = check.json().get("sha")
+        except Exception as e:
+            last_message = f"SHA取得失敗: {type(e).__name__}: {e}"
+
+        payload = {
+            "message": commit_message,
+            "content": content_b64,
+            "branch": "main",
+        }
+        if existing_sha:
+            payload["sha"] = existing_sha
+
+        try:
+            response = requests.put(url, headers=headers, json=payload, timeout=timeout)
+            if response.status_code in (200, 201):
+                return True, f"OK ({response.status_code})"
+            last_message = f"HTTP {response.status_code}: {response.text[:200]}"
+            if response.status_code != 409:
+                return False, last_message
+        except requests.exceptions.Timeout:
+            return False, "タイムアウト"
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+
+    return False, f"競合のため保存できませんでした: {last_message}"
 
 
 def _fetch_repo_file(repo_path: str, timeout: int = 8) -> tuple[bool, bytes, str]:

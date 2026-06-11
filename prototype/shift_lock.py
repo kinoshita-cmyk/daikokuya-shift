@@ -88,7 +88,18 @@ class ShiftLockManager:
 
     def is_locked(self, year: int, month: int) -> bool:
         """ロックされているか確認"""
-        return self._lock_path(year, month).exists()
+        path = self._lock_path(year, month)
+        if not path.exists() and self.lock_dir == DEFAULT_LOCK_DIR:
+            try:
+                from .paths import BACKUP_DIR
+                from .github_backup import sync_latest_lock_and_snapshot_from_github
+
+                sync_latest_lock_and_snapshot_from_github(
+                    int(year), int(month), BACKUP_DIR, self.lock_dir,
+                )
+            except Exception:
+                pass
+        return path.exists()
 
     def get_lock_info(self, year: int, month: int) -> Optional[LockInfo]:
         """ロック情報を取得"""

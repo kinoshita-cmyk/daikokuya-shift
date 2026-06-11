@@ -41,6 +41,9 @@ class SubmissionData:
     admin_note_adjustments: dict[str, str] = field(default_factory=dict)
     submitted_employees: list[str] = field(default_factory=list)
     pending_employees: list[str] = field(default_factory=list)
+    load_warnings: list[str] = field(default_factory=list)
+    unreadable_files: list[str] = field(default_factory=list)
+    unknown_submitters: list[str] = field(default_factory=list)
 
     @property
     def submission_count(self) -> int:
@@ -841,6 +844,7 @@ def load_submissions_for_month(
         return data
 
     latest_note_adjustments = _load_latest_note_adjustments(year, month)
+    expected_set = set(expected_employees or [])
 
     # 各従業員の最新提出を取得
     latest: dict[str, dict] = {}
@@ -851,6 +855,11 @@ def load_submissions_for_month(
             author = d.get("author", "")
             if not author or author == "system":
                 continue
+            if expected_set and author not in expected_set:
+                msg = f"{f.name}: 対象外の提出者「{author}」のため読み込み対象外にしました。"
+                data.unknown_submitters.append(author)
+                data.load_warnings.append(msg)
+                continue
             saved_at = d.get("saved_at", "")
             if not is_submission_in_window(year, month, saved_at):
                 continue
@@ -859,7 +868,10 @@ def load_submissions_for_month(
                 or timestamp_sort_key(saved_at) > timestamp_sort_key(latest[author].get("saved_at", ""))
             ):
                 latest[author] = d
-        except Exception:
+        except Exception as e:
+            msg = f"{f.name}: 提出ファイルを読み込めませんでした（{type(e).__name__}）。"
+            data.unreadable_files.append(f.name)
+            data.load_warnings.append(msg)
             continue
 
     # generator 形式に変換
