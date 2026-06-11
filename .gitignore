@@ -5,6 +5,7 @@ data/sample_employee_contract.docx
 data/may_2026_shift.xlsx
 backups/
 output/
+DEPLOYMENT_GUIDE.md
 
 # Streamlit シークレット（API キー等）
 .streamlit/secrets.toml
