@@ -27,6 +27,7 @@ from .models import MonthlyShift, Store, OperationMode
 from .paths import OUTPUT_DIR
 from .employees import ALL_EMPLOYEES
 from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity
+from .calendar_utils import is_weekend_or_japanese_holiday
 
 
 # 出力時の従業員列順（運用に慣れた順番、テンプレートと同じ）
@@ -233,6 +234,9 @@ def export_shift_to_excel(
     left_center = Alignment(horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True)
     short_fill = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
     key_fill = PatternFill(start_color="FFEDD5", end_color="FFEDD5", fill_type="solid")
+    special_business_day_fill = PatternFill(
+        start_color="E5E7EB", end_color="E5E7EB", fill_type="solid",
+    )
 
     EMPLOYEE_START_COL = 4
     RIGHT_DATE_COL = EMPLOYEE_START_COL + len(EXPORT_COLUMN_ORDER)
@@ -326,14 +330,18 @@ def export_shift_to_excel(
     # ============================================================
     for d in range(1, days_in_month + 1):
         row = 7 + d
-        weekday = date(shift.year, shift.month, d).weekday()
+        current_date = date(shift.year, shift.month, d)
+        weekday = current_date.weekday()
         wd = WEEKDAY_JP[weekday]
+        special_business_day = is_weekend_or_japanese_holiday(current_date)
 
         # B列: 日付（左）
         c = ws.cell(row=row, column=2, value=d)
         c.font = cell_font
         c.alignment = center
         c.border = border
+        if special_business_day:
+            c.fill = special_business_day_fill
 
         # 鍵確認
         key_text = format_key_warning_text(key_warnings_by_store.get(d, {}))
@@ -351,6 +359,8 @@ def export_shift_to_excel(
         c.font = cell_font
         c.alignment = center
         c.border = border
+        if special_business_day:
+            c.fill = special_business_day_fill
 
         # 従業員配属
         for i, name in enumerate(EXPORT_COLUMN_ORDER):
@@ -372,12 +382,16 @@ def export_shift_to_excel(
         c.font = cell_font
         c.alignment = center
         c.border = border
+        if special_business_day:
+            c.fill = special_business_day_fill
 
         # 曜日（右）
         c = ws.cell(row=row, column=RIGHT_WEEKDAY_COL, value=wd)
         c.font = cell_font
         c.alignment = center
         c.border = border
+        if special_business_day:
+            c.fill = special_business_day_fill
 
         # 人員少
         short_text = _short_staff_text(d)

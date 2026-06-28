@@ -31,6 +31,7 @@ from .excel_exporter import (
     detect_key_warnings_by_store,
     format_key_warning_text,
 )
+from .calendar_utils import is_weekend_or_japanese_holiday
 
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
@@ -366,9 +367,25 @@ def export_shift_to_pdf(
     data_h = ROW_HEIGHTS["data"] * scale
     for day in range(1, days_in_month + 1):
         y = current_y - data_h
-        wd = WEEKDAY_JP[date(shift.year, shift.month, day).weekday()]
-        _draw_cell(pdf, col_x(0), y, col_widths[0], data_h, day, font_name, FONT_SIZES["cell"] * scale, line_width=line_width)
-        _draw_cell(pdf, col_x(1), y, col_widths[1], data_h, wd, font_name, FONT_SIZES["cell"] * scale, line_width=line_width)
+        current_date = date(shift.year, shift.month, day)
+        wd = WEEKDAY_JP[current_date.weekday()]
+        date_weekday_fill = (
+            colors.HexColor("#E5E7EB")
+            if is_weekend_or_japanese_holiday(current_date)
+            else colors.white
+        )
+        _draw_cell(
+            pdf, col_x(0), y, col_widths[0], data_h,
+            day, font_name, FONT_SIZES["cell"] * scale,
+            fill_color=date_weekday_fill,
+            line_width=line_width,
+        )
+        _draw_cell(
+            pdf, col_x(1), y, col_widths[1], data_h,
+            wd, font_name, FONT_SIZES["cell"] * scale,
+            fill_color=date_weekday_fill,
+            line_width=line_width,
+        )
 
         for i, emp_name in enumerate(EXPORT_COLUMN_ORDER):
             col_idx = 2 + i
@@ -389,11 +406,15 @@ def export_shift_to_pdf(
 
         _draw_cell(
             pdf, col_x(right_date_idx), y, col_widths[right_date_idx], data_h,
-            day, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+            day, font_name, FONT_SIZES["cell"] * scale,
+            fill_color=date_weekday_fill,
+            line_width=line_width,
         )
         _draw_cell(
             pdf, col_x(right_date_idx + 1), y, col_widths[right_date_idx + 1], data_h,
-            wd, font_name, FONT_SIZES["cell"] * scale, line_width=line_width,
+            wd, font_name, FONT_SIZES["cell"] * scale,
+            fill_color=date_weekday_fill,
+            line_width=line_width,
         )
 
         short_text = _short_staff_text(short_staff_days, day)
