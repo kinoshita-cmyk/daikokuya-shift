@@ -17,6 +17,7 @@ from reportlab.pdfgen import canvas
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from reportlab.pdfbase.ttfonts import TTFont
+from openpyxl.utils import get_column_letter
 
 from .models import MonthlyShift, Store
 from .paths import OUTPUT_DIR
@@ -234,7 +235,8 @@ def export_shift_to_pdf(
     margin_x = 14.0
     margin_y = 14.0
 
-    columns = ["B", "C"] + [chr(ord("D") + i) for i in range(len(EXPORT_COLUMN_ORDER))] + ["W", "X", "Y", "Z"]
+    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 4
+    columns = [get_column_letter(col) for col in range(2, 2 + column_count)]
     col_widths_base = [COLUMN_WIDTHS[col] * EXCEL_WIDTH_TO_POINTS for col in columns]
     row_heights_base = (
         [ROW_HEIGHTS["title"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment_last"]]
