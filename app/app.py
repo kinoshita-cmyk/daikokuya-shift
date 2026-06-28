@@ -51,6 +51,7 @@ from prototype.paths import (
 from prototype.submission_window import (
     format_timestamp_jst, is_submission_in_window, now_jst, timestamp_sort_key,
 )
+from prototype.calendar_utils import is_weekend_or_japanese_holiday
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
 from auth import require_auth, render_logout_button, is_manager, get_user_role
@@ -1012,7 +1013,7 @@ def render_shift_editor_fixed_header(shift: MonthlyShift) -> None:
     grid_columns = (
         "42px 30px "
         + " ".join([f"{employee_width}px"] * len(EXPORT_COLUMN_ORDER))
-        + " 42px 50px"
+        + " 42px 78px"
     )
     cells = [
         '<div class="shift-editor-fixed-head-cell">日</div>',
@@ -1097,7 +1098,7 @@ def render_shift_table(
     )
     employee_header_style = "min-width:50px; width:50px; line-height:1.12; font-size:12px;"
     short_header_style = "min-width:48px; width:48px; max-width:48px;"
-    key_header_style = "min-width:64px; width:64px; max-width:64px;"
+    key_header_style = "min-width:86px; width:86px; max-width:86px;"
     html = (
         f'<div style="{wrapper_style}">'
         f'<table style="{table_style}">'
@@ -1148,21 +1149,23 @@ def render_shift_table(
     for d in range(1, days_in_month + 1):
         current_date = date(shift.year, shift.month, d)
         wd = weekday_jp[current_date.weekday()]
+        is_special_business_day = is_weekend_or_japanese_holiday(current_date)
         # 人員不足日は背景強調
         is_short = d in short_staff_days
         if is_short:
             bg = "#fff3cd"  # 黄色強調
         else:
-            bg = "#fee2e2" if wd == "日" else ("#dbeafe" if wd == "土" else "white")
+            bg = "white"
+        date_weekday_bg = "#e5e7eb" if is_special_business_day else bg
         html += f'<tr style="background:{bg};">'
         html += (
             f'<td style="padding:6px; border:1px solid #ccc; '
-            f'text-align:center; font-weight:bold; background:{bg}; '
+            f'text-align:center; font-weight:bold; background:{date_weekday_bg}; '
             f'{left_date_style}">{int(shift.month)}/{d}</td>'
         )
         html += (
             f'<td style="padding:6px; border:1px solid #ccc; text-align:center; '
-            f'background:{bg}; {left_weekday_style}">{wd}</td>'
+            f'background:{date_weekday_bg}; {left_weekday_style}">{wd}</td>'
         )
 
         # 各従業員
@@ -1219,8 +1222,8 @@ def render_shift_table(
         key_bg = "#fff7ed" if key_mark else "white"
         html += (
             f'<td style="padding:3px 2px; border:1px solid #ccc; '
-            f'min-width:64px; width:64px; max-width:64px; '
-            f'text-align:center; background:{key_bg}; white-space:normal; '
+            f'min-width:86px; width:86px; max-width:86px; '
+            f'text-align:center; background:{key_bg}; white-space:nowrap; '
             f'line-height:1.15; '
             f'font-weight:bold; color:#b45309;">{key_mark}</td>'
         )
@@ -1417,6 +1420,12 @@ def render_colored_shift_editor(
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
     header_shift = header_shift or shift
+    editor_df = editor_df.copy()
+    editor_df["_土日祝"] = editor_df["日"].apply(
+        lambda d: is_weekend_or_japanese_holiday(
+            date(int(shift.year), int(shift.month), int(d))
+        )
+    )
     off_request_keys = json.dumps(
         sorted(f"{employee}|{int(day)}" for employee, day in (off_request_cells or set())),
         ensure_ascii=False,
@@ -1486,6 +1495,19 @@ def render_colored_shift_editor(
         }
         """
     )
+    date_weekday_cell_style = JsCode(
+        """
+        function(params) {
+            const isSpecial = params.data && params.data['_土日祝'] === true;
+            return {
+                textAlign: 'center',
+                fontWeight: params.colDef.field === '日' ? '800' : '700',
+                backgroundColor: isSpecial ? '#e5e7eb' : '#f8fafc',
+                color: '#111827'
+            };
+        }
+        """
+    )
     column_defs = [
         {
             "field": "日",
@@ -1493,11 +1515,7 @@ def render_colored_shift_editor(
             "pinned": "left",
             "width": 42,
             "minWidth": 38,
-            "cellStyle": {
-                "textAlign": "center",
-                "fontWeight": "800",
-                "backgroundColor": "#f8fafc",
-            },
+            "cellStyle": date_weekday_cell_style,
         },
         {
             "field": "曜",
@@ -1505,11 +1523,12 @@ def render_colored_shift_editor(
             "pinned": "left",
             "width": 30,
             "minWidth": 30,
-            "cellStyle": {
-                "textAlign": "center",
-                "fontWeight": "700",
-                "backgroundColor": "#f8fafc",
-            },
+            "cellStyle": date_weekday_cell_style,
+        },
+        {
+            "field": "_土日祝",
+            "hide": True,
+            "suppressColumnsToolPanel": True,
         },
     ]
     for name in EXPORT_COLUMN_ORDER:
@@ -1549,16 +1568,16 @@ def render_colored_shift_editor(
         "field": "鍵",
         "editable": False,
         "pinned": "right",
-        "width": 50,
-        "minWidth": 46,
-        "wrapText": True,
+        "width": 78,
+        "minWidth": 72,
+        "wrapText": False,
         "cellStyle": {
             "textAlign": "center",
             "fontWeight": "800",
             "backgroundColor": "#fff7ed",
             "color": "#b45309",
             "borderLeft": "1px solid #cbd5e1",
-            "whiteSpace": "normal",
+            "whiteSpace": "nowrap",
             "lineHeight": "1.15",
         },
     })
@@ -1582,9 +1601,6 @@ def render_colored_shift_editor(
         "getRowStyle": JsCode(
             """
             function(params) {
-                const dayLabel = params.data['曜'];
-                if (dayLabel === '日') { return {backgroundColor: '#fee2e2'}; }
-                if (dayLabel === '土') { return {backgroundColor: '#dbeafe'}; }
                 return {backgroundColor: '#ffffff'};
             }
             """
@@ -5675,7 +5691,7 @@ if mode == "📊 経営者ビュー":
                         help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                     )
                 column_config["人数少"] = st.column_config.TextColumn("少", width="small")
-                column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
+                column_config["鍵"] = st.column_config.TextColumn("鍵", width="medium")
                 disabled_columns = ["日", "曜", "人数少", "鍵"]
                 if lock_info is not None:
                     disabled_columns = editor_columns
@@ -6076,7 +6092,7 @@ if mode == "📊 経営者ビュー":
                     help="空白 / ×休み / ○赤羽 / □東口 / △大宮 / ☆西口 / ◆すずらん",
                 )
             column_config["人数少"] = st.column_config.TextColumn("少", width="small")
-            column_config["鍵"] = st.column_config.TextColumn("鍵", width="small")
+            column_config["鍵"] = st.column_config.TextColumn("鍵", width="medium")
             disabled_columns = ["日", "曜", "人数少", "鍵"]
             if lock_info is not None:
                 disabled_columns = editor_columns
@@ -7821,6 +7837,26 @@ elif mode == "⚙️ 設定":
         if not leave_data:
             st.info("まだ提出データがありません。従業員が希望を提出すると集計が表示されます。")
         else:
+            def _current_work_target_info(employee_name: str, ym: str) -> tuple[Optional[int], Optional[int]]:
+                """有給画面では提出時保存値ではなく、現在の月別基準を表示する。"""
+                try:
+                    y, m = (int(part) for part in str(ym).split("-", 1))
+                except (TypeError, ValueError):
+                    return None, None
+                try:
+                    emp_obj = get_employee(str(employee_name))
+                    target_days = get_monthly_work_target(
+                        emp_obj.name,
+                        m,
+                        emp_obj.annual_target_days,
+                    )
+                except Exception:
+                    target_days = None
+                if target_days is None:
+                    return None, None
+                base_holidays = monthrange(y, m)[1] - int(target_days)
+                return int(target_days), int(base_holidays)
+
             # 月選択
             available_months = sorted(leave_data.keys(), reverse=True)
             selected_ym = st.selectbox(
@@ -7854,18 +7890,24 @@ elif mode == "⚙️ 設定":
                 # 従業員別テーブル
                 table_data = []
                 for emp, info in sorted(month_data.items()):
+                    current_target, current_base_holidays = _current_work_target_info(emp, ym)
+                    display_target = current_target if current_target is not None else "-"
+                    display_base_holidays = (
+                        current_base_holidays if current_base_holidays is not None else "-"
+                    )
+                    display_total_holidays = (
+                        current_base_holidays + info["paid_leave_days"]
+                        if current_base_holidays is not None else "-"
+                    )
                     table_data.append({
                         "氏名": emp,
                         "本人希望": info.get("submitted_paid_leave_days", 0),
                         "管理者調整": info.get("admin_paid_leave_days", 0),
                         "有給合計": info["paid_leave_days"],
                         "調整日": format_day_list(info.get("admin_paid_leave_dates", [])),
-                        "基準勤務日数": info.get("monthly_target_workdays") or "-",
-                        "基準休日数": info.get("base_holidays") or "-",
-                        "希望休日合計": (
-                            (info.get("base_holidays") or 0) + info["paid_leave_days"]
-                            if info.get("base_holidays") is not None else "-"
-                        ),
+                        "基準勤務日数": display_target,
+                        "基準休日数": display_base_holidays,
+                        "希望休日合計": display_total_holidays,
                         "提出日時": format_timestamp_jst(info["saved_at"]) if info["saved_at"] else "-",
                     })
                 st.dataframe(table_data, width="stretch", hide_index=True)
@@ -7878,18 +7920,27 @@ elif mode == "⚙️ 設定":
                 if applicants:
                     st.markdown("**🏖 有給申請者の詳細**")
                     for emp, info in applicants:
+                        current_target, current_base_holidays = _current_work_target_info(emp, ym)
                         admin_note = ""
                         if info.get("admin_paid_leave_days", 0):
                             date_label = format_day_list(info.get("admin_paid_leave_dates", []))
                             admin_note = f" / 管理者調整 {info['admin_paid_leave_days']}日"
                             if date_label:
                                 admin_note += f"（{date_label}）"
+                        if current_base_holidays is None:
+                            base_holiday_label = "?"
+                            total_holiday_label = "?"
+                        else:
+                            base_holiday_label = str(current_base_holidays)
+                            total_holiday_label = str(
+                                current_base_holidays + int(info["paid_leave_days"])
+                            )
                         st.markdown(
                             f'<div style="background:#fef3c7; padding:8px 12px; '
                             f'margin:4px 0; border-radius:6px; border-left:3px solid #f59e0b;">'
                             f'<strong>{emp}</strong>: 有給 {info["paid_leave_days"]}日{admin_note} '
-                            f'（基準休{info.get("base_holidays") or "?"}日 + 有給{info["paid_leave_days"]}日 '
-                            f'= 合計 {(info.get("base_holidays") or 0) + info["paid_leave_days"]}日休み希望）'
+                            f'（基準休{base_holiday_label}日 + 有給{info["paid_leave_days"]}日 '
+                            f'= 合計 {total_holiday_label}日休み希望）'
                             f'</div>',
                             unsafe_allow_html=True,
                         )
