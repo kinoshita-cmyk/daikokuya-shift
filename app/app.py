@@ -2365,7 +2365,11 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         html_parts.append('<tr>')
         for col in columns:
             value = escape(str(row.get(col, ""))).replace("\n", "<br>")
-            white_space = "pre-wrap" if col == "備考" else "nowrap"
+            white_space = (
+                "pre-wrap"
+                if col in {"自由記載から反映", "自由記載確認", "備考"}
+                else "nowrap"
+            )
             html_parts.append(
                 f'<td style="border:1px solid #e5e7eb; padding:8px; '
                 f'vertical-align:top; min-width:{widths[col]}px; '
@@ -4040,13 +4044,61 @@ if mode == "📊 経営者ビュー":
                     "原文": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             st.markdown("##### 自由記載の反映チェック（生成に入る最終条件）")
-            st.dataframe(reflection_rows, width="stretch", hide_index=True)
+            render_scrollable_dict_table(
+                reflection_rows,
+                columns=[
+                    "氏名",
+                    "反映判定",
+                    "実際に生成へ渡る自由記載条件",
+                    "未反映・確認ポイント",
+                    "反映方式",
+                ],
+                widths={
+                    "氏名": 90,
+                    "反映判定": 160,
+                    "実際に生成へ渡る自由記載条件": 420,
+                    "未反映・確認ポイント": 420,
+                    "反映方式": 190,
+                },
+                empty_message="自由記載の反映チェックはありません",
+                max_height=360,
+            )
             st.caption(
                 "この表の「実際に生成へ渡る自由記載条件」が、自由記載・管理者補正から生成へ入る最終条件です。"
                 "「一部未反映」「未反映」がある場合は、補正メモを直すか、反映しない扱いにしてください。"
             )
             st.markdown("##### 詳細（原文・自動反映・管理者補正）")
-            st.dataframe(note_rows, width="stretch", hide_index=True)
+            render_scrollable_dict_table(
+                note_rows,
+                columns=[
+                    "氏名",
+                    "判定",
+                    "自動反映",
+                    "要確認",
+                    "管理者補正",
+                    "補正の読取",
+                    "最終反映条件",
+                    "反映方式",
+                    "確認メモ",
+                    "補正状態",
+                    "原文",
+                ],
+                widths={
+                    "氏名": 90,
+                    "判定": 120,
+                    "自動反映": 320,
+                    "要確認": 300,
+                    "管理者補正": 420,
+                    "補正の読取": 320,
+                    "最終反映条件": 380,
+                    "反映方式": 180,
+                    "確認メモ": 340,
+                    "補正状態": 120,
+                    "原文": 520,
+                },
+                empty_message="自由記載の詳細はありません",
+                max_height=460,
+            )
             st.caption(
                 "補正状態が「確認済み」の場合は自動反映に管理者補正を追加します。"
                 "「補正のみ反映」は自動反映を外して管理者補正だけを使います。"
