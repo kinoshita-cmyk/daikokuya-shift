@@ -96,8 +96,6 @@ def _load_latest_note_adjustments(year: int, month: int) -> dict[str, dict]:
     for adj in data.get("adjustments", []):
         if not isinstance(adj, dict):
             continue
-        if bool(adj.get("deleted", False)):
-            continue
         if int(adj.get("year", 0) or 0) != int(year):
             continue
         if int(adj.get("month", 0) or 0) != int(month):
@@ -111,7 +109,11 @@ def _load_latest_note_adjustments(year: int, month: int) -> dict[str, dict]:
             >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
         ):
             latest[employee] = adj
-    return latest
+    return {
+        employee: adj
+        for employee, adj in latest.items()
+        if not bool(adj.get("deleted", False))
+    }
 
 
 def _load_confirmed_note_adjustments(year: int, month: int) -> dict[str, str]:
