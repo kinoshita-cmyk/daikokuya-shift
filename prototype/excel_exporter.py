@@ -32,7 +32,7 @@ from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacit
 # 出力時の従業員列順（運用に慣れた順番、テンプレートと同じ）
 EXPORT_COLUMN_ORDER = [
     "山本", "板倉", "今津", "鈴木", "田中", "岩野", "大塚", "南",
-    "黒澤", "牧野", "春山", "下地", "大類", "長尾", "野澤", "下田",
+    "黒澤", "牧野", "春山", "下地", "大類", "長尾", "野澤",
     "楯", "土井", "顧問",
 ]
 
@@ -61,14 +61,13 @@ COLUMN_WIDTHS = {
     "P": 13.0,        # 大類
     "Q": 13.0,        # 長尾
     "R": 13.0,        # 野澤
-    "S": 13.0,        # 下田
-    "T": 11.0,        # 楯
-    "U": 13.0,        # 土井
-    "V": 13.0,        # 顧問
-    "W": 8.5,         # 日付（右）
-    "X": 7.0,         # 曜日（右）
-    "Y": 21.0,        # 人員少（店舗別マークが収まる幅）
-    "Z": 18.0,        # 鍵確認
+    "S": 11.0,        # 楯
+    "T": 13.0,        # 土井
+    "U": 13.0,        # 顧問
+    "V": 8.5,         # 日付（右）
+    "W": 7.0,         # 曜日（右）
+    "X": 21.0,        # 人員少（店舗別マークが収まる幅）
+    "Y": 18.0,        # 鍵確認
 }
 
 SHORT_STAFF_STORE_LABELS = {
@@ -235,7 +234,12 @@ def export_shift_to_excel(
     short_fill = PatternFill(start_color="FFF59D", end_color="FFF59D", fill_type="solid")
     key_fill = PatternFill(start_color="FFEDD5", end_color="FFEDD5", fill_type="solid")
 
-    LAST_COL = 26  # Z列
+    EMPLOYEE_START_COL = 4
+    RIGHT_DATE_COL = EMPLOYEE_START_COL + len(EXPORT_COLUMN_ORDER)
+    RIGHT_WEEKDAY_COL = RIGHT_DATE_COL + 1
+    SHORT_STAFF_COL = RIGHT_WEEKDAY_COL + 1
+    KEY_COL = SHORT_STAFF_COL + 1
+    LAST_COL = KEY_COL
 
     def _style_range_border(row: int, start_col: int = 2, end_col: int = LAST_COL) -> None:
         """結合行でも外枠と内部罫線が印刷で崩れないよう、範囲全体に罫線を入れる。"""
@@ -284,30 +288,35 @@ def export_shift_to_excel(
     for col in range(2, 4):
         ws.cell(row=7, column=col).border = border
 
-    # D7-V7: 従業員名
+    # D列以降: 従業員名
     for i, name in enumerate(EXPORT_COLUMN_ORDER):
-        col = 4 + i
+        col = EMPLOYEE_START_COL + i
         c = ws.cell(row=7, column=col, value=name)
         c.font = header_font
         c.alignment = center
         c.border = border
 
-    # W7:X7 結合（月ラベル右）
-    ws.merge_cells(start_row=7, start_column=23, end_row=7, end_column=24)
-    c = ws.cell(row=7, column=23, value=f"{shift.month}月")
+    # 右側の月ラベル
+    ws.merge_cells(
+        start_row=7,
+        start_column=RIGHT_DATE_COL,
+        end_row=7,
+        end_column=RIGHT_WEEKDAY_COL,
+    )
+    c = ws.cell(row=7, column=RIGHT_DATE_COL, value=f"{shift.month}月")
     c.font = header_font
     c.alignment = center
-    for col in range(23, 25):
+    for col in range(RIGHT_DATE_COL, RIGHT_WEEKDAY_COL + 1):
         ws.cell(row=7, column=col).border = border
 
-    # Y7: 人員少
-    c = ws.cell(row=7, column=25, value="人員少")
+    # 人員少
+    c = ws.cell(row=7, column=SHORT_STAFF_COL, value="人員少")
     c.font = header_font
     c.alignment = center
     c.border = border
 
-    # Z7: 鍵
-    c = ws.cell(row=7, column=26, value="鍵")
+    # 鍵
+    c = ws.cell(row=7, column=KEY_COL, value="鍵")
     c.font = header_font
     c.alignment = center
     c.border = border
@@ -326,13 +335,13 @@ def export_shift_to_excel(
         c.alignment = center
         c.border = border
 
-        # Z列: 鍵確認
+        # 鍵確認
         key_text = format_key_warning_text(key_warnings_by_store.get(d, {}))
         if key_text:
-            c = ws.cell(row=row, column=26, value=key_text)
+            c = ws.cell(row=row, column=KEY_COL, value=key_text)
             c.fill = key_fill
         else:
-            c = ws.cell(row=row, column=26, value="")
+            c = ws.cell(row=row, column=KEY_COL, value="")
         c.font = cell_font
         c.alignment = center
         c.border = border
@@ -343,9 +352,9 @@ def export_shift_to_excel(
         c.alignment = center
         c.border = border
 
-        # D列〜V列: 従業員配属
+        # 従業員配属
         for i, name in enumerate(EXPORT_COLUMN_ORDER):
-            col = 4 + i
+            col = EMPLOYEE_START_COL + i
             a = shift.get_assignment(name, d)
             value = a.store.value if a else ""
             c = ws.cell(row=row, column=col, value=value)
@@ -358,25 +367,25 @@ def export_shift_to_excel(
             c.alignment = center
             c.border = border
 
-        # W列: 日付（右）
-        c = ws.cell(row=row, column=23, value=d)
+        # 日付（右）
+        c = ws.cell(row=row, column=RIGHT_DATE_COL, value=d)
         c.font = cell_font
         c.alignment = center
         c.border = border
 
-        # X列: 曜日（右）
-        c = ws.cell(row=row, column=24, value=wd)
+        # 曜日（右）
+        c = ws.cell(row=row, column=RIGHT_WEEKDAY_COL, value=wd)
         c.font = cell_font
         c.alignment = center
         c.border = border
 
-        # Y列: 人員少
+        # 人員少
         short_text = _short_staff_text(d)
         if short_text:
-            c = ws.cell(row=row, column=25, value=short_text)
+            c = ws.cell(row=row, column=SHORT_STAFF_COL, value=short_text)
             c.fill = short_fill
         else:
-            c = ws.cell(row=row, column=25, value="")
+            c = ws.cell(row=row, column=SHORT_STAFF_COL, value="")
         c.font = cell_font
         c.alignment = center
         c.border = border
@@ -430,7 +439,9 @@ def export_shift_to_excel(
     ws.page_margins.right = 0.0
     ws.page_margins.top = 0.748
     ws.page_margins.bottom = 0.748
-    ws.print_area = f"B2:Z{end_row + len(footer_notes) - 1}"
+    ws.print_area = (
+        f"B2:{get_column_letter(LAST_COL)}{end_row + len(footer_notes) - 1}"
+    )
 
     wb.save(output_path)
     return output_path

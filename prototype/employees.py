@@ -6,7 +6,7 @@
 データソース:
 - config/employees.json の現在ルール
 - /data/rules_2026_05.txt は初期資料として保管（最新チャット・設定を優先）
-- 年間基準出勤日数の表（2025年7月〜2026年6月）
+- 年間基準出勤日数の表（正社員系は年間265日で統一）
 - 5月のシフト表（決定版）
 
 注意:
@@ -44,7 +44,7 @@ ECO_STAFF: list[Employee] = [
             Store.SUZURAN: Affinity.MEDIUM,
             Store.OMIYA: Affinity.WEAK,
         },
-        annual_target_days=280,
+        annual_target_days=265,
         notes="主担当: 赤羽。通常対応可: 東口・西口・すずらん。応援・巡回可: 大宮。絶対配置不可なし。赤羽の割合を高く。",
     ),
     Employee(
@@ -60,7 +60,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
             Store.OMIYA: Affinity.WEAK,
         },
-        annual_target_days=267,
+        annual_target_days=265,
         notes="通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
@@ -78,7 +78,7 @@ ECO_STAFF: list[Employee] = [
             Store.OMIYA: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
-        annual_target_days=270,
+        annual_target_days=265,
         notes="主担当: 西口。通常対応可: 東口。応援・巡回可: 赤羽。配置不可なし。",
     ),
     Employee(
@@ -94,7 +94,7 @@ ECO_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,    # 当面、東口1名体制は不可
             Store.NISHIGUCHI: Affinity.NONE,      # 通常不可。研修は手動・月別例外で扱う
         },
-        annual_target_days=268,
+        annual_target_days=265,
         notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽2回以上・すずらん2回以上。",
     ),
     Employee(
@@ -110,7 +110,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.WEAK,
             Store.AKABANE: Affinity.WEAK,
         },
-        annual_target_days=268,
+        annual_target_days=265,
         notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 西口・東口・赤羽。配置不可なし。",
     ),
     Employee(
@@ -146,7 +146,7 @@ ECO_STAFF: list[Employee] = [
             Store.OMIYA: Affinity.WEAK,
             Store.AKABANE: Affinity.NONE,
         },
-        annual_target_days=271,
+        annual_target_days=265,
         notes="主担当: すずらん。応援・巡回可: 東口・西口・大宮。配置不可なし。",
     ),
     Employee(
@@ -164,7 +164,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
-        annual_target_days=259,
+        annual_target_days=265,
         notes="赤羽東口店店長。東口専属",
     ),
 ]
@@ -189,7 +189,7 @@ TICKET_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,
             Store.SUZURAN: Affinity.NONE,
         },
-        annual_target_days=273,
+        annual_target_days=265,
         notes="赤羽専属",
     ),
     Employee(
@@ -220,7 +220,7 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=260,
+        annual_target_days=265,
         notes="通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
@@ -236,7 +236,7 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=264,
+        annual_target_days=265,
         notes="すずらん中、大宮中、赤羽弱。野澤不在時はすずらんで補填",
     ),
     Employee(
@@ -252,7 +252,7 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=260,
+        annual_target_days=265,
         notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: すずらん5回以上。",
     ),
     Employee(
@@ -269,7 +269,7 @@ TICKET_STAFF: list[Employee] = [
             Store.OMIYA: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
-        annual_target_days=266,
+        annual_target_days=265,
         notes="すずらん専属。不在時は岩野または大類で補填",
     ),
     Employee(
@@ -285,7 +285,10 @@ TICKET_STAFF: list[Employee] = [
             Store.HIGASHIGUCHI: Affinity.NONE,
         },
         annual_target_days=265,
-        notes="主担当: すずらん。通常対応可: 大宮。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: 赤羽1回以上・大宮1回以上",
+        employment_status=EmploymentStatus.RETIRED,
+        retired_at="2026-06-28",
+        status_changed_at="2026-06-28T00:00:00",
+        notes="退職済み。過去シフト参照用にデータは残すが、今後の自動生成・提出対象からは除外。",
     ),
     Employee(
         name="南",
