@@ -330,21 +330,25 @@ def save_note_adjustment_data(data: dict, actor: str = "管理者") -> Path:
     return NOTE_ADJUSTMENT_FILE
 
 
-def note_adjustments_for_month(year: int, month: int) -> list[dict]:
+def note_adjustments_for_month(
+    year: int,
+    month: int,
+    include_deleted: bool = False,
+) -> list[dict]:
     """指定年月の自由記載補正だけを返す。"""
     data = load_note_adjustment_data()
     return [
         adj for adj in data.get("adjustments", [])
         if int(adj.get("year", 0) or 0) == int(year)
         and int(adj.get("month", 0) or 0) == int(month)
-        and not bool(adj.get("deleted", False))
+        and (include_deleted or not bool(adj.get("deleted", False)))
     ]
 
 
 def latest_note_adjustments_by_employee(year: int, month: int) -> dict[str, dict]:
     """従業員ごとの最新の自由記載補正を返す。"""
     latest: dict[str, dict] = {}
-    for adj in note_adjustments_for_month(year, month):
+    for adj in note_adjustments_for_month(year, month, include_deleted=True):
         employee = str(adj.get("employee", "")).strip()
         if not employee:
             continue
@@ -354,7 +358,11 @@ def latest_note_adjustments_by_employee(year: int, month: int) -> dict[str, dict
             >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
         ):
             latest[employee] = adj
-    return latest
+    return {
+        employee: adj
+        for employee, adj in latest.items()
+        if not bool(adj.get("deleted", False))
+    }
 
 
 def upsert_note_adjustment(
@@ -394,6 +402,36 @@ def upsert_note_adjustment(
         "status": status,
         "corrected_text": corrected_text,
         "memo": memo,
+        "updated_at": now,
+        "updated_by": actor,
+    })
+    save_note_adjustment_data(data, actor=actor)
+
+
+def delete_note_adjustment(
+    year: int,
+    month: int,
+    employee: str,
+    actor: str = "管理者",
+) -> None:
+    """自由記載の管理者補正を削除扱いにする。元の提出データは残す。"""
+    data = load_note_adjustment_data()
+    adjustments = data.setdefault("adjustments", [])
+    now = datetime.now().isoformat()
+    adjustments.append({
+        "id": (
+            f"note_adjust_delete_{int(year)}{int(month):02d}_"
+            f"{employee}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        ),
+        "year": int(year),
+        "month": int(month),
+        "employee": str(employee),
+        "status": "削除",
+        "corrected_text": "",
+        "memo": "管理者補正を削除・リセット",
+        "deleted": True,
+        "created_at": now,
+        "created_by": actor,
         "updated_at": now,
         "updated_by": actor,
     })
@@ -4109,6 +4147,23 @@ if mode == "📊 経営者ビュー":
                         )
                         st.success("管理者補正を保存しました。")
                         st.rerun()
+            if existing_adjustment:
+                st.caption(
+                    "削除・リセットすると、この管理者補正だけを生成条件から外します。"
+                    "従業員が提出した原文は残ります。"
+                )
+                if st.button(
+                    "管理者補正を削除・リセット",
+                    key=f"delete_note_adjustment_{note_widget_suffix}",
+                    type="secondary",
+                ):
+                    delete_note_adjustment(
+                        int(target_year),
+                        int(target_month),
+                        selected_note_employee,
+                    )
+                    st.success("管理者補正を削除・リセットしました。")
+                    st.rerun()
 
     # 詳細表示（折りたたみ式）
     with st.expander(
