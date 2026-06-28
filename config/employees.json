@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-05-28T00:00:00",
+  "updated_at": "2026-06-28T00:00:00",
   "updated_by": "Codex",
   "employees": [
     {
@@ -18,7 +18,7 @@
         "NISHIGUCHI": "中",
         "SUZURAN": "中"
       },
-      "annual_target_days": 280,
+      "annual_target_days": 265,
       "notes": "主担当: 赤羽。通常対応可: 東口・西口・すずらん。応援・巡回可: 大宮。絶対配置不可なし。赤羽の割合を高く。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -43,7 +43,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 267,
+      "annual_target_days": 265,
       "notes": "通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -66,7 +66,7 @@
         "HIGASHIGUCHI": "中",
         "AKABANE": "弱"
       },
-      "annual_target_days": 270,
+      "annual_target_days": 265,
       "notes": "主担当: 西口。通常対応可: 東口。応援・巡回可: 赤羽。配置不可なし。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -91,7 +91,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 268,
+      "annual_target_days": 265,
       "notes": "主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽2回以上・すずらん2回以上。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -116,7 +116,7 @@
         "HIGASHIGUCHI": "弱",
         "AKABANE": "弱"
       },
-      "annual_target_days": 268,
+      "annual_target_days": 265,
       "notes": "主担当: 大宮。通常対応可: すずらん。応援・巡回可: 西口・東口・赤羽。配置不可なし。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -165,7 +165,7 @@
         "NISHIGUCHI": "弱",
         "OMIYA": "弱"
       },
-      "annual_target_days": 271,
+      "annual_target_days": 265,
       "notes": "主担当: すずらん。応援・巡回可: 東口・西口・大宮。配置不可なし。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -190,7 +190,7 @@
         "NISHIGUCHI": "不可",
         "SUZURAN": "不可"
       },
-      "annual_target_days": 259,
+      "annual_target_days": 265,
       "notes": "絶対担当: 東口。赤羽東口店店長。東口専属。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -215,7 +215,7 @@
         "NISHIGUCHI": "不可",
         "SUZURAN": "不可"
       },
-      "annual_target_days": 273,
+      "annual_target_days": 265,
       "notes": "絶対担当: 赤羽。赤羽専属。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -265,7 +265,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 260,
+      "annual_target_days": 265,
       "notes": "通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -290,7 +290,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 264,
+      "annual_target_days": 265,
       "notes": "通常対応可: 大宮・すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -315,7 +315,7 @@
         "HIGASHIGUCHI": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 260,
+      "annual_target_days": 265,
       "notes": "主担当: 大宮。通常対応可: すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: すずらん5回以上。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -340,7 +340,7 @@
         "OMIYA": "不可",
         "NISHIGUCHI": "不可"
       },
-      "annual_target_days": 266,
+      "annual_target_days": 265,
       "notes": "絶対担当: すずらん。すずらん専属。不在時は岩野または大類で補填。",
       "employment_status": "正社員",
       "hired_at": null,
@@ -366,11 +366,11 @@
         "NISHIGUCHI": "不可"
       },
       "annual_target_days": 265,
-      "notes": "主担当: すずらん。通常対応可: 大宮。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: 赤羽1回以上・大宮1回以上。",
-      "employment_status": "正社員",
+      "notes": "退職済み。過去シフト参照用にデータは残すが、今後の自動生成・提出対象からは除外。",
+      "employment_status": "退職",
       "hired_at": null,
-      "retired_at": null,
-      "status_changed_at": null,
+      "retired_at": "2026-06-28",
+      "status_changed_at": "2026-06-28T00:00:00",
       "constraint_check_excluded": false,
       "is_auxiliary": false,
       "only_on_request_days": false
