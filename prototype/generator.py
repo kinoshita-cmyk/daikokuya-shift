@@ -46,6 +46,7 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
+    is_omiya_anchor_relaxed_month,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -685,16 +686,17 @@ def generate_shift(
     # ============================================================
     # 制約 7: 大宮駅前店アンカー（春山 or 下地が必ずいる）
     # ============================================================
-    for d in days:
-        mode = operation_modes.get(d, OperationMode.NORMAL)
-        if mode == OperationMode.CLOSED:
-            continue
-        anchor_present = sum(
-            x[name][d][Store.OMIYA]
-            for name in OMIYA_ANCHOR_STAFF
-            if name in [e.name for e in main_employees]
-        )
-        model.Add(anchor_present >= 1)
+    if not is_omiya_anchor_relaxed_month(year, month):
+        for d in days:
+            mode = operation_modes.get(d, OperationMode.NORMAL)
+            if mode == OperationMode.CLOSED:
+                continue
+            anchor_present = sum(
+                x[name][d][Store.OMIYA]
+                for name in OMIYA_ANCHOR_STAFF
+                if name in [e.name for e in main_employees]
+            )
+            model.Add(anchor_present >= 1)
 
     # ============================================================
     # 制約 8: 連勤上限

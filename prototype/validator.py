@@ -38,6 +38,7 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
+    is_omiya_anchor_relaxed_month,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
@@ -1125,6 +1126,8 @@ def _check_work_requests(
 
 def _check_omiya_anchor(shift: MonthlyShift, result: ValidationResult, days: int) -> None:
     """大宮店に春山または下地のどちらか1人は必ずいる"""
+    if is_omiya_anchor_relaxed_month(shift.year, shift.month):
+        return
     for day in range(1, days + 1):
         mode = shift.operation_modes.get(day, OperationMode.NORMAL)
         if mode == OperationMode.CLOSED:

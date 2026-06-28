@@ -245,6 +245,17 @@ HARD_CONSTRAINTS = {
 # 大宮店の追加制約：春山・下地どちらか1人は必ず在勤
 OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
 
+# 2026年7月は大型連休の重なりが大きい超イレギュラー月。
+# 本人の×休み希望を守るため、この月だけ大宮駅前アンカー条件を外し、
+# 店舗ごとの最低エコ・最低人数で運用可とする。
+OMIYA_ANCHOR_RELAXED_MONTHS: tuple[tuple[int, int], ...] = ((2026, 7),)
+
+
+def is_omiya_anchor_relaxed_month(year: int, month: int) -> bool:
+    """大宮駅前アンカー条件を月限定で緩和するか。"""
+    return (int(year), int(month)) in OMIYA_ANCHOR_RELAXED_MONTHS
+
+
 # 月末月初の大宮駅前固定メンバー。
 # 本人の×休み希望がある日は休み希望を最優先し、強制配置しない。
 MONTH_END_START_OMIYA_STAFF: tuple[str, ...] = ("下地", "春山", "黒澤")
