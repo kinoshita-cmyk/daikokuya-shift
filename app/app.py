@@ -511,6 +511,10 @@ from prototype.rules import (
     SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     get_monthly_work_target,
 )
+try:
+    from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
+except Exception:
+    MONTH_EDGE_OMIYA_STAFF = ("下地", "春山", "黒澤")
 
 
 # ============================================================
@@ -3252,6 +3256,108 @@ def strip_advisor_assignments(source: MonthlyShift) -> MonthlyShift:
     return shift
 
 
+def store_from_rule_value(value) -> Optional[Store]:
+    """月別ルールなどの店舗指定値を Store に丸める。"""
+    if isinstance(value, Store):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return Store[text]
+    except Exception:
+        pass
+    for store in Store:
+        if text in {store.name, store.value, store.display_name}:
+            return store
+    return None
+
+
+def build_incomplete_manual_draft(
+    year: int,
+    month: int,
+    operation_modes: dict[int, OperationMode],
+    off_requests: dict[str, list[int]],
+    work_requests: list[tuple[str, int, Optional[Store]]],
+    preferred_work_requests: list[tuple[str, int, Optional[Store]]],
+    required_assignments: list[dict],
+) -> MonthlyShift:
+    """解なし時に、手動調整を始めるための未完成下書きを作る。"""
+    days_in_month = monthrange(int(year), int(month))[1]
+    shift = MonthlyShift(year=int(year), month=int(month))
+    shift.operation_modes = dict(operation_modes or {})
+    assignments: dict[tuple[str, int], ShiftAssignment] = {}
+
+    def is_valid_day(day: int) -> bool:
+        return 1 <= int(day) <= days_in_month
+
+    absolute_off: set[tuple[str, int]] = set()
+    for employee, days in (off_requests or {}).items():
+        for day in days:
+            try:
+                day_int = int(day)
+            except (TypeError, ValueError):
+                continue
+            if not is_valid_day(day_int):
+                continue
+            absolute_off.add((str(employee), day_int))
+            assignments[(str(employee), day_int)] = ShiftAssignment(
+                employee=str(employee),
+                day=day_int,
+                store=Store.OFF,
+            )
+
+    def set_assignment(employee: str, day: int, store: Optional[Store]) -> None:
+        if not employee or store is None or store == Store.OFF:
+            return
+        if not is_valid_day(day):
+            return
+        key = (str(employee), int(day))
+        if key in absolute_off:
+            return
+        assignments[key] = ShiftAssignment(
+            employee=str(employee),
+            day=int(day),
+            store=store,
+        )
+
+    # 月別の日付指定配置は、固定・希望どちらも下書きの初期値として反映する。
+    for rule in required_assignments or []:
+        if not isinstance(rule, dict):
+            continue
+        employee = str(rule.get("employee") or "").strip()
+        try:
+            day = int(rule.get("day") or rule.get("target_day") or 0)
+        except (TypeError, ValueError):
+            continue
+        raw_store = rule.get("store")
+        if raw_store is None:
+            stores = rule.get("stores") or []
+            raw_store = stores[0] if stores else None
+        set_assignment(employee, day, store_from_rule_value(raw_store))
+
+    # 月末月初の大宮駅前固定も、休み希望がなければ初期配置に入れる。
+    for day in (1, days_in_month):
+        for employee in MONTH_EDGE_OMIYA_STAFF:
+            set_assignment(str(employee), day, Store.OMIYA)
+
+    # 店舗指定付きの出勤希望は初期配置に入れる。店舗未指定の出勤希望は空白のまま残す。
+    for employee, day, store in list(work_requests or []) + list(preferred_work_requests or []):
+        try:
+            day_int = int(day)
+        except (TypeError, ValueError):
+            continue
+        set_assignment(str(employee), day_int, store_from_rule_value(store))
+
+    shift.assignments = sorted(
+        assignments.values(),
+        key=lambda assignment: (int(assignment.day), assignment.employee),
+    )
+    return shift
+
+
 def advisor_candidate_trigger_issues(validation_result) -> list[dict]:
     """顧問候補を出すきっかけになる人数系の検証結果を抜き出す。"""
     rows = []
@@ -3592,6 +3698,11 @@ if mode == "📊 経営者ビュー":
                 if _gen_status == "success":
                     st.success(
                         f"🟢 **直近の生成結果（{_gen_ym} / {_gen_finished}）: 成功**\n\n"
+                        f"{_last_gen.get('message', '')}"
+                    )
+                elif _gen_status == "partial":
+                    st.warning(
+                        f"🟡 **直近の生成結果（{_gen_ym} / {_gen_finished}）: 未完成下書き**\n\n"
                         f"{_last_gen.get('message', '')}"
                     )
                 elif _gen_status == "infeasible":
@@ -4797,6 +4908,7 @@ if mode == "📊 経営者ビュー":
                     advisor_candidate_triggers = []
                     advisor_candidate_base_used = False
                     emergency_draft_used = False
+                    incomplete_manual_draft_used = False
                     if shift is not None:
                         candidate_validation = run_shift_validation(
                             shift=shift,
@@ -4889,6 +5001,33 @@ if mode == "📊 経営者ビュー":
                                     "顧問は自動確定していません。エラーを見ながら手動で調整してください。"
                                 )
 
+                    if shift is None:
+                        shift = build_incomplete_manual_draft(
+                            _saved_target_year,
+                            _saved_target_month,
+                            modes,
+                            use_off_requests,
+                            use_work_requests,
+                            use_preferred_work_requests,
+                            use_required_assignments,
+                        )
+                        incomplete_manual_draft_used = True
+                        if not advisor_candidate_triggers:
+                            advisor_candidate_triggers = [{
+                                "日付": "",
+                                "区分": "未完成下書き",
+                                "内容": (
+                                    "完全な自動生成はできませんでした。"
+                                    "本人×休み・月別日付指定・店舗指定の出勤希望だけを入れた"
+                                    "手動調整用の下書きを作成しました。"
+                                ),
+                            }]
+                        data_source_msg += (
+                            "\n⚠ 完全な自動生成はできませんでした。"
+                            "本人×休み・月別日付指定・店舗指定の出勤希望だけを入れた"
+                            "未完成下書きを表示します。空白セルを手動で埋めてください。"
+                        )
+
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
                 st.session_state["target_year"] = _saved_target_year
                 st.session_state["target_month"] = _saved_target_month
@@ -4945,6 +5084,7 @@ if mode == "📊 経営者ビュー":
                     "advisor_candidate_triggers": list(advisor_candidate_triggers),
                     "advisor_candidate_base_used": bool(advisor_candidate_base_used),
                     "emergency_draft_used": bool(emergency_draft_used),
+                    "incomplete_manual_draft_used": bool(incomplete_manual_draft_used),
                     "solver_limit_seconds": int(solver_limit_seconds),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
@@ -4969,7 +5109,11 @@ if mode == "📊 経営者ビュー":
                             shift,
                             kind="draft",
                             author="自動保存",
-                            note="シフト生成直後の下書き",
+                            note=(
+                                "解なし時の未完成下書き"
+                                if incomplete_manual_draft_used
+                                else "シフト生成直後の下書き"
+                            ),
                             metadata=build_generation_metadata(
                                 data_source_msg, _input_summary,
                             ),
@@ -4992,9 +5136,16 @@ if mode == "📊 経営者ビュー":
                         "required_assignments": list(use_required_assignments),
                     })
                     progress_area.empty()
-                    st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
+                    if incomplete_manual_draft_used:
+                        st.warning(
+                            "⚠ 完全な自動生成はできませんでしたが、"
+                            "手動調整用の未完成下書きを作成しました。\n\n"
+                            f"{data_source_msg}"
+                        )
+                    else:
+                        st.success(f"✅ シフト生成完了！\n\n{data_source_msg}")
                     st.session_state[_gen_result_key] = {
-                        "status": "success",
+                        "status": "partial" if incomplete_manual_draft_used else "success",
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "message": data_source_msg,
                         "input_summary": _input_summary,
