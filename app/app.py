@@ -549,6 +549,7 @@ from prototype.rules import (
     STORE_KEYHOLDERS,
     SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     get_monthly_work_target,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS,
 )
 try:
     from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
@@ -3400,6 +3401,8 @@ def build_incomplete_manual_draft(
     for day in (1, days_in_month):
         for employee in MONTH_EDGE_OMIYA_STAFF:
             set_assignment(str(employee), day, Store.OMIYA)
+        for employee, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
+            set_assignment(str(employee), day, home_store)
 
     # 店舗指定付きの出勤希望は初期配置に入れる。店舗未指定の出勤希望は空白のまま残す。
     for employee, day, store in list(work_requests or []) + list(preferred_work_requests or []):
@@ -8075,7 +8078,7 @@ elif mode == "⚙️ 設定":
             "eco_required": "東口・西口の必須エコ要員",
             "consec_work": "最大連勤チェック",
             "holiday_days": "月内最低休日数",
-            "consec_off_3": "3連休の確認",
+            "consec_off_3": "3連休禁止（希望休3連続は例外）",
             "two_off_per_month": "月内 2連休回数（最低1回・最大2回）",
             "off_request": "休み希望厳守",
             "work_request": "出勤希望・希望店舗の考慮",
@@ -8343,10 +8346,10 @@ elif mode == "⚙️ 設定":
                 "原則ルール。例外的に0回・2回以上もあり得るため警告扱いです。",
             ),
             _rule_row(
-                "連勤・休日", "3連休の確認",
-                "原則避けるが、人員過多や本人希望がある場合は許容。",
-                "ソフト反映", "参考情報", "提出一覧・入力サマリに表示",
-                "コード固定", "一部反映",
+                "連勤・休日", "3連休禁止",
+                "本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可。",
+                "反映中", "反映中", "検証結果に表示",
+                "コード固定", "反映中",
             ),
             _rule_row(
                 "希望・提出", "休み希望厳守",
@@ -8387,11 +8390,16 @@ elif mode == "⚙️ 設定":
                 "従業員マスタ", "反映中",
             ),
             _rule_row(
-                "スタッフ別", "月内最低巡回条件",
-                "黒澤さんはすずらん5回以上、牧野さんは赤羽2回以上・すずらん2回以上。",
+                "スタッフ別", "月末月初の固定配置",
+                "下地さん・春山さん・黒澤さんは大宮駅前、各店店長（今津さん=赤羽、土井さん=東口、下地さん=大宮、長尾さん=すずらん、楯さん=西口）は自店舗。本人の×休み希望日は休みを優先。",
                 "反映中", "反映中", "検証結果に表示",
                 "コード固定", "反映中",
-                "今津さん・楯さん・春山さん・長尾さんには、固定の月3回巡回条件を設定していません。",
+            ),
+            _rule_row(
+                "スタッフ別", "月内最低巡回条件",
+                "固定の月内最低巡回条件は現在なし。巡回は店舗適性・月別例外・手動調整で扱う。",
+                "対象なし", "対象なし", "従業員マスタで確認",
+                "コード固定", "反映中",
             ),
             _rule_row(
                 "スタッフ別", "従業員別の店舗適性",
