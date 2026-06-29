@@ -38,6 +38,7 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
@@ -283,7 +284,7 @@ def validate(
         exact_holiday_days=exact_holiday_days,
     )
 
-    # 6. 連休チェック（2連休回数、3連休確認）
+    # 6. 連休チェック（2連休回数、3連休禁止）
     _check_consecutive_off(
         shift, result, days_in_month, off_requests,
         employee_max_consecutive_off=employee_max_consecutive_off,
@@ -319,28 +320,34 @@ def validate(
     # 13. 月末月初の大宮駅前固定チェック
     _check_month_end_start_omiya(shift, result, days_in_month, off_requests)
 
-    # 14. 東口の月曜休店チェック
+    # 14. 月末月初の店長自店舗固定チェック
+    _check_month_edge_home_store(shift, result, days_in_month, off_requests)
+
+    # 15. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
 
-    # 15. 月内の最低巡回条件チェック
+    # 16. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
 
-    # 16. 月別の追加配置ルールチェック
+    # 17. 月別の追加配置ルールチェック
     _check_monthly_store_count_rules(shift, result, monthly_store_count_rules)
 
-    # 17. 月別の日付指定配置ルールチェック
+    # 18. 月別の日付指定配置ルールチェック
     _check_required_assignment_rules(shift, result, required_assignments)
 
-    # 18. 牧野さんの東口・西口研修ルールチェック
+    # 19. 牧野さんの東口・西口研修ルールチェック
     _check_makino_training_rules(shift, result, days_in_month, monthly_store_count_rules)
 
-    # 19. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 20. 月別の同時休み回避チェック
+    _check_monthly_avoid_same_off_rules(shift, result, days_in_month)
+
+    # 21. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
-    # 20. 主担当なし・通常対応可複数店舗の偏りチェック
+    # 22. 主担当なし・通常対応可複数店舗の偏りチェック
     _check_balanced_normal_store_assignments(shift, result)
 
-    # 21. 月間勤務日数バランスチェック
+    # 23. 月間勤務日数バランスチェック
     _check_monthly_workday_balance(
         shift,
         result,
@@ -350,7 +357,7 @@ def validate(
         exact_holiday_days,
     )
 
-    # 22. 統計情報の集計
+    # 24. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -784,10 +791,24 @@ def _check_consecutive_off(
     off_requests: dict[str, list[int]],
     employee_max_consecutive_off: Optional[dict[str, int]] = None,
 ) -> None:
-    """2連休回数（1〜2回）と3連休の確認"""
+    """2連休回数（1〜2回）と3連休禁止の確認"""
     min_2off = HARD_CONSTRAINTS["min_two_day_off_per_month"]
     max_2off = HARD_CONSTRAINTS["max_two_day_off_per_month"]
     employee_max_consecutive_off = employee_max_consecutive_off or {}
+
+    def has_unrequested_overlimit_window(
+        off_block: list[int],
+        requested_days: set[int],
+        max_allowed: int,
+    ) -> bool:
+        window_len = max_allowed + 1
+        if len(off_block) < window_len:
+            return False
+        for idx in range(0, len(off_block) - window_len + 1):
+            window = off_block[idx:idx + window_len]
+            if not all(day in requested_days for day in window):
+                return True
+        return False
 
     for emp in _validation_employees():
         if not emp.is_shift_eligible:
@@ -798,6 +819,10 @@ def _check_consecutive_off(
             continue
 
         emp_off_requests = set(off_requests.get(emp.name, []))
+        max_allowed_off = int(HARD_CONSTRAINTS.get("max_consecutive_off_days", 2) or 2)
+        emp_max_off = employee_max_consecutive_off.get(emp.name)
+        if emp_max_off is not None:
+            max_allowed_off = min(max_allowed_off, int(emp_max_off))
 
         consec_off = 0
         two_off_count = 0
@@ -813,25 +838,19 @@ def _check_consecutive_off(
                     # 3連休になった日（最終日）を特定
                     third_day = day - 1
                     off_block = list(range(day - consec_off, day))
-                    # 寛容版: 連休のうち1日でも希望休（または柔軟休み候補）が含まれていれば許容
-                    has_request = any(d in emp_off_requests for d in off_block)
-                    emp_max_off = employee_max_consecutive_off.get(emp.name)
-                    if emp_max_off is not None and consec_off > int(emp_max_off):
+                    if has_unrequested_overlimit_window(
+                        off_block,
+                        emp_off_requests,
+                        max_allowed_off,
+                    ):
                         result.issues.append(Issue(
                             severity="ERROR",
-                            category="連休",
-                            day=third_day, employee=emp.name,
-                            message=f"{consec_off}連休（上限{int(emp_max_off)}）",
-                        ))
-                    elif not has_request:
-                        result.issues.append(Issue(
-                            severity="WARNING",
-                            category="3連休確認",
+                            category="3連休",
                             day=third_day, employee=emp.name,
                             message=(
                                 f"{consec_off}連休"
                                 f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
-                                "。人数過多などの事情があれば許容可能です。"
+                                "。本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可です。"
                             ),
                         ))
                 consec_off = 0
@@ -841,24 +860,19 @@ def _check_consecutive_off(
             two_off_count += 1
             if consec_off >= 3:
                 off_block = list(range(days - consec_off + 1, days + 1))
-                has_request = any(d in emp_off_requests for d in off_block)
-                emp_max_off = employee_max_consecutive_off.get(emp.name)
-                if emp_max_off is not None and consec_off > int(emp_max_off):
+                if has_unrequested_overlimit_window(
+                    off_block,
+                    emp_off_requests,
+                    max_allowed_off,
+                ):
                     result.issues.append(Issue(
                         severity="ERROR",
-                        category="連休",
-                        day=days, employee=emp.name,
-                        message=f"{consec_off}連休（上限{int(emp_max_off)}）",
-                    ))
-                elif not has_request:
-                    result.issues.append(Issue(
-                        severity="WARNING",
-                        category="3連休確認",
+                        category="3連休",
                         day=days, employee=emp.name,
                         message=(
                             f"{consec_off}連休"
                             f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
-                            "。人数過多などの事情があれば許容可能です。"
+                            "。本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可です。"
                         ),
                     ))
 
@@ -1174,6 +1188,34 @@ def _check_month_end_start_omiya(
             ))
 
 
+def _check_month_edge_home_store(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    off_requests: dict[str, list[int]],
+) -> None:
+    """各店店長は月初1日と月末最終日に自店舗へ配置する。"""
+    for emp_name, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
+        for day in (1, days):
+            if day in set(off_requests.get(emp_name, [])):
+                continue
+            assignment = shift.get_assignment(emp_name, day)
+            actual_store = assignment.store if assignment is not None else Store.OFF
+            if actual_store == home_store:
+                continue
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="月末月初店長",
+                day=day,
+                employee=emp_name,
+                message=(
+                    f"{emp_name}は月初1日・月末最終日は"
+                    f"{home_store.display_name}勤務です。"
+                    f"現在は{actual_store.display_name}です。"
+                ),
+            ))
+
+
 def _check_higashiguchi_monday_closed(
     shift: MonthlyShift, result: ValidationResult, days: int,
 ) -> None:
@@ -1216,6 +1258,35 @@ def _check_store_rotation_minimums(
                 message=(
                     f"{store_label}への巡回が{len(days)}日です。"
                     f"最低{min_count}日必要です。"
+                ),
+            ))
+
+
+def _check_monthly_avoid_same_off_rules(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """月限定の同時休み回避ルールを警告として確認する。"""
+    for first_name, second_name, reason in MONTHLY_AVOID_SAME_OFF_RULES.get(
+        (int(shift.year), int(shift.month)),
+        (),
+    ):
+        for day in range(1, days + 1):
+            first_assignment = shift.get_assignment(first_name, day)
+            second_assignment = shift.get_assignment(second_name, day)
+            first_off = first_assignment is None or first_assignment.store == Store.OFF
+            second_off = second_assignment is None or second_assignment.store == Store.OFF
+            if not (first_off and second_off):
+                continue
+            result.issues.append(Issue(
+                severity="WARNING",
+                category="月別同時休み回避",
+                day=day,
+                employee=None,
+                message=(
+                    f"{first_name}・{second_name}が同時休みです。"
+                    f"{reason}。本人の×休み希望や解の成立を優先する場合は許容してください。"
                 ),
             ))
 

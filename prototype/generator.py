@@ -46,6 +46,7 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
@@ -559,6 +560,19 @@ def generate_shift(
                 continue
             model.Add(x[name][d][Store.OMIYA] == 1)
 
+    # 月末月初の各店店長自店舗固定。
+    # 既存の大宮駅前固定ルールとは別に併用する。
+    for name, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
+        if name not in main_employee_names:
+            continue
+        if home_store not in main_stores:
+            continue
+        requested_off_days = set(off_requests.get(name, []))
+        for d in month_edge_days:
+            if d in requested_off_days:
+                continue
+            model.Add(x[name][d][home_store] == 1)
+
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
     # ============================================================
@@ -732,7 +746,6 @@ def generate_shift(
         prev_consec_map[p.employee] = consec
 
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
-    three_off_indicators = []  # 希望休を含まない3連休のインジケータ
     two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
     two_off_over_terms = []  # 2連休が多すぎる場合のソフトペナルティ
 
@@ -842,37 +855,27 @@ def generate_shift(
                 two_off_over_terms.append(over_two_off)
 
     # ============================================================
-    # 制約 11: 3連休は原則避ける（ソフト）
-    # 人員が多い月は3連休もあり得るため、禁止ではなくペナルティとして扱う。
-    # 休み希望日が含まれる3連休は本人希望の反映としてペナルティ対象外にする。
+    # 制約 11: 3連休回避（ハード）
+    # 本人の×休み希望として3日連続で提出されている窓だけ例外として許容する。
+    # 2日希望休 + 1日自然休のように、システム側が3連休を完成させる形は不可。
     # ============================================================
     for e in main_employees:
         if e.constraint_check_excluded or e.role == Role.ADVISOR:
             if e.name not in employee_max_consecutive_off:
                 continue
         emp_off_days = set(off_requests.get(e.name, []))
+
+        max_off_days = int(HARD_CONSTRAINTS.get("max_consecutive_off_days", 2) or 2)
         emp_max_off = int(employee_max_consecutive_off.get(e.name, 0) or 0)
         if emp_max_off > 0:
-            for start in range(1, days_in_month - emp_max_off + 1):
-                window = list(range(start, start + emp_max_off + 1))
-                if len(window) == emp_max_off + 1:
-                    model.Add(sum(off[e.name][d] for d in window) <= emp_max_off)
-            continue
-        # 柔軟休み候補日も除外対象に追加
-        for fname, fcand_days, _ in (flexible_off or []):
-            if fname == e.name:
-                emp_off_days.update(fcand_days)
-        for start in range(1, days_in_month - 1):
-            window = [start, start + 1, start + 2]
-            # 1日でも休み希望に含まれていればこの窓は3連休チェック除外
-            # （希望休が連続2日 + 自然休1日 のパターンを許容するため）
-            if any(d in emp_off_days for d in window):
+            max_off_days = min(max_off_days, emp_max_off)
+
+        for start in range(1, days_in_month - max_off_days + 1):
+            window = list(range(start, start + max_off_days + 1))
+            # 本人希望だけで上限を超える連休が成立している場合は例外。
+            if all(d in emp_off_days for d in window):
                 continue
-            three_off = model.NewBoolVar(f"three_off_{e.name}_{start}")
-            off_sum = off[e.name][start] + off[e.name][start + 1] + off[e.name][start + 2]
-            model.Add(off_sum == 3).OnlyEnforceIf(three_off)
-            model.Add(off_sum <= 2).OnlyEnforceIf(three_off.Not())
-            three_off_indicators.append(three_off)
+            model.Add(sum(off[e.name][d] for d in window) <= max_off_days)
 
     # ============================================================
     # 制約 12: 大塚さんの月間出勤日数（5月は10日）
@@ -905,6 +908,7 @@ def generate_shift(
     monthly_rule_terms = []
     monthly_rule_penalty_terms = []
     historical_actual_terms = []
+    monthly_avoid_same_off_terms = []
 
     # 提出フォームの「○」や自由記載の「出勤希望」「○日は赤羽希望」などはソフト制約。
     # まず出勤できるなら出勤、出勤になった場合は希望店舗へ、という2段階で優先する。
@@ -1045,6 +1049,17 @@ def generate_shift(
         store = rule.get("store")
         if name in main_employee_names and store in main_stores:
             monthly_rule_terms.append(x[name][day][store])
+
+    # 月限定の「同時休みをなるべく避ける」条件。
+    # 本人の×希望や解の成立を優先するため、ハード制約ではなく強めのペナルティにする。
+    for first_name, second_name, _reason in MONTHLY_AVOID_SAME_OFF_RULES.get((int(year), int(month)), ()):
+        if first_name not in main_employee_names or second_name not in main_employee_names:
+            continue
+        for d in days:
+            both_off = model.NewBoolVar(f"avoid_same_off_{first_name}_{second_name}_{d}")
+            model.AddBoolAnd([off[first_name][d], off[second_name][d]]).OnlyEnforceIf(both_off)
+            model.AddBoolOr([off[first_name][d].Not(), off[second_name][d].Not()]).OnlyEnforceIf(both_off.Not())
+            monthly_avoid_same_off_terms.append(both_off)
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
@@ -1212,14 +1227,11 @@ def generate_shift(
     if two_off_goal_terms:
         # 2連休不足の警告が出ないよう、緩和時でも強く優先する。
         obj = obj + 260 * sum(two_off_goal_terms)
-    if three_off_indicators:
-        # 3連休はあり得るが、必要がなければ避ける
-        obj = obj - 650 * sum(three_off_indicators)
     if two_off_over_terms:
         # 2連休が多すぎる状態も、可能な限り避ける。
         obj = obj - 520 * sum(two_off_over_terms)
     if preferred_consecutive_off_indicators:
-        # 自由記載で明示された連休希望は、通常の3連休回避ペナルティより強く優先する。
+        # 自由記載で明示された連休希望は優先するが、3連休禁止のハード条件は別途維持する。
         obj = obj + 180 * sum(preferred_consecutive_off_indicators)
     if preferred_work_terms:
         obj = obj + sum(preferred_work_terms)
@@ -1227,6 +1239,8 @@ def generate_shift(
         obj = obj + MONTHLY_RULE_REWARD * sum(monthly_rule_terms)
     if monthly_rule_penalty_terms:
         obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
+    if monthly_avoid_same_off_terms:
+        obj = obj - 2400 * sum(monthly_avoid_same_off_terms)
     if balanced_normal_store_diff_terms:
         obj = (
             obj

@@ -221,7 +221,7 @@ def get_capacity(mode: OperationMode) -> dict[Store, StoreCapacity]:
 # 全体ルール
 HARD_CONSTRAINTS = {
     "max_consecutive_work_days": 4,        # 原則最大4連勤（例外的に5連勤あり）
-    "max_consecutive_off_days": 2,         # 原則最大2連休（希望や人数過多で3連休もあり得る）
+    "max_consecutive_off_days": 2,         # 最大2連休。3連休は絶対条件として禁止
     "min_two_day_off_per_month": 1,        # 2連休を月1回以上
     "max_two_day_off_per_month": 2,        # 2連休は最大2回
     "no_eco_zero_at_any_store": True,      # エコ0NG（全店舗）
@@ -230,7 +230,7 @@ HARD_CONSTRAINTS = {
     "forbidden_same_store_pairings": True, # 指定メンバー同士の同店舗勤務NG
     "forbidden_same_store_groups": True,   # 指定グループ内の同店舗勤務NG
     "mandatory_work_on_request": True,     # 指定スタッフの出勤希望日は必ず出勤
-    "month_end_start_omiya": True,         # 下地・春山・黒澤は月初1日と月末最終日に大宮（×希望日は除外）
+    "month_end_start_omiya": True,         # 下地・春山・黒澤は大宮、店長は自店舗（×希望日は除外）
     "no_ticket_zero_at": [                 # チケット0NG店舗
         Store.AKABANE, Store.OMIYA, Store.SUZURAN
     ],
@@ -254,6 +254,16 @@ def is_omiya_anchor_relaxed_month(year: int, month: int) -> bool:
 # 本人の×休み希望がある日は休み希望を最優先し、強制配置しない。
 MONTH_END_START_OMIYA_STAFF: tuple[str, ...] = ("下地", "春山", "黒澤")
 
+# 月末月初の店長自店舗固定。
+# 本人の×休み希望がある日は休み希望を最優先し、強制配置しない。
+MONTH_EDGE_HOME_STORE_ASSIGNMENTS: dict[str, Store] = {
+    "今津": Store.AKABANE,
+    "土井": Store.HIGASHIGUCHI,
+    "下地": Store.OMIYA,
+    "長尾": Store.SUZURAN,
+    "楯": Store.NISHIGUCHI,
+}
+
 # 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
 HIGASHIGUCHI_PRIMARY_STAFF = "土井"
 HIGASHIGUCHI_SUBSTITUTE_STAFF: tuple[str, ...] = ("楯", "春山", "長尾", "今津")
@@ -273,9 +283,14 @@ MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 
 # 月内の最低巡回条件。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
-STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {
-    "黒澤": [((Store.SUZURAN,), 5)],
-    "牧野": [((Store.AKABANE,), 2), ((Store.SUZURAN,), 2)],
+STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {}
+
+# 月限定の「同時休みをなるべく避ける」ルール。
+# ソフト制約なので、本人の×休み希望や解の成立を優先する。
+MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = {
+    (2026, 7): (
+        ("長尾", "野澤", "すずらんメイン2名の同時休みは可能な限り避ける"),
+    ),
 }
 
 # 個別に少し寄せたい店舗。絶対条件ではなく、生成時の追加スコアとして扱う。

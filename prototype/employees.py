@@ -95,7 +95,7 @@ ECO_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,      # 通常不可。研修は手動・月別例外で扱う
         },
         annual_target_days=265,
-        notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。月内最低巡回: 赤羽2回以上・すずらん2回以上。",
+        notes="主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="春山",
@@ -253,7 +253,7 @@ TICKET_STAFF: list[Employee] = [
             Store.NISHIGUCHI: Affinity.NONE,
         },
         annual_target_days=265,
-        notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。月内最低巡回: すずらん5回以上。",
+        notes="主担当: 大宮。通常対応可: すずらん。応援・巡回可: 赤羽。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="野澤",
