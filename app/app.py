@@ -1244,6 +1244,56 @@ def shift_session_key(year: int, month: int) -> str:
     return f"{int(year):04d}-{int(month):02d}"
 
 
+def normalize_shift_comments(comments) -> list[str]:
+    """表上部の3行コメントを保存用に整える。"""
+    values = [str(v or "") for v in list(comments or [])[:3]]
+    while len(values) < 3:
+        values.append("")
+    return values
+
+
+def shift_header_comments(shift: Optional[MonthlyShift]) -> list[str]:
+    """シフト本体に保存されている上部コメントを取得する。"""
+    if shift is None:
+        return ["", "", ""]
+    return normalize_shift_comments(getattr(shift, "comments", []) or [])
+
+
+def active_header_comments_for_shift(shift: Optional[MonthlyShift]) -> list[str]:
+    """現在画面で編集中の月に対応する上部コメントを返す。"""
+    if shift is None:
+        return ["", "", ""]
+    key = shift_session_key(shift.year, shift.month)
+    if st.session_state.get("excel_comment_context_key") == key:
+        return normalize_shift_comments([
+            st.session_state.get("excel_comment_1", ""),
+            st.session_state.get("excel_comment_2", ""),
+            st.session_state.get("excel_comment_3", ""),
+        ])
+    return shift_header_comments(shift)
+
+
+def prepare_header_comment_session(shift: MonthlyShift) -> None:
+    """表示月が変わった時に、シフト本体のコメントを入力欄へ読み込む。"""
+    key = shift_session_key(shift.year, shift.month)
+    if st.session_state.get("excel_comment_context_key") == key:
+        return
+    comments = shift_header_comments(shift)
+    st.session_state["excel_comment_1"] = comments[0]
+    st.session_state["excel_comment_2"] = comments[1]
+    st.session_state["excel_comment_3"] = comments[2]
+    st.session_state["comment_1_input"] = comments[0]
+    st.session_state["comment_2_input"] = comments[1]
+    st.session_state["comment_3_input"] = comments[2]
+    st.session_state["excel_comment_context_key"] = key
+
+
+def sync_header_comments_to_shift(shift: MonthlyShift) -> MonthlyShift:
+    """画面上の上部コメントをシフト本体へ反映する。"""
+    shift.comments = active_header_comments_for_shift(shift)
+    return shift
+
+
 def get_session_shift_for_month(year: int, month: int) -> Optional[MonthlyShift]:
     """指定年月のシフトをセッションから取得する。"""
     shifts_by_month = st.session_state.get("shifts_by_month", {})
@@ -1262,6 +1312,8 @@ def get_session_shift_for_month(year: int, month: int) -> Optional[MonthlyShift]
 
 def save_session_shift(shift: MonthlyShift) -> None:
     """シフトをセッションに保存"""
+    if not hasattr(shift, "comments"):
+        shift.comments = []
     st.session_state["current_shift"] = shift
     shifts_by_month = dict(st.session_state.get("shifts_by_month", {}))
     shifts_by_month[shift_session_key(shift.year, shift.month)] = shift
@@ -1305,6 +1357,7 @@ def clone_monthly_shift(shift: MonthlyShift) -> MonthlyShift:
             for a in shift.assignments
         ],
         operation_modes=dict(shift.operation_modes),
+        comments=shift_header_comments(shift),
     )
 
 
@@ -1659,6 +1712,7 @@ def editor_rows_to_shift(base_shift: MonthlyShift, rows: list[dict]) -> MonthlyS
         year=base_shift.year,
         month=base_shift.month,
         operation_modes=dict(base_shift.operation_modes),
+        comments=shift_header_comments(base_shift),
     )
     updated.assignments = [
         ShiftAssignment(
@@ -2791,6 +2845,7 @@ def save_shift_snapshot_with_github(
     metadata: Optional[dict] = None,
 ) -> Path:
     """シフトをローカル保存し、設定済みならGitHubにも自動保存する。"""
+    shift = sync_header_comments_to_shift(shift)
     if metadata is None:
         try:
             metadata = current_or_remembered_generation_metadata_for_month(
@@ -5375,6 +5430,7 @@ if mode == "📊 経営者ビュー":
                 if snapshot_path.exists():
                     loaded = backup_mgr.load_shift(snapshot_path)
                     save_session_shift(loaded)
+                    st.session_state.pop("excel_comment_context_key", None)
                     st.session_state["loaded_shift_metadata"] = (
                         backup_mgr.load_shift_metadata(snapshot_path)
                     )
@@ -5458,6 +5514,8 @@ if mode == "📊 経営者ビュー":
             if submit_lock and current_shift is not None:
                 _lock_year = int(target_year)
                 _lock_month = int(target_month)
+                current_shift = sync_header_comments_to_shift(current_shift)
+                save_session_shift(current_shift)
                 _lock_metadata = current_or_remembered_generation_metadata_for_month(
                     _lock_year, _lock_month,
                 )
@@ -5572,6 +5630,7 @@ if mode == "📊 経営者ビュー":
                 key="restore_latest_draft_shift",
             ):
                 save_session_shift(latest_draft)
+                st.session_state.pop("excel_comment_context_key", None)
                 if latest_draft_path is not None:
                     st.session_state["loaded_shift_metadata"] = (
                         backup_mgr.load_shift_metadata(latest_draft_path)
@@ -5599,6 +5658,7 @@ if mode == "📊 経営者ビュー":
 
         if selected_shift_view == "📋 シフト表":
             # コメント欄（表の上）— Excel出力時にも反映される
+            prepare_header_comment_session(shift)
             st.markdown("##### 📝 上部コメント（Excel/PDF出力に反映）")
             col_cm1, col_cm2, col_cm3 = st.columns(3)
             with col_cm1:
@@ -5607,6 +5667,7 @@ if mode == "📊 経営者ビュー":
                     value=st.session_state.get("excel_comment_1", ""),
                     placeholder="例: AI 自動生成版です",
                     key="comment_1_input",
+                    disabled=lock_info is not None,
                 )
                 st.session_state["excel_comment_1"] = comment1
             with col_cm2:
@@ -5615,6 +5676,7 @@ if mode == "📊 経営者ビュー":
                     value=st.session_state.get("excel_comment_2", ""),
                     placeholder="例: 5月は全体にお休みを増やしています",
                     key="comment_2_input",
+                    disabled=lock_info is not None,
                 )
                 st.session_state["excel_comment_2"] = comment2
             with col_cm3:
@@ -5623,8 +5685,13 @@ if mode == "📊 経営者ビュー":
                     value=st.session_state.get("excel_comment_3", ""),
                     placeholder="例: 次回からGoogleフォームに入力予定",
                     key="comment_3_input",
+                    disabled=lock_info is not None,
                 )
                 st.session_state["excel_comment_3"] = comment3
+            shift.comments = normalize_shift_comments([comment1, comment2, comment3])
+            save_session_shift(shift)
+            if lock_info is not None:
+                st.caption("ロック済みのため、上部コメントも確定版として固定されています。変更する場合はロック解除後に編集してください。")
 
             st.markdown("---")
 
@@ -6386,9 +6453,7 @@ if mode == "📊 経営者ビュー":
 
             # 「📋 シフト表」タブで設定したコメント・注意書きを取得
             header_comments = [
-                st.session_state.get("excel_comment_1", ""),
-                st.session_state.get("excel_comment_2", ""),
-                st.session_state.get("excel_comment_3", ""),
+                *active_header_comments_for_shift(shift),
             ]
             footer_text = st.session_state.get("excel_footer", "")
             footer_notes = [line for line in footer_text.split("\n") if line.strip()]
