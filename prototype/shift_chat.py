@@ -181,6 +181,7 @@ class ShiftChatEngine:
                 for a in shift.assignments
             ],
             operation_modes=dict(shift.operation_modes),
+            comments=list(getattr(shift, "comments", []) or []),
         )
 
     def _replace_shift_contents(self, source: MonthlyShift) -> None:

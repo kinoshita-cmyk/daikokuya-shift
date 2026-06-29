@@ -73,6 +73,10 @@ def load_shift_from_excel(
     ws = wb[sheet_name]
 
     shift = MonthlyShift(year=year, month=month)
+    shift.comments = [
+        str(ws.cell(row=row_num, column=2).value or "")
+        for row_num in (3, 4, 5)
+    ]
     short_staff_days: list[int] = []
 
     # 行 8〜38 が 5/1〜5/31 のデータ

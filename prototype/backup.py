@@ -80,6 +80,7 @@ class ShiftBackup:
             "author": author,
             "note": note,
             "saved_at": now_jst().isoformat(timespec="seconds"),
+            "comments": list(getattr(shift, "comments", []) or [])[:3],
             "operation_modes": {
                 str(d): m.value for d, m in shift.operation_modes.items()
             },
@@ -111,6 +112,7 @@ class ShiftBackup:
         shift.operation_modes = {
             int(d): OperationMode(m) for d, m in data["operation_modes"].items()
         }
+        shift.comments = list(data.get("comments", []) or [])[:3]
         shift.assignments = [
             ShiftAssignment(
                 employee=a["employee"],

@@ -217,6 +217,7 @@ class MonthlyShift:
     month: int
     assignments: list[ShiftAssignment] = field(default_factory=list)
     operation_modes: dict[int, OperationMode] = field(default_factory=dict)  # 日 → モード
+    comments: list[str] = field(default_factory=list)  # 表上部の3行コメント
 
     def get_assignment(self, employee: str, day: int) -> Optional[ShiftAssignment]:
         for a in self.assignments:
