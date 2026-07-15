@@ -28,12 +28,25 @@ _PROJECT_ROOT = _THIS_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))   # for: from prototype.X import Y
 sys.path.insert(0, str(_THIS_DIR))       # for: from auth import Z
 
+def _startup_log(message: str) -> None:
+    """Streamlit Cloud の突然終了時に、どこまで起動したかをログへ残す。"""
+    try:
+        print(f"[daikokuya-startup] {message}", flush=True)
+    except Exception:
+        pass
+
+
+_startup_log("boot start")
+
+_startup_log("import streamlit/pandas start")
 import streamlit as st
 import pandas as pd
+_startup_log("import streamlit/pandas done")
 from datetime import date, datetime
 from calendar import monthrange
 from urllib.parse import quote, unquote
 
+_startup_log("import st_aggrid start")
 try:
     from st_aggrid import AgGrid, JsCode
     try:
@@ -41,9 +54,12 @@ try:
     except Exception:
         GridUpdateMode = None
     HAS_AGGRID = True
+    _startup_log("import st_aggrid done")
 except Exception:
     HAS_AGGRID = False
+    _startup_log("import st_aggrid unavailable")
 
+_startup_log("import prototype paths start")
 from prototype.paths import (
     PROJECT_ROOT, DATA_DIR, BACKUP_DIR, OUTPUT_DIR, CONFIG_DIR, LOCK_DIR,
     MAY_2026_SHIFT_XLSX,
@@ -52,9 +68,12 @@ from prototype.submission_window import (
     format_timestamp_jst, is_submission_in_window, now_jst, timestamp_sort_key,
 )
 from prototype.calendar_utils import is_weekend_or_japanese_holiday
+_startup_log("import prototype paths done")
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
+_startup_log("import auth start")
 from auth import require_auth, render_logout_button, is_manager, get_user_role
+_startup_log("import auth done")
 
 
 def get_anthropic_api_key_source() -> str:
@@ -524,19 +543,33 @@ def add_admin_paid_leave_adjustment(
     })
     save_admin_paid_leave_data(data, actor=actor)
     push_admin_paid_leave_to_github()
+_startup_log("import prototype.models start")
 from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
+_startup_log("import prototype.models done")
+_startup_log("import prototype.employees start")
 from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
+_startup_log("import prototype.employees done")
+_startup_log("import prototype.generator start")
 from prototype.generator import generate_shift, determine_operation_modes
+_startup_log("import prototype.generator done")
+_startup_log("import prototype.validator start")
 from prototype.validator import validate
+_startup_log("import prototype.validator done")
+_startup_log("import prototype.backup/carryover start")
 from prototype.backup import ShiftBackup
 from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
+_startup_log("import prototype.backup/carryover done")
+_startup_log("import prototype.excel/pdf start")
 from prototype.excel_loader import load_shift_from_excel
 from prototype.excel_exporter import export_shift_to_excel, EXPORT_COLUMN_ORDER
 from prototype.pdf_exporter import export_shift_to_pdf
+_startup_log("import prototype.excel/pdf done")
+_startup_log("import prototype.chat/lock/rules start")
 from prototype.shift_chat import ShiftChatEngine, HAS_ANTHROPIC
 from prototype.shift_lock import ShiftLockManager
 from prototype.rule_config import RuleConfigManager, RuleConfig, CustomRule, DEFAULT_ENABLED_CHECKS, DEFAULT_PARAMETERS
 from prototype.rule_consistency import run_rule_consistency_checks
+_startup_log("import prototype.chat/lock/rules done")
 from prototype.employee_config import (
     EmployeeConfigManager, get_active_employees, get_all_employees_including_retired,
 )
