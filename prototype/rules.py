@@ -9,6 +9,7 @@
 """
 
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 from .models import Store, Skill, OperationMode
 
@@ -212,6 +213,20 @@ def get_capacity(mode: OperationMode) -> dict[Store, StoreCapacity]:
         OperationMode.MINIMUM: MINIMUM_CAPACITY,
         OperationMode.CLOSED: {},
     }[mode]
+
+
+def is_store_open_on_day(
+    year: int,
+    month: int,
+    day: int,
+    store: Store,
+    mode: OperationMode,
+) -> bool:
+    """営業モードと定休日を踏まえて、指定店舗が営業する日か判定する。"""
+    store_capacity = get_capacity(mode).get(store)
+    if store_capacity is None:
+        return False
+    return date(int(year), int(month), int(day)).weekday() not in store_capacity.closed_dow
 
 
 # ============================================================

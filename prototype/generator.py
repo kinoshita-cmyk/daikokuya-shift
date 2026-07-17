@@ -47,7 +47,7 @@ from .rules import (
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
-    is_omiya_anchor_relaxed_month,
+    is_omiya_anchor_relaxed_month, is_store_open_on_day,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -558,6 +558,9 @@ def generate_shift(
         for d in month_edge_days:
             if d in requested_off_days:
                 continue
+            mode = operation_modes.get(d, OperationMode.NORMAL)
+            if not is_store_open_on_day(year, month, d, Store.OMIYA, mode):
+                continue
             model.Add(x[name][d][Store.OMIYA] == 1)
 
     # 月末月初の各店店長自店舗固定。
@@ -570,6 +573,9 @@ def generate_shift(
         requested_off_days = set(off_requests.get(name, []))
         for d in month_edge_days:
             if d in requested_off_days:
+                continue
+            mode = operation_modes.get(d, OperationMode.NORMAL)
+            if not is_store_open_on_day(year, month, d, home_store, mode):
                 continue
             model.Add(x[name][d][home_store] == 1)
 

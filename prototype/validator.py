@@ -39,7 +39,7 @@ from .rules import (
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
-    is_omiya_anchor_relaxed_month,
+    is_omiya_anchor_relaxed_month, is_store_open_on_day,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
@@ -1172,6 +1172,11 @@ def _check_month_end_start_omiya(
         for day in (1, days):
             if day in set(off_requests.get(emp_name, [])):
                 continue
+            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+            if not is_store_open_on_day(
+                shift.year, shift.month, day, Store.OMIYA, mode,
+            ):
+                continue
             assignment = shift.get_assignment(emp_name, day)
             actual_store = assignment.store if assignment is not None else Store.OFF
             if actual_store == Store.OMIYA:
@@ -1198,6 +1203,11 @@ def _check_month_edge_home_store(
     for emp_name, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
         for day in (1, days):
             if day in set(off_requests.get(emp_name, [])):
+                continue
+            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+            if not is_store_open_on_day(
+                shift.year, shift.month, day, home_store, mode,
+            ):
                 continue
             assignment = shift.get_assignment(emp_name, day)
             actual_store = assignment.store if assignment is not None else Store.OFF
