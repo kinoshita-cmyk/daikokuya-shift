@@ -583,6 +583,7 @@ from prototype.rules import (
     SUZURAN_KEY_SUPPORT_FROM_OMIYA,
     get_monthly_work_target,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS,
+    is_store_open_on_day,
 )
 try:
     from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
@@ -3488,9 +3489,17 @@ def build_incomplete_manual_draft(
     # 月末月初の大宮駅前固定も、休み希望がなければ初期配置に入れる。
     for day in (1, days_in_month):
         for employee in MONTH_EDGE_OMIYA_STAFF:
-            set_assignment(str(employee), day, Store.OMIYA)
+            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+            if is_store_open_on_day(
+                int(year), int(month), day, Store.OMIYA, mode,
+            ):
+                set_assignment(str(employee), day, Store.OMIYA)
         for employee, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
-            set_assignment(str(employee), day, home_store)
+            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+            if is_store_open_on_day(
+                int(year), int(month), day, home_store, mode,
+            ):
+                set_assignment(str(employee), day, home_store)
 
     # 店舗指定付きの出勤希望は初期配置に入れる。店舗未指定の出勤希望は空白のまま残す。
     for employee, day, store in list(work_requests or []) + list(preferred_work_requests or []):
@@ -8489,7 +8498,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "月末月初の固定配置",
-                "下地さん・春山さん・黒澤さんは大宮駅前、各店店長（今津さん=赤羽、土井さん=東口、下地さん=大宮、長尾さん=すずらん、楯さん=西口）は自店舗。本人の×休み希望日は休みを優先。",
+                "下地さん・春山さん・黒澤さんは大宮駅前、各店店長（今津さん=赤羽、土井さん=東口、下地さん=大宮、長尾さん=すずらん、楯さん=西口）は自店舗。本人の×休み希望日と店舗休業日は固定対象外。",
                 "反映中", "反映中", "検証結果に表示",
                 "コード固定", "反映中",
             ),
