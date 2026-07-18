@@ -48,6 +48,7 @@ from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
+    monthly_carryover_consecutive_allowances,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -751,6 +752,10 @@ def generate_shift(
                 break
         prev_consec_map[p.employee] = consec
 
+    boundary_consecutive_allowances = monthly_carryover_consecutive_allowances(
+        year, month,
+    )
+
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
     two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
     two_off_over_terms = []  # 2連休が多すぎる場合のソフトペナルティ
@@ -795,10 +800,14 @@ def generate_shift(
 
         # 前月境界制約: 前月から prev 連勤している場合、月初の連勤も合算で hard_max_consec を超えないように
         # 例：prev=3, hard_max=5 なら [5/1, 5/2, 5/3] のうち少なくとも1日は休み
+        # 月別の境界例外は前月から続く最初の連勤だけに加算し、月内の上限は緩めない。
         # （前月3連勤 + 5/1-3 全勤務 = 6連勤を防ぐ）
         if prev > 0 and e.name not in consec_exceptions:
-            window_size = emp_hard_max - prev + 1
-            allowed_work = emp_hard_max - prev
+            boundary_max = emp_hard_max + int(
+                boundary_consecutive_allowances.get(e.name, 0)
+            )
+            window_size = boundary_max - prev + 1
+            allowed_work = boundary_max - prev
             if window_size > 0 and allowed_work >= 0:
                 window = list(range(1, min(window_size + 1, days_in_month + 1)))
                 if window:

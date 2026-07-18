@@ -40,6 +40,7 @@ from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
+    monthly_carryover_consecutive_allowances,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
@@ -678,6 +679,9 @@ def _check_consecutive_work(
     if max_consec is None:
         max_consec = HARD_CONSTRAINTS["max_consecutive_work_days"]
     employee_max_consecutive_work = employee_max_consecutive_work or {}
+    boundary_allowances = monthly_carryover_consecutive_allowances(
+        shift.year, shift.month,
+    )
 
     for emp in _validation_employees():
         if not emp.is_shift_eligible:
@@ -710,22 +714,44 @@ def _check_consecutive_work(
                     else:
                         break
 
-        # 当月の出勤を順に走査
+        # 当月の出勤を順に走査。月別の境界例外は最初の休みまでだけ有効。
         consec = prev_consec
+        boundary_streak = prev_consec > 0
+        boundary_warning_added = False
         for day in range(1, days + 1):
             a = shift.get_assignment(emp.name, day)
             is_working = a is not None and a.store != Store.OFF and not emp.is_auxiliary
             if is_working:
                 consec += 1
-                if consec > emp_max_consec:
+                allowed_consec = emp_max_consec
+                if boundary_streak:
+                    allowed_consec += int(boundary_allowances.get(emp.name, 0))
+                if consec > allowed_consec:
                     result.issues.append(Issue(
                         severity="ERROR",
                         category="連勤",
                         day=day, employee=emp.name,
-                        message=f"{consec}連勤（上限{emp_max_consec}）",
+                        message=f"{consec}連勤（上限{allowed_consec}）",
                     ))
+                elif (
+                    boundary_streak
+                    and consec > emp_max_consec
+                    and not boundary_warning_added
+                ):
+                    result.issues.append(Issue(
+                        severity="WARNING",
+                        category="月別連勤例外",
+                        day=day,
+                        employee=emp.name,
+                        message=(
+                            f"前月末から{consec}連勤です。"
+                            f"この月のみ境界上限{allowed_consec}日を適用しています"
+                        ),
+                    ))
+                    boundary_warning_added = True
             else:
                 consec = 0
+                boundary_streak = False
 
 
 def _check_holiday_days(

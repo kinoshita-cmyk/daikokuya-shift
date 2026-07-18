@@ -229,6 +229,8 @@ def is_store_open_on_day(
     return date(int(year), int(month), int(day)).weekday() not in store_capacity.closed_dow
 
 
+
+
 # ============================================================
 # ハード制約（絶対条件）
 # ============================================================
@@ -307,6 +309,29 @@ MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], 
         ("長尾", "野澤", "すずらんメイン2名の同時休みは可能な限り避ける"),
     ),
 }
+
+# 前月末から月初へまたがる連勤だけに適用する月別例外。
+# 月内の連勤上限は緩めず、前月確定シフト・月初固定配置・本人の×休みが
+# 同時に成立しない場合に限って、境界部分の上限を指定日数だけ延長する。
+MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
+    tuple[int, int], dict[str, int]
+] = {
+    (2026, 8): {"下地": 1},
+}
+
+
+def monthly_carryover_consecutive_allowances(
+    year: int,
+    month: int,
+) -> dict[str, int]:
+    """指定月の前月境界にだけ許可する追加連勤日数を返す。"""
+    return {
+        str(name): max(0, int(days))
+        for name, days in MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES.get(
+            (int(year), int(month)), {}
+        ).items()
+        if int(days) > 0
+    }
 
 # 個別に少し寄せたい店舗。絶対条件ではなく、生成時の追加スコアとして扱う。
 STORE_ASSIGNMENT_EXTRA_WEIGHTS: dict[tuple[str, Store], int] = {
