@@ -305,24 +305,15 @@ def _load_monthly_exceptions() -> Optional[dict]:
         return None
 
 
-_MONTHLY_EXCEPTIONS_DATA = _load_monthly_exceptions()
-
-
 # 2026年7月は大型連休の重なりが大きい超イレギュラー月。
 # 本人の×休み希望を守るため、この月だけ大宮駅前アンカー条件を外し、
 # 店舗ごとの最低エコ・最低人数で運用可とする。
-OMIYA_ANCHOR_RELAXED_MONTHS: tuple[tuple[int, int], ...] = ((2026, 7),)
-
-# 設定ファイルにキーがあればそちらを正とする
-if _MONTHLY_EXCEPTIONS_DATA and "omiya_anchor_relaxed_months" in _MONTHLY_EXCEPTIONS_DATA:
-    _parsed = tuple(
-        ym for ym in (
-            _parse_ym(t)
-            for t in _MONTHLY_EXCEPTIONS_DATA["omiya_anchor_relaxed_months"]
-        )
-        if ym is not None
-    )
-    OMIYA_ANCHOR_RELAXED_MONTHS = _parsed
+# （コード内の値はフォールバック。実際の値は設定ファイルが優先され、
+#   reload_monthly_exceptions() で読み込まれる）
+_DEFAULT_OMIYA_ANCHOR_RELAXED_MONTHS: tuple[tuple[int, int], ...] = ((2026, 7),)
+OMIYA_ANCHOR_RELAXED_MONTHS: tuple[tuple[int, int], ...] = (
+    _DEFAULT_OMIYA_ANCHOR_RELAXED_MONTHS
+)
 
 
 def is_omiya_anchor_relaxed_month(year: int, month: int) -> bool:
@@ -367,57 +358,144 @@ STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {}
 
 # 月限定の「同時休みをなるべく避ける」ルール。
 # ソフト制約なので、本人の×休み希望や解の成立を優先する。
-MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = {
+_DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = {
     (2026, 7): (
         ("長尾", "野澤", "すずらんメイン2名の同時休みは可能な限り避ける"),
     ),
 }
-
-# 設定ファイルにキーがあればそちらを正とする
-if _MONTHLY_EXCEPTIONS_DATA and "avoid_same_off" in _MONTHLY_EXCEPTIONS_DATA:
-    _avoid_parsed: dict = {}
-    for _ym_text, _rules in dict(_MONTHLY_EXCEPTIONS_DATA["avoid_same_off"]).items():
-        _ym = _parse_ym(_ym_text)
-        if _ym is None or not isinstance(_rules, list):
-            continue
-        _entries = []
-        for _r in _rules:
-            if isinstance(_r, dict) and _r.get("a") and _r.get("b"):
-                _entries.append(
-                    (str(_r["a"]), str(_r["b"]), str(_r.get("note", "")))
-                )
-        if _entries:
-            _avoid_parsed[_ym] = tuple(_entries)
-    MONTHLY_AVOID_SAME_OFF_RULES = _avoid_parsed
+MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = dict(
+    _DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES
+)
 
 # 前月末から月初へまたがる連勤だけに適用する月別例外。
 # 月内の連勤上限は緩めず、前月確定シフト・月初固定配置・本人の×休みが
 # 同時に成立しない場合に限って、境界部分の上限を指定日数だけ延長する。
-MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
+_DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
     tuple[int, int], dict[str, int]
 ] = {
     (2026, 8): {"下地": 1},
 }
+MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
+    tuple[int, int], dict[str, int]
+] = dict(_DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES)
 
-# 設定ファイルにキーがあればそちらを正とする
-if _MONTHLY_EXCEPTIONS_DATA and "carryover_consecutive_allowances" in _MONTHLY_EXCEPTIONS_DATA:
-    _carry_parsed: dict = {}
-    for _ym_text, _allow in dict(
-        _MONTHLY_EXCEPTIONS_DATA["carryover_consecutive_allowances"]
-    ).items():
-        _ym = _parse_ym(_ym_text)
-        if _ym is None or not isinstance(_allow, dict):
-            continue
-        _entries2 = {}
-        for _name, _days in _allow.items():
-            try:
-                if int(_days) > 0:
-                    _entries2[str(_name)] = int(_days)
-            except (TypeError, ValueError):
+
+def reload_monthly_exceptions() -> str:
+    """設定ファイルを読み直し、月例外ルールを実行中のシステムに反映する。
+
+    画面から月例外を保存した直後にも呼ばれ、再起動なしで反映される。
+    設定ファイルが無い・壊れている場合はコード内デフォルトに戻る。
+    戻り値は読み込み状態の説明文字列（MONTHLY_EXCEPTIONS_STATUS と同じ）。
+    """
+    global OMIYA_ANCHOR_RELAXED_MONTHS
+    global MONTHLY_AVOID_SAME_OFF_RULES
+    global MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
+
+    data = _load_monthly_exceptions()
+
+    # まずデフォルトへ戻す（ファイル削除・キー削除にも追随できるように）
+    OMIYA_ANCHOR_RELAXED_MONTHS = _DEFAULT_OMIYA_ANCHOR_RELAXED_MONTHS
+    MONTHLY_AVOID_SAME_OFF_RULES = dict(_DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES)
+    MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES = dict(
+        _DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
+    )
+    if not data:
+        return MONTHLY_EXCEPTIONS_STATUS
+
+    if "omiya_anchor_relaxed_months" in data:
+        OMIYA_ANCHOR_RELAXED_MONTHS = tuple(
+            ym for ym in (
+                _parse_ym(t) for t in (data["omiya_anchor_relaxed_months"] or [])
+            )
+            if ym is not None
+        )
+
+    if "avoid_same_off" in data:
+        avoid_parsed: dict = {}
+        for ym_text, rules_list in dict(data["avoid_same_off"] or {}).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(rules_list, list):
                 continue
-        if _entries2:
-            _carry_parsed[_ym] = _entries2
-    MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES = _carry_parsed
+            entries = []
+            for r in rules_list:
+                if isinstance(r, dict) and r.get("a") and r.get("b"):
+                    entries.append(
+                        (str(r["a"]), str(r["b"]), str(r.get("note", "")))
+                    )
+            if entries:
+                avoid_parsed[ym] = tuple(entries)
+        MONTHLY_AVOID_SAME_OFF_RULES = avoid_parsed
+
+    if "carryover_consecutive_allowances" in data:
+        carry_parsed: dict = {}
+        for ym_text, allow in dict(
+            data["carryover_consecutive_allowances"] or {}
+        ).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(allow, dict):
+                continue
+            entries2 = {}
+            for name, days in allow.items():
+                try:
+                    if int(days) > 0:
+                        entries2[str(name)] = int(days)
+                except (TypeError, ValueError):
+                    continue
+            if entries2:
+                carry_parsed[ym] = entries2
+        MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES = carry_parsed
+
+    return MONTHLY_EXCEPTIONS_STATUS
+
+
+def load_monthly_exceptions_raw() -> dict:
+    """設定ファイルの生データを返す（画面での一覧表示・編集用）。
+
+    ファイルが無い場合は現在有効な値（デフォルト含む）から組み立てる。
+    """
+    data = _load_monthly_exceptions()
+    if data:
+        return data
+    return {
+        "omiya_anchor_relaxed_months": [
+            f"{y:04d}-{m:02d}" for (y, m) in OMIYA_ANCHOR_RELAXED_MONTHS
+        ],
+        "carryover_consecutive_allowances": {
+            f"{y:04d}-{m:02d}": dict(allow)
+            for (y, m), allow in MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES.items()
+        },
+        "avoid_same_off": {
+            f"{y:04d}-{m:02d}": [
+                {"a": a, "b": b, "note": note} for (a, b, note) in rules_t
+            ]
+            for (y, m), rules_t in MONTHLY_AVOID_SAME_OFF_RULES.items()
+        },
+    }
+
+
+def save_monthly_exceptions(data: dict, actor: str = "管理者") -> tuple:
+    """月例外設定を保存し、実行中のシステムへ即時反映する。
+
+    Returns:
+        (成功したか: bool, 状態メッセージ: str)
+    """
+    payload = dict(data)
+    payload["_説明"] = (
+        "月限定の例外ルール。画面（⚙️ 設定 → 📅 月例外）から編集できます。"
+        "書式は『YYYY-MM』。このファイルにキーがある場合、"
+        "コード内のデフォルト値よりこちらが優先されます。"
+    )
+    from datetime import datetime as _dt
+    payload["updated_at"] = _dt.now().isoformat(timespec="seconds")
+    payload["updated_by"] = str(actor or "管理者")
+    try:
+        MONTHLY_EXCEPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(MONTHLY_EXCEPTIONS_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return False, f"保存失敗（{type(exc).__name__}: {exc}）"
+    status = reload_monthly_exceptions()
+    return True, status
 
 
 def monthly_carryover_consecutive_allowances(
@@ -432,6 +510,10 @@ def monthly_carryover_consecutive_allowances(
         ).items()
         if int(days) > 0
     }
+
+
+# 起動時（import時）に設定ファイルを読み込んで反映する
+reload_monthly_exceptions()
 
 
 # ============================================================
@@ -552,7 +634,8 @@ def month_edge_forced_assignments(
                         f"{name}: 前月末から{prev}連勤のため、"
                         f"{int(month)}月1日の固定配置を自動免除しました"
                         "（連勤上限と衝突するため休みを優先。"
-                        "出勤させたい場合は月例外設定で境界連勤の延長を許可してください）。"
+                        "出勤させたい場合は「⚙️ 設定 → 📅 月例外」で"
+                        "境界連勤の延長を許可してください）。"
                     )
                     continue
         forced.append((name, d, store))

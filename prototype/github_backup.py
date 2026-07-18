@@ -1386,6 +1386,29 @@ def push_config_to_github(
         return False, f"{type(e).__name__}: {e}"
 
 
+def fetch_config_from_github(config_name: str) -> tuple[bool, dict, str]:
+    """
+    バックアップに保存済みの設定（config/{name}_latest.json）を取得する。
+
+    push_config_to_github() と対になる読み取り関数。
+    Streamlit Cloud の再起動でローカル設定が初期化されても、
+    起動時にこれで復元できる。
+
+    Returns:
+        (success, config_data, message)
+    """
+    success, content, msg = _fetch_repo_file(f"config/{config_name}_latest.json")
+    if not success:
+        return False, {}, msg
+    try:
+        data = json.loads(content.decode("utf-8"))
+        if not isinstance(data, dict):
+            return False, {}, "形式エラー（辞書ではない）"
+        return True, data, "OK"
+    except Exception as e:
+        return False, {}, f"JSON解析失敗: {type(e).__name__}"
+
+
 def test_connection() -> tuple[bool, str]:
     """
     GitHub への接続を試験する（認証OK・リポジトリアクセスOK確認）。
