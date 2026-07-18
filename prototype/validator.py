@@ -41,6 +41,7 @@ from .rules import (
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
+    month_edge_forced_assignments, compute_prev_consecutive_run,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
@@ -318,11 +319,16 @@ def validate(
     # 12. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
 
-    # 13. 月末月初の大宮駅前固定チェック
-    _check_month_end_start_omiya(shift, result, days_in_month, off_requests)
-
-    # 14. 月末月初の店長自店舗固定チェック
-    _check_month_edge_home_store(shift, result, days_in_month, off_requests)
+    # 13-14. 月末月初の固定配置チェック（大宮駅前固定＋店長自店舗固定）
+    # 免除判定（×休み・休店日・前月連勤持ち越し）は生成側と同じ
+    # rules.month_edge_forced_assignments に一元化されている。
+    _check_month_edge_assignments(
+        shift, result, days_in_month,
+        off_requests=off_requests,
+        prev_month=prev_month,
+        max_consec=max_consec,
+        employee_max_consecutive_work=employee_max_consecutive_work,
+    )
 
     # 15. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
@@ -1187,69 +1193,55 @@ def _check_omiya_anchor(shift: MonthlyShift, result: ValidationResult, days: int
                 ))
 
 
-def _check_month_end_start_omiya(
+def _check_month_edge_assignments(
     shift: MonthlyShift,
     result: ValidationResult,
     days: int,
     off_requests: dict[str, list[int]],
+    prev_month: Optional[list] = None,
+    max_consec: Optional[int] = None,
+    employee_max_consecutive_work: Optional[dict] = None,
 ) -> None:
-    """下地・春山・黒澤は月初1日と月末最終日に大宮駅前へ配置する。"""
-    for emp_name in MONTH_END_START_OMIYA_STAFF:
-        for day in (1, days):
-            if day in set(off_requests.get(emp_name, [])):
-                continue
-            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
-            if not is_store_open_on_day(
-                shift.year, shift.month, day, Store.OMIYA, mode,
-            ):
-                continue
-            assignment = shift.get_assignment(emp_name, day)
-            actual_store = assignment.store if assignment is not None else Store.OFF
-            if actual_store == Store.OMIYA:
-                continue
-            result.issues.append(Issue(
-                severity="ERROR",
-                category="月末月初大宮",
-                day=day,
-                employee=emp_name,
-                message=(
-                    f"{emp_name}は月初1日・月末最終日は大宮駅前店勤務です。"
-                    f"現在は{actual_store.display_name}です。"
-                ),
-            ))
+    """月末月初の固定配置（大宮駅前固定＋店長自店舗固定）を検証する。
 
-
-def _check_month_edge_home_store(
-    shift: MonthlyShift,
-    result: ValidationResult,
-    days: int,
-    off_requests: dict[str, list[int]],
-) -> None:
-    """各店店長は月初1日と月末最終日に自店舗へ配置する。"""
-    for emp_name, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
-        for day in (1, days):
-            if day in set(off_requests.get(emp_name, [])):
-                continue
-            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
-            if not is_store_open_on_day(
-                shift.year, shift.month, day, home_store, mode,
-            ):
-                continue
-            assignment = shift.get_assignment(emp_name, day)
-            actual_store = assignment.store if assignment is not None else Store.OFF
-            if actual_store == home_store:
-                continue
-            result.issues.append(Issue(
-                severity="ERROR",
-                category="月末月初店長",
-                day=day,
-                employee=emp_name,
-                message=(
-                    f"{emp_name}は月初1日・月末最終日は"
-                    f"{home_store.display_name}勤務です。"
-                    f"現在は{actual_store.display_name}です。"
-                ),
-            ))
+    どの人をどの日に固定するか（免除判定を含む）は、生成側と同じ
+    rules.month_edge_forced_assignments で算出する。これにより
+    「生成は免除したのに検証はエラーにする」といった実装差が起きない。
+    """
+    prev_consec_map = compute_prev_consecutive_run(
+        prev_month, shift.year, shift.month,
+    )
+    expected_forced, _notes = month_edge_forced_assignments(
+        year=shift.year,
+        month=shift.month,
+        days_in_month=days,
+        off_requests=off_requests,
+        operation_modes=shift.operation_modes,
+        prev_consec_map=prev_consec_map,
+        hard_max_consec=(max_consec or 5),
+        employee_max_consecutive_work=employee_max_consecutive_work,
+    )
+    for emp_name, day, expected_store in expected_forced:
+        assignment = shift.get_assignment(emp_name, day)
+        actual_store = assignment.store if assignment is not None else Store.OFF
+        if actual_store == expected_store:
+            continue
+        if expected_store == Store.OMIYA and emp_name in MONTH_END_START_OMIYA_STAFF:
+            category = "月末月初大宮"
+            rule_text = "大宮駅前店勤務です。"
+        else:
+            category = "月末月初店長"
+            rule_text = f"{expected_store.display_name}勤務です。"
+        result.issues.append(Issue(
+            severity="ERROR",
+            category=category,
+            day=day,
+            employee=emp_name,
+            message=(
+                f"{emp_name}は月初1日・月末最終日は{rule_text}"
+                f"現在は{actual_store.display_name}です。"
+            ),
+        ))
 
 
 def _check_higashiguchi_monday_closed(

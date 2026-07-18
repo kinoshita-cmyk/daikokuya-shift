@@ -6,12 +6,19 @@
 
 このファイルは店舗のルールを定義します。
 従業員別のルール（在勤割合）は employees.py 内に各従業員ごとに記載されています。
+
+月限定の例外（大宮アンカー緩和・境界連勤延長など）は
+config/monthly_exceptions.json から読み込みます。コード内の値は
+設定ファイルが無い場合のフォールバックです。運用上の月例外は
+コード変更ではなく設定ファイルへの追記で対応してください。
 """
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from typing import Optional
 from .models import Store, Skill, OperationMode
+from .paths import CONFIG_DIR
 
 # ============================================================
 # 店舗別の必要人数（営業モードごと）
@@ -256,10 +263,66 @@ HARD_CONSTRAINTS = {
 # 大宮店の追加制約：春山・下地どちらか1人は必ず在勤
 OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
 
+# ============================================================
+# 月限定例外の設定ファイル読み込み
+# ============================================================
+# config/monthly_exceptions.json があれば、そこに書かれたキーだけ
+# コード内デフォルトを置き換える。ファイル破損時は本体を止めず
+# デフォルトで動き、状態は MONTHLY_EXCEPTIONS_STATUS で確認できる。
+
+MONTHLY_EXCEPTIONS_FILE = CONFIG_DIR / "monthly_exceptions.json"
+MONTHLY_EXCEPTIONS_STATUS = "未読み込み"
+
+
+def _parse_ym(text: str) -> Optional[tuple]:
+    """'2026-07' 形式を (2026, 7) に変換する。不正な形式は None。"""
+    try:
+        y_str, m_str = str(text).strip().split("-", 1)
+        y, m = int(y_str), int(m_str)
+        if 2024 <= y <= 2099 and 1 <= m <= 12:
+            return (y, m)
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def _load_monthly_exceptions() -> Optional[dict]:
+    """月限定例外の設定を読み込む。失敗しても例外を投げない。"""
+    global MONTHLY_EXCEPTIONS_STATUS
+    try:
+        with open(MONTHLY_EXCEPTIONS_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            MONTHLY_EXCEPTIONS_STATUS = "形式エラー（辞書ではない）→デフォルト使用"
+            return None
+        MONTHLY_EXCEPTIONS_STATUS = "読み込み成功"
+        return data
+    except FileNotFoundError:
+        MONTHLY_EXCEPTIONS_STATUS = "ファイルなし→コード内デフォルト使用"
+        return None
+    except Exception as exc:
+        MONTHLY_EXCEPTIONS_STATUS = f"読み込み失敗（{type(exc).__name__}）→デフォルト使用"
+        return None
+
+
+_MONTHLY_EXCEPTIONS_DATA = _load_monthly_exceptions()
+
+
 # 2026年7月は大型連休の重なりが大きい超イレギュラー月。
 # 本人の×休み希望を守るため、この月だけ大宮駅前アンカー条件を外し、
 # 店舗ごとの最低エコ・最低人数で運用可とする。
 OMIYA_ANCHOR_RELAXED_MONTHS: tuple[tuple[int, int], ...] = ((2026, 7),)
+
+# 設定ファイルにキーがあればそちらを正とする
+if _MONTHLY_EXCEPTIONS_DATA and "omiya_anchor_relaxed_months" in _MONTHLY_EXCEPTIONS_DATA:
+    _parsed = tuple(
+        ym for ym in (
+            _parse_ym(t)
+            for t in _MONTHLY_EXCEPTIONS_DATA["omiya_anchor_relaxed_months"]
+        )
+        if ym is not None
+    )
+    OMIYA_ANCHOR_RELAXED_MONTHS = _parsed
 
 
 def is_omiya_anchor_relaxed_month(year: int, month: int) -> bool:
@@ -310,6 +373,23 @@ MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], 
     ),
 }
 
+# 設定ファイルにキーがあればそちらを正とする
+if _MONTHLY_EXCEPTIONS_DATA and "avoid_same_off" in _MONTHLY_EXCEPTIONS_DATA:
+    _avoid_parsed: dict = {}
+    for _ym_text, _rules in dict(_MONTHLY_EXCEPTIONS_DATA["avoid_same_off"]).items():
+        _ym = _parse_ym(_ym_text)
+        if _ym is None or not isinstance(_rules, list):
+            continue
+        _entries = []
+        for _r in _rules:
+            if isinstance(_r, dict) and _r.get("a") and _r.get("b"):
+                _entries.append(
+                    (str(_r["a"]), str(_r["b"]), str(_r.get("note", "")))
+                )
+        if _entries:
+            _avoid_parsed[_ym] = tuple(_entries)
+    MONTHLY_AVOID_SAME_OFF_RULES = _avoid_parsed
+
 # 前月末から月初へまたがる連勤だけに適用する月別例外。
 # 月内の連勤上限は緩めず、前月確定シフト・月初固定配置・本人の×休みが
 # 同時に成立しない場合に限って、境界部分の上限を指定日数だけ延長する。
@@ -318,6 +398,26 @@ MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
 ] = {
     (2026, 8): {"下地": 1},
 }
+
+# 設定ファイルにキーがあればそちらを正とする
+if _MONTHLY_EXCEPTIONS_DATA and "carryover_consecutive_allowances" in _MONTHLY_EXCEPTIONS_DATA:
+    _carry_parsed: dict = {}
+    for _ym_text, _allow in dict(
+        _MONTHLY_EXCEPTIONS_DATA["carryover_consecutive_allowances"]
+    ).items():
+        _ym = _parse_ym(_ym_text)
+        if _ym is None or not isinstance(_allow, dict):
+            continue
+        _entries2 = {}
+        for _name, _days in _allow.items():
+            try:
+                if int(_days) > 0:
+                    _entries2[str(_name)] = int(_days)
+            except (TypeError, ValueError):
+                continue
+        if _entries2:
+            _carry_parsed[_ym] = _entries2
+    MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES = _carry_parsed
 
 
 def monthly_carryover_consecutive_allowances(
@@ -332,6 +432,131 @@ def monthly_carryover_consecutive_allowances(
         ).items()
         if int(days) > 0
     }
+
+
+# ============================================================
+# 月末月初の固定配置（共有ロジック）
+# ============================================================
+# 生成（generator）・検証（validator）・未完成下書き（app）の3実装は
+# 必ずこの2関数を使い、免除判定を完全に一致させる。
+# 過去の障害:
+#   2026-08: 月末最終日(月曜)×東口休店の衝突 → 免除2で恒久対応
+#   2026-08: 前月末5連勤×月初固定出勤の衝突 → 免除3で恒久対応
+
+def compute_prev_consecutive_run(
+    prev_month: Optional[list],
+    year: int,
+    month: int,
+) -> dict[str, int]:
+    """前月持ち越しデータから「前月末まで続いた連勤日数」を人ごとに返す。
+
+    prev_month の各要素は employee / last_working_days 属性を持てばよい
+    （models.PreviousMonthCarryover を想定）。
+    """
+    from calendar import monthrange as _monthrange
+    result: dict[str, int] = {}
+    for p in prev_month or []:
+        last_working_days = getattr(p, "last_working_days", None)
+        employee = getattr(p, "employee", None)
+        if not last_working_days or not employee:
+            continue
+        prev_month_num = int(month) - 1 if int(month) > 1 else 12
+        prev_year = int(year) if int(month) > 1 else int(year) - 1
+        last_day = _monthrange(prev_year, prev_month_num)[1]
+        consec = 0
+        expected = last_day
+        for dd in sorted(last_working_days, reverse=True):
+            if dd == expected:
+                consec += 1
+                expected -= 1
+            else:
+                break
+        if consec > 0:
+            result[str(employee)] = consec
+    return result
+
+
+def month_edge_forced_assignments(
+    year: int,
+    month: int,
+    days_in_month: int,
+    off_requests: Optional[dict] = None,
+    operation_modes: Optional[dict] = None,
+    prev_consec_map: Optional[dict] = None,
+    hard_max_consec: int = 5,
+    employee_max_consecutive_work: Optional[dict] = None,
+    consec_exceptions: Optional[list] = None,
+    include_names: Optional[set] = None,
+    valid_stores: Optional[set] = None,
+) -> tuple:
+    """月末月初の固定配置（強制出勤）を、全免除条件を適用して返す。
+
+    Returns:
+        (forced, notes)
+        forced: list[(employee_name, day, Store)] 強制出勤として確定した組
+        notes:  list[str] 自動免除の日本語説明（画面表示・ログ用）
+
+    免除条件（判定順）:
+        1. 本人の×休み希望がある日
+        2. 対象店舗が休店の日（定休日・営業モード）
+        3. 前月からの連勤持ち越しで月初1日に出勤すると連勤上限を
+           超える場合（monthly_carryover_consecutive_allowances の
+           延長許可がある人は免除しない＝固定配置を維持する）
+    """
+    off_requests = off_requests or {}
+    operation_modes = operation_modes or {}
+    prev_consec_map = prev_consec_map or {}
+    emp_max = employee_max_consecutive_work or {}
+    consec_exceptions = list(consec_exceptions or [])
+    allowances = monthly_carryover_consecutive_allowances(year, month)
+
+    edge_days = (1, int(days_in_month))
+    candidate_pairs = []
+    for _name in MONTH_END_START_OMIYA_STAFF:
+        for _d in edge_days:
+            candidate_pairs.append((_name, _d, Store.OMIYA))
+    for _name, _home in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
+        for _d in edge_days:
+            candidate_pairs.append((_name, _d, _home))
+
+    forced = []
+    notes = []
+    seen = set()
+    for name, d, store in candidate_pairs:
+        if (name, d, store) in seen:
+            continue
+        seen.add((name, d, store))
+        if include_names is not None and name not in include_names:
+            continue
+        if valid_stores is not None and store not in valid_stores:
+            continue
+        # 免除1: 本人の×休み希望
+        if d in set(off_requests.get(name, [])):
+            continue
+        # 免除2: 店舗休店日
+        mode = operation_modes.get(d, OperationMode.NORMAL)
+        if not is_store_open_on_day(year, month, d, store, mode):
+            continue
+        # 免除3: 前月持ち越し連勤との衝突（月初1日のみ）
+        if d == 1 and name not in consec_exceptions:
+            prev = int(prev_consec_map.get(name, 0) or 0)
+            if prev > 0:
+                try:
+                    personal_max = int(emp_max.get(name, hard_max_consec))
+                except (TypeError, ValueError):
+                    personal_max = int(hard_max_consec)
+                limit = min(int(hard_max_consec), personal_max)
+                limit += int(allowances.get(name, 0))
+                if prev + 1 > limit:
+                    notes.append(
+                        f"{name}: 前月末から{prev}連勤のため、"
+                        f"{int(month)}月1日の固定配置を自動免除しました"
+                        "（連勤上限と衝突するため休みを優先。"
+                        "出勤させたい場合は月例外設定で境界連勤の延長を許可してください）。"
+                    )
+                    continue
+        forced.append((name, d, store))
+    return forced, notes
 
 # 個別に少し寄せたい店舗。絶対条件ではなく、生成時の追加スコアとして扱う。
 STORE_ASSIGNMENT_EXTRA_WEIGHTS: dict[tuple[str, Store], int] = {

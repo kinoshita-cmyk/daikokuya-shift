@@ -49,6 +49,7 @@ from .rules import (
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
+    month_edge_forced_assignments, compute_prev_consecutive_run,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -192,11 +193,15 @@ def generate_shift(
     time_limit_seconds: int = 60,
     random_seed: int = 42,
     verbose: bool = True,
+    disable_month_edge_rules: bool = False,
+    status_out: Optional[dict] = None,
 ) -> Optional[MonthlyShift]:
     """
     Args:
         consec_exceptions: 連勤上限チェックを今月のみ免除する従業員リスト
                            例: 5月の野澤さん（前月4連勤＋5/1出勤希望で5連勤になる特例）
+        disable_month_edge_rules: True で月末月初固定を外す（解なし原因の自動調査用）
+        status_out: dict を渡すとソルバーの状態（status/wall_time）を書き込む
     """
     """
     1ヶ月分のシフトを自動生成する。
@@ -549,36 +554,27 @@ def generate_shift(
         if str(rule.get("severity") or "ERROR").upper() == "ERROR":
             model.Add(x[name][day][store] == 1)
 
-    # 月末月初の大宮駅前固定。
-    # 本人の×休み希望がある日は休み希望を最優先する。
-    month_edge_days = {1, days_in_month}
-    for name in MONTH_END_START_OMIYA_STAFF:
-        if name not in main_employee_names:
-            continue
-        requested_off_days = set(off_requests.get(name, []))
-        for d in month_edge_days:
-            if d in requested_off_days:
-                continue
-            mode = operation_modes.get(d, OperationMode.NORMAL)
-            if not is_store_open_on_day(year, month, d, Store.OMIYA, mode):
-                continue
-            model.Add(x[name][d][Store.OMIYA] == 1)
-
-    # 月末月初の各店店長自店舗固定。
-    # 既存の大宮駅前固定ルールとは別に併用する。
-    for name, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
-        if name not in main_employee_names:
-            continue
-        if home_store not in main_stores:
-            continue
-        requested_off_days = set(off_requests.get(name, []))
-        for d in month_edge_days:
-            if d in requested_off_days:
-                continue
-            mode = operation_modes.get(d, OperationMode.NORMAL)
-            if not is_store_open_on_day(year, month, d, home_store, mode):
-                continue
-            model.Add(x[name][d][home_store] == 1)
+    # 月末月初の固定配置（大宮駅前固定＋店長自店舗固定）。
+    # 免除判定（×休み・休店日・前月連勤持ち越し）は
+    # rules.month_edge_forced_assignments に一元化されており、
+    # 検証・未完成下書きと必ず同じ結果になる。
+    prev_consec_map = compute_prev_consecutive_run(prev_month, year, month)
+    if not disable_month_edge_rules:
+        month_edge_forced, _month_edge_notes = month_edge_forced_assignments(
+            year=year,
+            month=month,
+            days_in_month=days_in_month,
+            off_requests=off_requests,
+            operation_modes=operation_modes,
+            prev_consec_map=prev_consec_map,
+            hard_max_consec=(max_consec_override or 5),
+            employee_max_consecutive_work=employee_max_consecutive_work,
+            consec_exceptions=consec_exceptions,
+            include_names=set(main_employee_names),
+            valid_stores=set(main_stores),
+        )
+        for name, d, store in month_edge_forced:
+            model.Add(x[name][d][store] == 1)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -733,24 +729,8 @@ def generate_shift(
     hard_max_consec = max_consec_override or 5  # ハード制約は5連勤
     soft_threshold = base_max_consec  # 4連勤を超えたらペナルティ加算
 
-    # 前月最終日からの連続出勤日数を計算
-    prev_consec_map: dict[str, int] = {}
-    for p in prev_month:
-        if not p.last_working_days:
-            continue
-        sorted_days = sorted(p.last_working_days, reverse=True)
-        prev_month_num = month - 1 if month > 1 else 12
-        prev_year = year if month > 1 else year - 1
-        last_day = monthrange(prev_year, prev_month_num)[1]
-        consec = 0
-        expected = last_day
-        for dd in sorted_days:
-            if dd == expected:
-                consec += 1
-                expected -= 1
-            else:
-                break
-        prev_consec_map[p.employee] = consec
+    # 前月最終日からの連続出勤日数は、月末月初固定の免除判定と
+    # 同じ共有関数で算出済み（prev_consec_map / 制約5の直前で計算）
 
     boundary_consecutive_allowances = monthly_carryover_consecutive_allowances(
         year, month,
@@ -1301,6 +1281,11 @@ def generate_shift(
         print(f"ソルバー実行中... (制限時間: {time_limit_seconds}秒, シード: {random_seed})")
 
     status = solver.Solve(model)
+
+    if status_out is not None:
+        # 解なしの原因調査用: INFEASIBLE(矛盾) と UNKNOWN(時間切れ) を区別できるようにする
+        status_out["status"] = solver.StatusName(status)
+        status_out["wall_time_seconds"] = round(solver.WallTime(), 1)
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         if verbose:
