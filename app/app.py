@@ -584,6 +584,7 @@ from prototype.rules import (
     get_monthly_work_target,
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS,
     is_store_open_on_day,
+    monthly_carryover_consecutive_allowances,
 )
 try:
     from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
@@ -5045,6 +5046,22 @@ if mode == "📊 経営者ビュー":
                         else:
                             data_source_msg += "\n⚠ " + carryover_result.message
 
+                    boundary_consecutive_allowances = (
+                        monthly_carryover_consecutive_allowances(
+                            _saved_target_year, _saved_target_month,
+                        )
+                    )
+                    if boundary_consecutive_allowances:
+                        allowance_text = "、".join(
+                            f"{name}: 通常上限+{days}日"
+                            for name, days in boundary_consecutive_allowances.items()
+                        )
+                        data_source_msg += (
+                            "\n⚠ 前月確定シフトと月初固定配置の両立のため、"
+                            f"月境界だけ連勤例外を適用します（{allowance_text}）。"
+                            "月内の連勤上限は変更しません。"
+                        )
+
                     progress_area.info(
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
                     )
@@ -5297,6 +5314,9 @@ if mode == "📊 経営者ビュー":
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "required_assignments": list(use_required_assignments),
                     "previous_month_carryover_count": len(use_prev_month),
+                    "boundary_consecutive_allowances": dict(
+                        boundary_consecutive_allowances
+                    ),
                     "relaxed_warning_constraints": bool(relaxed_warning_constraints),
                     "relaxed_advisor_limit": bool(relaxed_advisor_limit),
                     "advisor_auto_assignment": False,
