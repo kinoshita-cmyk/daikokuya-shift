@@ -3432,6 +3432,10 @@ def build_incomplete_manual_draft(
     work_requests: list[tuple[str, int, Optional[Store]]],
     preferred_work_requests: list[tuple[str, int, Optional[Store]]],
     required_assignments: list[dict],
+    prev_month: Optional[list] = None,
+    max_consec: Optional[int] = None,
+    employee_max_consecutive_work: Optional[dict] = None,
+    consec_exceptions: Optional[list] = None,
 ) -> MonthlyShift:
     """解なし時に、手動調整を始めるための未完成下書きを作る。"""
     days_in_month = monthrange(int(year), int(month))[1]
@@ -3487,20 +3491,27 @@ def build_incomplete_manual_draft(
             raw_store = stores[0] if stores else None
         set_assignment(employee, day, store_from_rule_value(raw_store))
 
-    # 月末月初の大宮駅前固定も、休み希望がなければ初期配置に入れる。
-    for day in (1, days_in_month):
-        for employee in MONTH_EDGE_OMIYA_STAFF:
-            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
-            if is_store_open_on_day(
-                int(year), int(month), day, Store.OMIYA, mode,
-            ):
-                set_assignment(str(employee), day, Store.OMIYA)
-        for employee, home_store in MONTH_EDGE_HOME_STORE_ASSIGNMENTS.items():
-            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
-            if is_store_open_on_day(
-                int(year), int(month), day, home_store, mode,
-            ):
-                set_assignment(str(employee), day, home_store)
+    # 月末月初の固定配置も初期配置に入れる。
+    # 免除判定（×休み・休店日・前月連勤持ち越し）は生成・検証と同じ
+    # rules.month_edge_forced_assignments に一元化されている。
+    from prototype.rules import (
+        month_edge_forced_assignments as _edge_forced,
+        compute_prev_consecutive_run as _prev_consec,
+    )
+    _draft_prev_map = _prev_consec(prev_month, int(year), int(month))
+    _draft_forced, _draft_notes = _edge_forced(
+        year=int(year),
+        month=int(month),
+        days_in_month=days_in_month,
+        off_requests=off_requests,
+        operation_modes=shift.operation_modes,
+        prev_consec_map=_draft_prev_map,
+        hard_max_consec=(max_consec or 5),
+        employee_max_consecutive_work=employee_max_consecutive_work,
+        consec_exceptions=consec_exceptions,
+    )
+    for _f_name, _f_day, _f_store in _draft_forced:
+        set_assignment(str(_f_name), int(_f_day), _f_store)
 
     # 店舗指定付きの出勤希望は初期配置に入れる。店舗未指定の出勤希望は空白のまま残す。
     for employee, day, store in list(work_requests or []) + list(preferred_work_requests or []):
@@ -3889,6 +3900,78 @@ if mode == "📊 経営者ビュー":
             if "input_summary" in _last_gen:
                 render_advisor_candidate_notice(_last_gen["input_summary"])
 
+            # ============================================================
+            # 🔬 解なしの原因自動調査（未完成下書き・解なし時のみ表示）
+            # ============================================================
+            if _gen_status in ("partial", "infeasible"):
+                with st.expander("🔬 解なしの原因調査（クリックで展開）", expanded=True):
+                    # 1) 既知パターンの即時検査結果（生成時に自動実行済み）
+                    _diag_findings = st.session_state.get(
+                        "last_infeasibility_findings", []
+                    )
+                    if _diag_findings:
+                        st.markdown("**⚡ 即時検査で見つかった問題:**")
+                        for _fd in _diag_findings:
+                            _conf = _fd.get("確度", "")
+                            if _conf == "確実":
+                                st.error(
+                                    f"❌ **{_fd.get('区分', '')}**: "
+                                    f"{_fd.get('内容', '')}\n\n"
+                                    f"👉 {_fd.get('対処', '')}"
+                                )
+                            elif _conf == "可能性":
+                                st.warning(
+                                    f"⚠ **{_fd.get('区分', '')}**: "
+                                    f"{_fd.get('内容', '')}\n\n"
+                                    f"👉 {_fd.get('対処', '')}"
+                                )
+                            else:
+                                st.info(f"ℹ️ {_fd.get('内容', '')}")
+                    else:
+                        st.caption(
+                            "即時検査では単純な矛盾は見つかりませんでした。"
+                            "下のボタンで詳しい自動調査ができます。"
+                        )
+
+                    # 2) 緩和探索（ボタンで実行。条件を1つずつ外して原因を特定）
+                    _probe_results = st.session_state.get(
+                        "last_infeasibility_probe_results"
+                    )
+                    if _probe_results:
+                        from prototype.infeasibility_diagnosis import (
+                            summarize_probe_results as _summarize_probes,
+                        )
+                        st.markdown("**🔬 条件別の自動調査結果:**")
+                        st.info(_summarize_probes(_probe_results))
+                        st.dataframe(
+                            pd.DataFrame(_probe_results),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    _probe_kwargs = st.session_state.get("last_generation_kwargs")
+                    if _probe_kwargs is not None:
+                        if st.button(
+                            "🔬 条件を1つずつ外して原因を自動調査する（2〜3分）",
+                            key="run_infeasibility_probe",
+                            help=(
+                                "×休み・出勤希望・固定配置などの条件を1つずつ外して"
+                                "再計算し、どの条件が解なしの原因かを特定します。"
+                            ),
+                        ):
+                            from prototype.infeasibility_diagnosis import (
+                                probe_rule_relaxations as _run_probes,
+                            )
+                            _probe_progress = st.empty()
+                            with st.spinner("条件別の自動調査を実行中..."):
+                                _pr = _run_probes(
+                                    _probe_kwargs,
+                                    time_limit_per_probe=20,
+                                    progress_callback=lambda msg: _probe_progress.info(msg),
+                                )
+                            _probe_progress.empty()
+                            st.session_state["last_infeasibility_probe_results"] = _pr
+                            st.rerun()
+
             # 入力データの詳細（成功・失敗どちらでも展開可能）
             if "input_summary" in _last_gen:
                 _isum = _last_gen["input_summary"]
@@ -4006,6 +4089,68 @@ if mode == "📊 経営者ビュー":
             )
         except Exception as _e:
             st.caption(f"診断情報取得失敗: {_e}")
+
+        # 月例外設定ファイルの読み込み状態
+        try:
+            from prototype.rules import MONTHLY_EXCEPTIONS_STATUS as _mx_status
+            st.caption(f"月例外設定ファイル: {_mx_status}")
+        except Exception:
+            pass
+
+    # ============================================================
+    # 📅 カレンダー掃引テスト（将来月の事前検査）
+    # ============================================================
+    with st.expander("📅 将来月の事前チェック（ルール衝突の早期発見）", expanded=False):
+        st.caption(
+            "希望提出ゼロ＋標準ルールの状態で、今後の各月が生成可能かを検査します。"
+            "月末・月初が月曜（東口休店日）に当たる月など、"
+            "カレンダーの端で基本ルール同士が衝突していないかを事前に発見できます。"
+        )
+        _sweep_results = st.session_state.get("preflight_sweep_results")
+        if _sweep_results:
+            _ng_rows = [
+                r for r in _sweep_results
+                if "❌" in str(r.get("判定", "")) or "⚠" in str(r.get("判定", ""))
+            ]
+            if _ng_rows:
+                st.error(
+                    f"⚠ {len(_ng_rows)}ヶ月で問題が見つかりました。"
+                    "該当月が来る前に対処してください。"
+                )
+            else:
+                st.success("✅ 検査した全ての月で基本ルールの衝突はありません。")
+            st.dataframe(
+                pd.DataFrame(_sweep_results),
+                use_container_width=True,
+                hide_index=True,
+            )
+        _sweep_col1, _sweep_col2 = st.columns([1, 2])
+        with _sweep_col1:
+            _sweep_n_months = st.number_input(
+                "検査する月数", min_value=1, max_value=12, value=6,
+                key="preflight_sweep_months",
+            )
+        with _sweep_col2:
+            st.caption(
+                "1ヶ月あたり最大30秒かかります。"
+                "6ヶ月なら通常1〜3分です。月替わりに1回の実行がおすすめです。"
+            )
+        if st.button(
+            "📅 事前チェックを実行",
+            key="run_preflight_sweep",
+        ):
+            from prototype.preflight_calendar_check import sweep_months
+            _sweep_progress = st.empty()
+            with st.spinner("将来月の事前チェックを実行中..."):
+                _sw = sweep_months(
+                    int(target_year), int(target_month),
+                    count=int(_sweep_n_months),
+                    time_limit_per_month=30,
+                    progress_callback=lambda msg: _sweep_progress.info(msg),
+                )
+            _sweep_progress.empty()
+            st.session_state["preflight_sweep_results"] = _sw
+            st.rerun()
 
     # 提出状況サマリーを目立つボックスで表示
     completion_pct = int(summary["completion_rate"] * 100)
@@ -4823,6 +4968,10 @@ if mode == "📊 経営者ビュー":
                 "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                 "started_at": datetime.now().isoformat(),
             }
+            # 前回の解なし診断結果は新しい生成のたびにクリアする
+            st.session_state.pop("last_infeasibility_findings", None)
+            st.session_state.pop("last_infeasibility_probe_results", None)
+            st.session_state.pop("last_generation_kwargs", None)
 
             # ステップ進捗の状態表示エリア
             progress_area = st.empty()
@@ -5250,8 +5399,50 @@ if mode == "📊 経営者ビュー":
                             use_work_requests,
                             use_preferred_work_requests,
                             use_required_assignments,
+                            prev_month=use_prev_month,
+                            max_consec=rule_cfg.parameters.get("max_consec_work", 5),
+                            employee_max_consecutive_work=use_employee_max_consecutive_work,
+                            consec_exceptions=use_consec_exceptions,
                         )
                         incomplete_manual_draft_used = True
+
+                        # 解なしの原因を即時検査し、結果を画面用に保存する。
+                        # 緩和探索（ボタン実行）用に生成条件一式も保存する。
+                        try:
+                            from prototype.infeasibility_diagnosis import (
+                                diagnose_known_conflicts,
+                            )
+                            _diag_employees = [
+                                _e for _e in shift_active_employees()
+                                if not _e.is_auxiliary
+                                and getattr(_e, "role", None) != Role.ADVISOR
+                            ]
+                            st.session_state["last_infeasibility_findings"] = (
+                                diagnose_known_conflicts(
+                                    _saved_target_year,
+                                    _saved_target_month,
+                                    off_requests=use_off_requests,
+                                    work_requests=use_work_requests,
+                                    required_assignments=use_required_assignments,
+                                    prev_month=use_prev_month,
+                                    consec_exceptions=use_consec_exceptions,
+                                    max_consec=rule_cfg.parameters.get(
+                                        "max_consec_work", 5,
+                                    ),
+                                    employee_max_consecutive_work=(
+                                        use_employee_max_consecutive_work
+                                    ),
+                                    exact_holiday_days=use_exact_holiday_days,
+                                    holiday_overrides=use_holiday_overrides,
+                                    operation_modes=modes,
+                                    employees=_diag_employees,
+                                )
+                            )
+                            st.session_state["last_generation_kwargs"] = dict(
+                                generation_kwargs
+                            )
+                        except Exception:
+                            pass
                         if not advisor_candidate_triggers:
                             advisor_candidate_triggers = [{
                                 "日付": "",
