@@ -609,6 +609,38 @@ st.set_page_config(
 if not require_auth():
     st.stop()
 
+
+# ============================================================
+# 月例外設定の起動時復元（プロセスごとに1回だけ実行）
+# Streamlit Cloud の再起動でローカルの月例外設定が初期化されても、
+# GitHub バックアップの最新版から自動で復元する。
+# これにより、管理者が画面から保存した月例外は再起動後も消えない。
+# ============================================================
+@st.cache_resource
+def _restore_monthly_exceptions_on_boot() -> str:
+    try:
+        from prototype.github_backup import fetch_config_from_github
+        from prototype import rules as _rules_mod
+        success, remote_data, msg = fetch_config_from_github("monthly_exceptions")
+        if not success:
+            return f"復元スキップ（{msg}）"
+        remote_at = str(remote_data.get("updated_at", ""))
+        local_at = str(_rules_mod.load_monthly_exceptions_raw().get("updated_at", ""))
+        if remote_at and remote_at > local_at:
+            ok, status = _rules_mod.save_monthly_exceptions(
+                remote_data,
+                actor=str(remote_data.get("updated_by", "バックアップ復元")),
+            )
+            if ok:
+                return f"バックアップから復元しました（{remote_at[:19]} 時点）"
+            return f"復元失敗（{status}）"
+        return "ローカルの設定が最新（復元不要）"
+    except Exception as exc:
+        return f"復元エラー（{type(exc).__name__}）"
+
+
+MONTHLY_EXCEPTIONS_RESTORE_STATUS = _restore_monthly_exceptions_on_boot()
+
 # CSS カスタマイズ（高齢者にも見やすい大きさ）
 st.markdown("""
 <style>
@@ -7985,12 +8017,271 @@ elif mode == "⚙️ 設定":
     (
         setting_tab_links,
         setting_tab1, setting_tab2,
+        setting_tab_exceptions,
         setting_tab3, setting_tab_leave, setting_tab4, setting_tab5,
     ) = st.tabs([
         "🔗 マジックリンク",
         "🔧 ルール設定", "📜 ルール変更履歴",
+        "📅 月例外",
         "👥 従業員マスタ", "🏖 有給使用状況", "🔑 APIキー", "💾 バックアップ",
     ])
+
+    # ============================================================
+    # タブ: 月例外（イレギュラー月の特例をコード変更なしで管理）
+    # ============================================================
+    with setting_tab_exceptions:
+        st.markdown("### 📅 月ごとの例外ルール")
+        st.caption(
+            "2026年7月のようなイレギュラーな月に、**その月だけ**基本ルールを"
+            "緩めたり特例を認めたりする画面です。プログラムやファイルの編集は不要で、"
+            "ここで保存するとすぐにシフト生成へ反映されます。"
+            "他の月には一切影響しません。"
+        )
+
+        from prototype.rules import (
+            load_monthly_exceptions_raw,
+            save_monthly_exceptions,
+            reload_monthly_exceptions,
+            MONTHLY_EXCEPTIONS_STATUS as _mx_status_now,
+        )
+
+        _mx_raw = load_monthly_exceptions_raw()
+        _mx_updated_by = _mx_raw.get("updated_by", "")
+        _mx_updated_at = str(_mx_raw.get("updated_at", ""))[:19]
+        _status_line = f"設定の状態: {_mx_status_now}"
+        if _mx_updated_by:
+            _status_line += f" ／ 最終更新: {_mx_updated_by}（{_mx_updated_at}）"
+        try:
+            _status_line += f" ／ 起動時復元: {MONTHLY_EXCEPTIONS_RESTORE_STATUS}"
+        except Exception:
+            pass
+        st.caption(_status_line)
+
+        def _mx_save_and_push(new_data: dict, actor: str) -> None:
+            """保存→即時反映→GitHubバックアップまで行い、結果を画面に出す。"""
+            ok, msg = save_monthly_exceptions(new_data, actor=actor)
+            if not ok:
+                st.error(f"保存に失敗しました: {msg}")
+                return
+            # GitHub バックアップ（失敗しても画面に明示する）
+            try:
+                from prototype.github_backup import push_config_to_github
+                pushed, push_msg = push_config_to_github(
+                    "monthly_exceptions", load_monthly_exceptions_raw(),
+                )
+                if pushed:
+                    st.success(
+                        "✅ 保存しました（すぐに反映されます）。"
+                        "GitHubバックアップにも保存済みなので、"
+                        "サーバー再起動後も設定は維持されます。"
+                    )
+                else:
+                    st.warning(
+                        f"保存は完了しましたが、GitHubバックアップに失敗しました（{push_msg}）。"
+                        "サーバーが再起動するとこの設定が消える可能性があります。"
+                        "時間をおいてもう一度保存してください。"
+                    )
+            except Exception as _push_exc:
+                st.warning(
+                    "保存は完了しましたが、GitHubバックアップでエラーが発生しました"
+                    f"（{type(_push_exc).__name__}）。時間をおいてもう一度保存してください。"
+                )
+            st.rerun()
+
+        # ---- 現在の設定一覧 ----------------------------------------
+        st.markdown("#### 現在設定されている例外")
+
+        _anchor_list = list(_mx_raw.get("omiya_anchor_relaxed_months", []) or [])
+        _carry_map = dict(_mx_raw.get("carryover_consecutive_allowances", {}) or {})
+        _avoid_map = dict(_mx_raw.get("avoid_same_off", {}) or {})
+
+        def _ym_jp(ym_text: str) -> str:
+            try:
+                y_s, m_s = str(ym_text).split("-", 1)
+                return f"{int(y_s)}年{int(m_s)}月"
+            except (ValueError, AttributeError):
+                return str(ym_text)
+
+        _has_any = bool(_anchor_list or _carry_map or _avoid_map)
+        if not _has_any:
+            st.info("現在、月例外は設定されていません（すべての月が通常ルールで動きます）。")
+
+        if _anchor_list:
+            st.markdown("**🏬 大宮アンカー緩和**（「大宮に春山・下地のどちらか必須」をその月だけ外す）")
+            for _ym in sorted(_anchor_list):
+                _c1, _c2 = st.columns([4, 1])
+                _c1.write(f"　- {_ym_jp(_ym)}")
+                if _c2.button("🗑 削除", key=f"mx_del_anchor_{_ym}"):
+                    _new = dict(_mx_raw)
+                    _new["omiya_anchor_relaxed_months"] = [
+                        t for t in _anchor_list if t != _ym
+                    ]
+                    _mx_save_and_push(_new, actor="管理者")
+
+        if _carry_map:
+            st.markdown("**🔗 境界連勤の延長**（前月から続く連勤に限り、月初の連勤上限を延長）")
+            for _ym in sorted(_carry_map):
+                for _emp, _days in sorted(dict(_carry_map[_ym] or {}).items()):
+                    _c1, _c2 = st.columns([4, 1])
+                    _c1.write(f"　- {_ym_jp(_ym)} ／ {_emp}さん ＋{int(_days)}日")
+                    if _c2.button("🗑 削除", key=f"mx_del_carry_{_ym}_{_emp}"):
+                        _new = dict(_mx_raw)
+                        _new_carry = {
+                            k: dict(v) for k, v in _carry_map.items()
+                        }
+                        _new_carry[_ym].pop(_emp, None)
+                        if not _new_carry[_ym]:
+                            _new_carry.pop(_ym)
+                        _new["carryover_consecutive_allowances"] = _new_carry
+                        _mx_save_and_push(_new, actor="管理者")
+
+        if _avoid_map:
+            st.markdown("**🚫 同時休みの回避**（指定した2人が同じ日に休むのをなるべく避ける）")
+            for _ym in sorted(_avoid_map):
+                for _idx, _rule in enumerate(list(_avoid_map[_ym] or [])):
+                    _a = str(_rule.get("a", ""))
+                    _b = str(_rule.get("b", ""))
+                    _note = str(_rule.get("note", ""))
+                    _c1, _c2 = st.columns([4, 1])
+                    _label = f"　- {_ym_jp(_ym)} ／ {_a}さん × {_b}さん"
+                    if _note:
+                        _label += f"（{_note}）"
+                    _c1.write(_label)
+                    if _c2.button("🗑 削除", key=f"mx_del_avoid_{_ym}_{_idx}"):
+                        _new = dict(_mx_raw)
+                        _new_avoid = {
+                            k: list(v) for k, v in _avoid_map.items()
+                        }
+                        _new_avoid[_ym].pop(_idx)
+                        if not _new_avoid[_ym]:
+                            _new_avoid.pop(_ym)
+                        _new["avoid_same_off"] = _new_avoid
+                        _mx_save_and_push(_new, actor="管理者")
+
+        st.markdown("---")
+
+        # ---- 追加フォーム ------------------------------------------
+        st.markdown("#### 例外を追加する")
+
+        _mx_type = st.selectbox(
+            "どんな例外を追加しますか？",
+            [
+                "🏬 大宮アンカー緩和（大宮の春山・下地必須ルールをその月だけ外す）",
+                "🔗 境界連勤の延長（前月から続く連勤の上限をその月初だけ延長）",
+                "🚫 同時休みの回避（2人が同じ日に休むのをなるべく避ける）",
+            ],
+            key="mx_add_type",
+            help=(
+                "例: 2026年7月のように主力メンバーが連休を取る月は"
+                "「大宮アンカー緩和」を設定します。"
+                "解なしの原因調査で「境界連勤の延長を許可してください」と"
+                "案内された場合は「境界連勤の延長」を設定します。"
+            ),
+        )
+
+        # 対象月の選択肢（今月から14ヶ月先まで）
+        _mx_month_options = []
+        _my, _mm = date.today().year, date.today().month
+        for _ in range(14):
+            _mx_month_options.append(f"{_my:04d}-{_mm:02d}")
+            _mm += 1
+            if _mm > 12:
+                _mm = 1
+                _my += 1
+        _mx_ym = st.selectbox(
+            "対象の月",
+            _mx_month_options,
+            format_func=_ym_jp,
+            key="mx_add_ym",
+        )
+
+        _mx_emp_names = [
+            e.name for e in shift_active_employees() if not e.is_auxiliary
+        ]
+
+        _mx_new_data = None
+        if _mx_type.startswith("🏬"):
+            st.caption(
+                f"{_ym_jp(_mx_ym)}は、大宮駅前店に春山さん・下地さんの"
+                "どちらかが必ずいなくてもよい月になります。"
+            )
+            if st.button("この内容で追加", key="mx_add_anchor", type="primary"):
+                _new = dict(_mx_raw)
+                _lst = list(_new.get("omiya_anchor_relaxed_months", []) or [])
+                if _mx_ym not in _lst:
+                    _lst.append(_mx_ym)
+                _new["omiya_anchor_relaxed_months"] = sorted(_lst)
+                _mx_new_data = _new
+        elif _mx_type.startswith("🔗"):
+            _mc1, _mc2 = st.columns(2)
+            with _mc1:
+                _mx_emp = st.selectbox(
+                    "対象の従業員", _mx_emp_names, key="mx_add_carry_emp",
+                )
+            with _mc2:
+                _mx_days = st.number_input(
+                    "延長する日数", min_value=1, max_value=3, value=1,
+                    key="mx_add_carry_days",
+                    help="通常は1日で足ります。",
+                )
+            st.caption(
+                f"{_ym_jp(_mx_ym)}の{_mx_emp}さんに限り、前月から続く連勤の"
+                f"上限を＋{int(_mx_days)}日だけ延長します（月の途中の連勤上限は変わりません）。"
+            )
+            if st.button("この内容で追加", key="mx_add_carry", type="primary"):
+                _new = dict(_mx_raw)
+                _cm = {
+                    k: dict(v) for k, v in (
+                        _new.get("carryover_consecutive_allowances", {}) or {}
+                    ).items()
+                }
+                _cm.setdefault(_mx_ym, {})[_mx_emp] = int(_mx_days)
+                _new["carryover_consecutive_allowances"] = _cm
+                _mx_new_data = _new
+        else:
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                _mx_emp_a = st.selectbox(
+                    "従業員A", _mx_emp_names, key="mx_add_avoid_a",
+                )
+            with _ac2:
+                _mx_emp_b = st.selectbox(
+                    "従業員B", _mx_emp_names, key="mx_add_avoid_b",
+                )
+            _mx_note = st.text_input(
+                "メモ（任意）",
+                key="mx_add_avoid_note",
+                placeholder="例: すずらんメイン2名の同時休みは避ける",
+            )
+            st.caption(
+                f"{_ym_jp(_mx_ym)}は、{_mx_emp_a}さんと{_mx_emp_b}さんが"
+                "同じ日に休むことをなるべく避けて生成します（絶対条件ではありません）。"
+            )
+            if st.button("この内容で追加", key="mx_add_avoid", type="primary"):
+                if _mx_emp_a == _mx_emp_b:
+                    st.error("従業員AとBは別の人を選んでください。")
+                else:
+                    _new = dict(_mx_raw)
+                    _am = {
+                        k: list(v) for k, v in (
+                            _new.get("avoid_same_off", {}) or {}
+                        ).items()
+                    }
+                    _am.setdefault(_mx_ym, []).append({
+                        "a": _mx_emp_a, "b": _mx_emp_b, "note": _mx_note,
+                    })
+                    _new["avoid_same_off"] = _am
+                    _mx_new_data = _new
+
+        if _mx_new_data is not None:
+            _mx_save_and_push(_mx_new_data, actor="管理者")
+
+        st.markdown("---")
+        st.caption(
+            "💡 このほか「この月だけ○○さんを△店に□日配置する」のような"
+            "月別の配置ルールは「🔧 ルール設定」タブから追加できます。"
+            "例外を追加・削除したら、シフトの再生成を忘れずに行ってください。"
+        )
 
     # ============================================================
     # タブ: 有給使用状況（経営者専用）
