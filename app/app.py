@@ -8038,22 +8038,107 @@ elif mode == "👤 従業員ビュー":
 
 elif mode == "📁 過去シフト閲覧":
     st.title("📁 過去のシフト")
+    st.caption(
+        "このシステムで確定した過去のシフトを月別に閲覧できます"
+        "（サーバー再起動後もGitHubバックアップから自動復元されます）。"
+    )
 
-    excel_path = str(MAY_2026_SHIFT_XLSX)
-    if not Path(excel_path).exists():
-        st.warning("Excel ファイルがありません")
+    _hist_lock_mgr = ShiftLockManager()
+    _hist_backup = ShiftBackup()
+
+    # 閲覧できる月の一覧を作る:
+    # 1) ロック済みの全月（list_locks が GitHub からロックを自動復元する）
+    # 2) 確定スナップショットがローカルに残っている月
+    _hist_months = set()
+    try:
+        for _li in _hist_lock_mgr.list_locks():
+            _hist_months.add((int(_li.year), int(_li.month)))
+    except Exception:
+        pass
+    try:
+        for _mdir in _hist_backup.backup_dir.iterdir():
+            if _mdir.is_dir() and any(_mdir.glob("shift_finalized_*.json")):
+                try:
+                    _y_str, _m_str = _mdir.name.split("-", 1)
+                    _hist_months.add((int(_y_str), int(_m_str)))
+                except (ValueError, AttributeError):
+                    continue
+    except Exception:
+        pass
+
+    if not _hist_months:
+        st.info(
+            "まだ確定済みのシフトがありません。"
+            "シフトを確定（ロック）すると、この画面に月別で表示されます。"
+        )
     else:
-        st.info(f"📂 ソース: {excel_path}")
+        _hist_options = sorted(_hist_months, reverse=True)
+        _hist_sel = st.selectbox(
+            "表示する月",
+            _hist_options,
+            format_func=lambda ym: f"{ym[0]}年{ym[1]}月",
+            key="past_shift_view_ym",
+        )
+        _hist_y, _hist_m = int(_hist_sel[0]), int(_hist_sel[1])
 
-        # Excelからシフトを読み込んで表示
-        try:
-            shift, short_days = load_shift_from_excel(excel_path)
-            st.markdown(f"### {shift.year}年{shift.month}月（手動作成版）")
-            short_day_text = ", ".join(f"{shift.month}/{d}" for d in short_days)
-            st.write(f"人員少マーク日: {short_day_text}")
-            render_shift_table(shift)
-        except Exception as e:
-            st.error(f"読み込みエラー: {e}")
+        # 従業員向け公開シフトと同じ読み込み経路を使う
+        # （ロック済み確定版 → 最新の確定保存版 の優先順）
+        _hist_shift, _hist_source = load_public_shift_for_employee_view(
+            _hist_y, _hist_m,
+        )
+        if _hist_shift is None:
+            # ローカルに無い場合は GitHub からその月の確定版を取り寄せて再試行
+            try:
+                from prototype.github_backup import (
+                    sync_shift_snapshots_from_github,
+                )
+                sync_shift_snapshots_from_github(
+                    _hist_y, _hist_m, _hist_backup.backup_dir,
+                    kind="finalized",
+                )
+            except Exception:
+                pass
+            _hist_shift, _hist_source = load_public_shift_for_employee_view(
+                _hist_y, _hist_m,
+            )
+
+        if _hist_shift is None:
+            st.warning(
+                f"{_hist_y}年{_hist_m}月の確定シフトデータが見つかりませんでした。"
+                "GitHubバックアップ側にも確定版が無い可能性があります。"
+            )
+        else:
+            _hist_lock = _hist_lock_mgr.get_lock_info(_hist_y, _hist_m)
+            if _hist_lock:
+                st.success(
+                    f"🔒 {_hist_y}年{_hist_m}月の確定版（ロック済み）を表示中　"
+                    f"確定日時: {str(_hist_lock.locked_at)[:19]} ／ "
+                    f"確定者: {_hist_lock.locked_by}"
+                )
+            else:
+                st.info(
+                    f"{_hist_y}年{_hist_m}月の{_hist_source}を表示中"
+                    "（ロックはされていません）"
+                )
+            render_shift_table(_hist_shift)
+
+    # 2026年5月の手動作成版（Excel）は参考資料として残す
+    with st.expander("📄 参考: 2026年5月の手動作成版（Excel）", expanded=False):
+        excel_path = str(MAY_2026_SHIFT_XLSX)
+        if not Path(excel_path).exists():
+            st.warning("Excel ファイルがありません")
+        else:
+            st.caption(f"📂 ソース: {excel_path}")
+            try:
+                _xl_shift, _xl_short_days = load_shift_from_excel(excel_path)
+                st.markdown(f"### {_xl_shift.year}年{_xl_shift.month}月（手動作成版）")
+                _xl_short_text = ", ".join(
+                    f"{_xl_shift.month}/{d}" for d in _xl_short_days
+                )
+                st.write(f"人員少マーク日: {_xl_short_text}")
+                render_shift_table(_xl_shift)
+            except Exception as e:
+                st.error(f"読み込みエラー: {e}")
 
 
 # ============================================================
