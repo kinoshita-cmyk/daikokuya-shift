@@ -1386,6 +1386,29 @@ def push_config_to_github(
         return False, f"{type(e).__name__}: {e}"
 
 
+def push_export_to_github(
+    repo_path: str,
+    content: bytes,
+    commit_message: str,
+) -> tuple[bool, str]:
+    """書き出しデータ（社労士提出用CSVなど）を GitHub バックアップへ保存する。
+
+    GAS（Google Apps Script）が定期取得する連携用の置き場所。
+    """
+    if not is_github_backup_enabled():
+        return False, "未設定"
+    try:
+        return _push_file(repo_path, bytes(content), commit_message)
+    except Exception as e:
+        return False, f"{type(e).__name__}: {e}"
+
+
+def backup_file_exists(repo_path: str) -> bool:
+    """GitHub バックアップ上に指定パスのファイルが存在するか。"""
+    success, _content, _msg = _fetch_repo_file(repo_path)
+    return bool(success)
+
+
 def fetch_config_from_github(config_name: str) -> tuple[bool, dict, str]:
     """
     バックアップに保存済みの設定（config/{name}_latest.json）を取得する。
