@@ -136,7 +136,32 @@
 | `config/monthly_exceptions.json` | 月限定例外の設定（コード変更不要） |
 | `config/rule_ledger_v1_0.json` | ルール台帳（人が読む正本） |
 | `check_github_sync.py` | ローカルとGitHubの同期チェック |
+| `prototype/sharoushi_export.py` | 社労士提出用の有給CSV生成 |
+| `gas/paid_leave_to_drive.gs` | 有給CSVをGoogleドライブへ自動配置するGASスクリプト |
 | `DEPLOYMENT_GUIDE.md` | 初回デプロイ手順 |
+
+---
+
+## 7. 出勤簿システム連携（社労士への有給データ受け渡し）
+
+**完全自動**で動く（誰もアプリを開かなくてよい）:
+
+1. GitHub Actions（バックアップrepoに設置した
+   `.github/workflows/paid_leave_export.yml`）が**毎日 0:05（日本時間）**に
+   当月・前月の確定有給日数CSV（本人申告＋管理者調整）を
+   バックアップrepoの `exports/paid_leave/` に自動生成・更新する
+2. GAS（`gas/paid_leave_to_drive.gs` を script.google.com に設置）が
+   毎日1回チェックし、指定の Google ドライブフォルダへ配置する
+
+補助手段（あってもなくてもよい）:
+- アプリを開いた時にも月初1回の自動保存が走る（Actions の予備）
+- 手動のダウンロード・再保存は「⚙️ 設定 → 🏖 有給使用状況 →
+  📤 社労士提出用CSV」から可能
+- 病欠→有給振替は「管理者側で有給調整を追加」で登録するだけでよい
+  （翌日の自動実行でCSV・ドライブに反映される）
+
+設置ファイル: ワークフローは `github_actions/paid_leave_export.yml` の
+中身をバックアップrepoの `.github/workflows/` に配置（手順はファイル冒頭）。
 
 ---
 
