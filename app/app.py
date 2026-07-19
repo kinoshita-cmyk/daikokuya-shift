@@ -641,6 +641,56 @@ def _restore_monthly_exceptions_on_boot() -> str:
 
 MONTHLY_EXCEPTIONS_RESTORE_STATUS = _restore_monthly_exceptions_on_boot()
 
+
+# ============================================================
+# 社労士提出用CSVの月初自動保存（月が替わって最初のアクセス時に1回）
+# 例: 8月分は8月1日以降の最初のアクセスで自動保存される。
+# 保存先は GitHub バックアップの exports/paid_leave/ で、
+# 出勤簿システム（GAS）が定期取得して Google ドライブへ配置する。
+# ============================================================
+@st.cache_resource
+def _auto_export_paid_leave_csv(ym_key: str) -> str:
+    try:
+        from prototype.github_backup import (
+            backup_file_exists,
+            is_github_backup_enabled,
+            push_export_to_github,
+        )
+        if not is_github_backup_enabled():
+            return "GitHub未設定のためスキップ"
+        from prototype.sharoushi_export import (
+            build_paid_leave_rows,
+            paid_leave_csv_repo_path,
+            rows_to_csv_bytes,
+        )
+        _y, _m = int(ym_key[:4]), int(ym_key[5:])
+        repo_path = paid_leave_csv_repo_path(_y, _m)
+        if backup_file_exists(repo_path):
+            return f"{ym_key} 分は保存済み"
+        expected = [
+            e.name for e in shift_active_employees() if not e.is_auxiliary
+        ]
+        rows = build_paid_leave_rows(
+            _y, _m, expected,
+            admin_days=admin_paid_leave_days_for_month(_y, _m),
+            admin_dates=admin_paid_leave_dates_for_month(_y, _m),
+        )
+        ok, msg = push_export_to_github(
+            repo_path,
+            rows_to_csv_bytes(rows),
+            f"Paid leave export {ym_key} (auto)",
+        )
+        if ok:
+            return f"{ym_key} 分を自動保存しました"
+        return f"自動保存に失敗（{msg}）"
+    except Exception as exc:
+        return f"自動保存エラー（{type(exc).__name__}）"
+
+
+st.session_state["paid_leave_auto_export_status"] = _auto_export_paid_leave_csv(
+    date.today().strftime("%Y-%m")
+)
+
 # CSS カスタマイズ（高齢者にも見やすい大きさ）
 st.markdown("""
 <style>
@@ -8291,6 +8341,102 @@ elif mode == "⚙️ 設定":
         st.caption(
             "本人が提出した希望有給と、管理者が後から付けた有給調整を合算して確認できます。"
         )
+
+        # ============================================================
+        # 社労士提出用CSV（出勤簿システム連携）
+        # ============================================================
+        with st.container(border=True):
+            st.markdown("#### 📤 社労士提出用CSV（出勤簿システム連携）")
+            st.caption(
+                "その月の確定有給日数（本人申告＋管理者調整）を従業員別のCSVにします。"
+                "毎月、月が替わって最初にこのアプリが開かれた時点で自動保存され、"
+                "出勤簿システム（GAS）が定期的に取得してGoogleドライブへ配置します。"
+                "手動でのダウンロード・再保存もここからできます。"
+            )
+            from prototype.sharoushi_export import (
+                build_paid_leave_rows,
+                rows_to_csv_bytes,
+                paid_leave_csv_repo_path,
+            )
+            _csv_col1, _csv_col2 = st.columns([1, 2])
+            with _csv_col1:
+                _csv_ym_options = []
+                _cy, _cm = date.today().year, date.today().month
+                for _ in range(13):
+                    _csv_ym_options.append(f"{_cy:04d}-{_cm:02d}")
+                    _cm -= 1
+                    if _cm < 1:
+                        _cm = 12
+                        _cy -= 1
+                _csv_ym = st.selectbox(
+                    "対象月",
+                    _csv_ym_options,
+                    key="sharoushi_csv_ym",
+                    format_func=lambda t: f"{int(t[:4])}年{int(t[5:])}月",
+                )
+            _csv_y, _csv_m = int(_csv_ym[:4]), int(_csv_ym[5:])
+            _csv_expected = [
+                e.name for e in shift_active_employees() if not e.is_auxiliary
+            ]
+            _csv_rows = build_paid_leave_rows(
+                _csv_y, _csv_m, _csv_expected,
+                admin_days=admin_paid_leave_days_for_month(_csv_y, _csv_m),
+                admin_dates=admin_paid_leave_dates_for_month(_csv_y, _csv_m),
+            )
+            _csv_with_leave = [r for r in _csv_rows if r["合計有給日数"] > 0]
+            with _csv_col2:
+                st.metric(
+                    f"{_csv_m}月の有給取得者",
+                    f"{len(_csv_with_leave)}名 / 合計 "
+                    f"{sum(r['合計有給日数'] for r in _csv_rows)}日",
+                )
+            if _csv_with_leave:
+                st.dataframe(
+                    pd.DataFrame(_csv_with_leave),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption("この月の有給取得者はいません（0日でも全員分がCSVに含まれます）。")
+
+            _dl_col, _push_col = st.columns(2)
+            with _dl_col:
+                st.download_button(
+                    "⬇️ CSVをダウンロード",
+                    data=rows_to_csv_bytes(_csv_rows),
+                    file_name=f"paid_leave_{_csv_ym}.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with _push_col:
+                if st.button(
+                    "☁️ 出勤簿連携用に保存（GitHub経由）",
+                    use_container_width=True,
+                    key="push_sharoushi_csv",
+                    help=(
+                        "GitHubバックアップに保存し、出勤簿システム（GAS）が"
+                        "取得できる状態にします。調整を追加した後の再保存にも使えます。"
+                    ),
+                ):
+                    from prototype.github_backup import push_export_to_github
+                    _push_ok, _push_msg = push_export_to_github(
+                        paid_leave_csv_repo_path(_csv_y, _csv_m),
+                        rows_to_csv_bytes(_csv_rows),
+                        f"Paid leave export {_csv_ym}",
+                    )
+                    if _push_ok:
+                        st.success(
+                            f"✅ {_csv_ym} の有給CSVを保存しました。"
+                            "出勤簿システムが次回の定期取得でGoogleドライブへ配置します。"
+                        )
+                    else:
+                        st.error(f"保存に失敗しました: {_push_msg}")
+            try:
+                st.caption(
+                    f"月初の自動保存: {st.session_state.get('paid_leave_auto_export_status', '未実行')}"
+                )
+            except Exception:
+                pass
 
         with st.container(border=True):
             st.markdown("#### 管理者側で有給調整を追加")
