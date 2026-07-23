@@ -1393,7 +1393,10 @@ def active_header_comments_for_shift(shift: Optional[MonthlyShift]) -> list[str]
 def prepare_header_comment_session(shift: MonthlyShift) -> None:
     """表示月が変わった時に、シフト本体のコメントを入力欄へ読み込む。"""
     key = shift_session_key(shift.year, shift.month)
-    if st.session_state.get("excel_comment_context_key") == key:
+    if (
+        st.session_state.get("excel_comment_context_key") == key
+        and "comment_1_input" in st.session_state
+    ):
         return
     comments = shift_header_comments(shift)
     st.session_state["excel_comment_1"] = comments[0]
@@ -5996,10 +5999,12 @@ if mode == "📊 経営者ビュー":
             prepare_header_comment_session(shift)
             st.markdown("##### 📝 上部コメント（Excel/PDF出力に反映）")
             col_cm1, col_cm2, col_cm3 = st.columns(3)
+            # 値の受け渡しは key（session_state）だけに一本化する。
+            # value= を併用すると「2つの経路で値が渡された」という
+            # Streamlit の警告が確定版読み込み時に表示されるため。
             with col_cm1:
                 comment1 = st.text_input(
                     "1行目",
-                    value=st.session_state.get("excel_comment_1", ""),
                     placeholder="例: AI 自動生成版です",
                     key="comment_1_input",
                     disabled=lock_info is not None,
@@ -6008,7 +6013,6 @@ if mode == "📊 経営者ビュー":
             with col_cm2:
                 comment2 = st.text_input(
                     "2行目",
-                    value=st.session_state.get("excel_comment_2", ""),
                     placeholder="例: 5月は全体にお休みを増やしています",
                     key="comment_2_input",
                     disabled=lock_info is not None,
@@ -6017,7 +6021,6 @@ if mode == "📊 経営者ビュー":
             with col_cm3:
                 comment3 = st.text_input(
                     "3行目",
-                    value=st.session_state.get("excel_comment_3", ""),
                     placeholder="例: 次回からGoogleフォームに入力予定",
                     key="comment_3_input",
                     disabled=lock_info is not None,
