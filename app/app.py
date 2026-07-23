@@ -5983,7 +5983,7 @@ if mode == "📊 経営者ビュー":
                 st.rerun()
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
-        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力"]
+        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力", "💬 AI相談"]
         if st.session_state.get("manager_shift_view") not in shift_view_options:
             st.session_state["manager_shift_view"] = shift_view_options[0]
         selected_shift_view = st.radio(
