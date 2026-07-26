@@ -497,9 +497,37 @@ def _check_store_capacity(
                 a.employee == YamamotoLogic.EMPLOYEE_NAME and a.store == store
                 for a in day_assignments
             )
+            tanaka_rule = (
+                tanaka_pair_training_rule(shift.year, shift.month)
+                if store == Store.HIGASHIGUCHI
+                else None
+            )
+            tanaka_name = (
+                str(tanaka_rule.get("employee"))
+                if tanaka_rule else "田中"
+            )
+            tanaka_partner = (
+                str(tanaka_rule.get("higashiguchi_partner"))
+                if tanaka_rule else "土井"
+            )
+            tanaka_from_day = (
+                int(tanaka_rule.get("higashiguchi_from_day", 1))
+                if tanaka_rule else 1
+            )
+            tanaka_east_ok = (
+                tanaka_rule is not None
+                and day >= tanaka_from_day
+                and tanaka_name in all_store_workers
+                and tanaka_partner in all_store_workers
+                and total == 2
+                and eco_count == 1
+            )
             staffing_limit = STORE_STAFFING_LIMITS.get(store)
             if staffing_limit is not None:
-                if staffing_total > staffing_limit.max_total:
+                if (
+                    staffing_total > staffing_limit.max_total
+                    and not tanaka_east_ok
+                ):
                     akabane_five_person_exception = (
                         store == Store.AKABANE
                         and staffing_total == staffing_limit.max_total + 1
@@ -533,36 +561,14 @@ def _check_store_capacity(
             # 赤羽東口店はエコ1名のみ。
             # 例外は2026年8月の田中研修日（20日以降・土井＋田中の2名）だけ。
             if store == Store.HIGASHIGUCHI:
-                _tanaka_rule = tanaka_pair_training_rule(
-                    shift.year, shift.month,
-                )
-                _tanaka_name = (
-                    str(_tanaka_rule.get("employee"))
-                    if _tanaka_rule else "田中"
-                )
-                _tanaka_partner = (
-                    str(_tanaka_rule.get("higashiguchi_partner"))
-                    if _tanaka_rule else "土井"
-                )
-                _t_from = int(
-                    _tanaka_rule.get("higashiguchi_from_day", 1)
-                ) if _tanaka_rule else 1
-                _tanaka_east_ok = (
-                    _tanaka_rule is not None
-                    and day >= _t_from
-                    and _tanaka_name in all_store_workers
-                    and _tanaka_partner in all_store_workers
-                    and total == 2
-                    and eco_count == 1
-                )
                 unexpected_workers = [
                     name for name in all_store_workers
                     if name != "顧問"
                     and name not in HIGASHIGUCHI_ALLOWED_STAFF
-                    and not (name == _tanaka_name and _tanaka_east_ok)
+                    and not (name == tanaka_name and tanaka_east_ok)
                 ]
                 if (
-                    not _tanaka_east_ok
+                    not tanaka_east_ok
                     and (eco_count != 1 or ticket_count != 0 or total != 1)
                 ):
                     result.issues.append(Issue(

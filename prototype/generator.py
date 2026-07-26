@@ -53,6 +53,7 @@ from .rules import (
     is_omiya_two_person_allowed_month,
     tanaka_pair_training_rule,
     monthly_employee_store_override,
+    yamamoto_monthly_max_days,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -152,6 +153,13 @@ MONTHLY_RULE_PENALTY = 2200
 # 主担当なし・通常対応可が複数あるスタッフは、同じ店舗に偏りすぎないよう
 # 通常対応可店舗間の配属回数差を避ける。
 BALANCED_NORMAL_STORE_DIFF_PENALTY = 160
+
+# 月別設定で「応援・巡回先から外す」とした店舗は、絶対禁止にはせず、
+# 山本さんの不足補助より先に通常配置されない程度の回避対象にする。
+# 赤羽2名体制のコスト60より少し強く、大宮2名体制のコスト100より弱い。
+REMOVED_SUPPORT_STORE_ASSIGNMENT_PENALTY = 80
+OMIYA_SHORTAGE_PENALTY = 100
+AKABANE_SHORTAGE_PENALTY = 60
 
 # 南さんのような「出勤希望日のみ稼働」のパートは年間目標日数を持たないため、
 # 放っておくと全体人数を削る最適化で全休になりやすい。過去実績に合わせ、
@@ -826,6 +834,25 @@ def generate_shift(
             model.Add(eco_at_store >= store_cap.eco_min)
             model.Add(total_at_store >= store_cap.eco_min + store_cap.ticket_min)
 
+    # 山本さんは通常スタッフを組んだ後、赤羽が正規2名の日だけ補助投入する。
+    # 自動投入数も手動調整後と同じ月上限内に収める。ただし通常スタッフの
+    # 月間目標や事前供給人数には含めない。
+    if yamamoto is not None:
+        yamamoto_auto_days = [
+            akabane_short[d]
+            for d in days
+            if (
+                operation_modes.get(d, OperationMode.NORMAL)
+                == OperationMode.NORMAL
+                and d not in yamamoto_off_days
+            )
+        ]
+        if yamamoto_auto_days:
+            model.Add(
+                sum(yamamoto_auto_days)
+                <= int(yamamoto_monthly_max_days(month))
+            )
+
     # ============================================================
     # 制約 7: 大宮駅前店アンカー（春山 or 下地が必ずいる）
     # ============================================================
@@ -1030,6 +1057,7 @@ def generate_shift(
     monthly_rule_penalty_terms = []
     historical_actual_terms = []
     monthly_avoid_same_off_terms = []
+    removed_support_assignment_terms = []
 
     # 提出フォームの「○」や自由記載の「出勤希望」「○日は赤羽希望」などはソフト制約。
     # まず出勤できるなら出勤、出勤になった場合は希望店舗へ、という2段階で優先する。
@@ -1205,6 +1233,8 @@ def generate_shift(
             elif s in removed_support_stores:
                 # 絶対配置不可ではない。自動生成の通常候補から外すだけ。
                 weight = 0
+                for d in days:
+                    removed_support_assignment_terms.append(x[e.name][d][s])
             else:
                 weight = AFFINITY_WEIGHT[aff]
             if weight > 0:
@@ -1392,6 +1422,14 @@ def generate_shift(
         # 過去実績では「不可」扱いの店舗にも例外配置があるため、
         # すり合わせ時だけ禁止ではなく強い回避ペナルティにする。
         obj = obj - 260 * sum(affinity_none_assignments)
+    if removed_support_assignment_terms:
+        # 月限定の「応援・巡回先から外す」は、緊急配置を残しつつ
+        # 山本さんの不足補助より通常配置が優先されないようにする。
+        obj = (
+            obj
+            - REMOVED_SUPPORT_STORE_ASSIGNMENT_PENALTY
+            * sum(removed_support_assignment_terms)
+        )
     if "顧問" in main_employee_names:
         # 顧問は本当に足りない時だけの最終手段。通常スタッフで解がある限り使わない。
         advisor_assignments = [x["顧問"][d][s] for d in days for s in main_stores]
@@ -1404,10 +1442,10 @@ def generate_shift(
         )
         obj = obj - 50000 * sum(advisor_assignments)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
-    obj = obj - 100 * sum(omiya_short.values())
+    obj = obj - OMIYA_SHORTAGE_PENALTY * sum(omiya_short.values())
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
     # 赤羽3人目に回り、他店の最低・標準は削られない。
-    obj = obj - 60 * sum(akabane_short.values())
+    obj = obj - AKABANE_SHORTAGE_PENALTY * sum(akabane_short.values())
     if higashi_unexpected_assignments:
         # 東口は土井さんまたは指定代替4名を強く優先する。
         # ただし過去月の実態確認前なので、解なしにせず大きめのペナルティに留める。
