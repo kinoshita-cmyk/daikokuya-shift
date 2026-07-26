@@ -1443,19 +1443,25 @@ def generate_shift(
                 if get_employee(a.employee).skill in (Skill.TICKET, Skill.ECO_SUPPORT)
             )
             if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
-                yamamoto_candidates.append(d)
+                yamamoto_candidates.append((d, akabane_eco + akabane_ticket))
 
-        # 2周目: 候補が上限を超える場合は月全体へ均等に分散して選ぶ。
-        # （旧実装は先着順で、月前半に15回を使い切り後半が手薄になる
-        #   問題があった。ご高齢のため連続・偏り配置も避ける）
+        # 2周目: 候補が上限を超える場合の選び方
+        #   優先1: 山本さんがいないと赤羽が2人以下のままになる日を必ずカバー
+        #   優先2: 残り枠は月全体へ均等に分散（ご高齢のため連続・偏り回避）
+        # （初版は先着順で前半に使い切る問題、第2版は均等分散のみで
+        #   手薄な日を取りこぼす問題があった）
         if len(yamamoto_candidates) <= yamamoto_max:
-            yamamoto_selected = list(yamamoto_candidates)
+            yamamoto_selected = [d for d, _t in yamamoto_candidates]
         else:
-            stride = len(yamamoto_candidates) / float(yamamoto_max)
-            yamamoto_selected = [
-                yamamoto_candidates[int(i * stride)]
-                for i in range(yamamoto_max)
-            ]
+            must_days = [d for d, t in yamamoto_candidates if t <= 2]
+            must_days = must_days[:yamamoto_max]
+            others = [d for d, t in yamamoto_candidates if d not in must_days]
+            rest_slots = yamamoto_max - len(must_days)
+            extra_days = []
+            if rest_slots > 0 and others:
+                stride = len(others) / float(rest_slots)
+                extra_days = [others[int(i * stride)] for i in range(rest_slots)]
+            yamamoto_selected = sorted(set(must_days + extra_days))
         for d in yamamoto_selected:
             shift.assignments.append(ShiftAssignment(
                 employee="山本", day=d, store=Store.AKABANE,
