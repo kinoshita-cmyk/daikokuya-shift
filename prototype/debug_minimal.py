@@ -79,22 +79,18 @@ def test_with_constraints(stage: str, constraint_flags: dict) -> bool:
                     continue
                 eco_count = sum(x[e.name][d][s] for e in eco_employees)
                 ticket_count = sum(x[e.name][d][s] for e in ticket_employees)
+                total_count = eco_count + ticket_count
                 if s == Store.OMIYA and is_normal:
-                    model.Add(eco_count + 2 * omiya_short[d] >= 2)
                     model.Add(eco_count >= 1)
-                    model.Add(eco_count <= 2)
-                    model.Add(ticket_count >= 1)
+                    model.Add(total_count >= 2)
+                    model.Add(total_count <= 2).OnlyEnforceIf(omiya_short[d])
+                    model.Add(total_count >= 3).OnlyEnforceIf(omiya_short[d].Not())
                 elif s == Store.SUZURAN and is_normal:
                     model.Add(eco_count >= 1)
-                    model.Add(eco_count <= 2)
-                    model.Add(ticket_count >= 1)
-                    model.Add(ticket_count <= 2)
-                    model.Add(eco_count + ticket_count >= 3)
+                    model.Add(total_count >= 3)
                 else:
                     model.Add(eco_count >= cap.eco_min)
-                    model.Add(ticket_count >= cap.ticket_min)
-                    if s != Store.HIGASHIGUCHI:
-                        model.Add(eco_count <= cap.eco_max)
+                    model.Add(total_count >= cap.eco_min + cap.ticket_min)
 
     # 6. Omiya anchor
     if constraint_flags.get("omiya_anchor", False):

@@ -28,7 +28,9 @@ from .paths import CONFIG_DIR
 class StoreCapacity:
     """店舗の1日の必要人数（モードごとに変動）"""
     eco_min: int            # エコ要員の最小数
-    ticket_min: int         # チケット要員の最小数
+    # エコ最低人数を除いた残りの必要人数。エコ担当もチケット対応できるため、
+    # チケット専任者だけでこの人数を満たす必要はない。
+    ticket_min: int
     eco_max: int = 1        # エコ要員の最大数（通常1、一部大型店のみ2）
     closed_dow: tuple[int, ...] = ()  # 休店曜日（0=月）。tuple()=休店なし
 
@@ -65,11 +67,12 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
         closed_dow=(0,),     # 月曜は休店
     ),
     Store.OMIYA: StoreCapacity(
-        eco_min=2,
-        ticket_min=1,
-        eco_max=2,
-        # エコ担当はチケット対応も可。生成ではエコ対応1名以上+合計3名を基本にする。
-        # 例外：人員不足時は2名体制可（→人数少△）
+        eco_min=1,
+        ticket_min=2,
+        eco_max=3,
+        # 通常はエコ対応1名以上+合計3名。ticket_min は残りの必要人数を表し、
+        # エコ担当もチケット対応できるためチケット専任者2名を要求しない。
+        # 需給調整時はエコ対応1名以上+合計2名を許容する（→人数少△）。
     ),
     Store.NISHIGUCHI: StoreCapacity(
         eco_min=1,
@@ -376,11 +379,11 @@ MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 # 生成・検証・画面表示が同じ設定を参照します。
 
 def is_omiya_two_person_allowed_month(year: int, month: int) -> bool:
-    """大宮駅前のエコ1名・チケット1名の合計2名体制を許容するか。
+    """大宮駅前のエコ対応1名以上・合計2名体制を許容するか。
 
     現在人員では毎月一定数起こり得る需給調整なので全月で許容する。
-    通常はエコ2名・チケット1名の合計3名体制を優先し、その強さは
-    生成側のペナルティで管理する。
+    通常はエコ対応1名以上・合計3名体制を優先する。エコ担当は
+    チケット対応もできるため、エコ・チケット専任の内訳は固定しない。
     """
     return True
 
@@ -462,8 +465,8 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
     notes = []
     if is_omiya_two_person_allowed_month(year, month):
         notes.append(
-            "固定ルール: 大宮駅前はエコ1名＋チケット1名の合計2名体制を許容"
-            "（通常はエコ2名＋チケット1名の合計3名体制を優先）"
+            "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"
+            "（通常はエコ対応1名以上・合計3名体制を優先）"
         )
     tanaka_rule = tanaka_pair_training_rule(year, month)
     if tanaka_rule:
@@ -1106,7 +1109,10 @@ if __name__ == "__main__":
     print("=== 通常モードの店舗別必要人数 ===")
     for store, cap in NORMAL_CAPACITY.items():
         closed = f"  休店曜日: {cap.closed_dow}" if cap.closed_dow else ""
-        print(f"  {store.display_name}: エコ{cap.eco_min}〜{cap.eco_max} + チケット{cap.ticket_min}{closed}")
+        print(
+            f"  {store.display_name}: エコ最低{cap.eco_min}名"
+            f" + 合計最低{cap.eco_min + cap.ticket_min}名{closed}"
+        )
 
     total_min = sum(c.eco_min + c.ticket_min for c in NORMAL_CAPACITY.values())
     print(f"\n  合計最小人数: {total_min}名/日（仕様書通り11名）")

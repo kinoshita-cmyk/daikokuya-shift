@@ -6,7 +6,7 @@
 
 1. 全店舗の必要延べ人区 vs 出勤可能延べ人区（余裕の把握）
 2. エコの必要延べ人区 vs エコ人員の延べ人区
-   → 大宮駅前を「エコ2人」にできる日数の上限
+   → 全店舗で最低1名ずつのエコ対応者を確保できるか
 3. 東口・西口の必要延べ人区 vs 専任者（土井・楯）の延べ人区
    → 代替要員（春山・長尾・今津）で補う必要のある人区
 
@@ -79,7 +79,7 @@ def compute_monthly_capacity_balance(
     mode_reduction = 0        # 省人員・休業モード適用時に減る人区
     demand_eco_baseline = 0   # エコ最低ライン（大宮を1人として数える）
     east_west_demand = 0      # 東口＋西口の必要延べ人区
-    omiya_normal_open_days = 0  # 大宮を2人体制に格上げできる候補日数
+    omiya_normal_open_days = 0  # 大宮の通常営業日数
     higashi_closed_days = 0
     reduced_days = 0
     closed_days = 0
@@ -118,7 +118,7 @@ def compute_monthly_capacity_balance(
             # 東口・西口
             if store in (Store.HIGASHIGUCHI, Store.NISHIGUCHI):
                 east_west_demand += 1
-            # 大宮2人体制の格上げ候補日（通常モードで営業している日）
+            # 大宮の通常営業日
             if store == Store.OMIYA and mode == OperationMode.NORMAL:
                 omiya_normal_open_days += 1
 
@@ -192,7 +192,6 @@ def compute_monthly_capacity_balance(
     # ---- 判定 ---------------------------------------------------
     slack_total = supply_total - demand_total
     eco_surplus = eco_supply - demand_eco_baseline
-    omiya_two_eco_days = max(0, min(int(eco_surplus), int(omiya_normal_open_days)))
     east_west_gap = east_west_demand - east_west_dedicated_supply
 
     return {
@@ -212,7 +211,6 @@ def compute_monthly_capacity_balance(
         "eco_supply": eco_supply,
         "eco_surplus": eco_surplus,
         "omiya_normal_open_days": omiya_normal_open_days,
-        "omiya_two_eco_days": omiya_two_eco_days,
         # 3. 東西口
         "east_west_demand": east_west_demand,
         "east_west_dedicated_supply": east_west_dedicated_supply,
@@ -249,13 +247,21 @@ def balance_summary_lines(result: dict) -> list:
         )
     lines.append(line1)
 
+    eco_slack = int(result["eco_surplus"])
+    if eco_slack < 0:
+        eco_verdict = f"⚠️ **{-eco_slack}人区の不足**"
+    elif eco_slack <= 3:
+        eco_verdict = f"🟡 余裕 **{eco_slack}人区**"
+    else:
+        eco_verdict = f"🟢 余裕 **{eco_slack}人区**"
     lines.append(
         f"**2. エコの需給**: 最低ライン {result['demand_eco_baseline']}人区"
-        f"（大宮エコ1人換算） ／ エコ供給 {result['eco_supply']}人区 → "
-        f"大宮駅前を**エコ2人**にできる日は最大 "
-        f"**{result['omiya_two_eco_days']}日** "
-        f"（通常営業 {result['omiya_normal_open_days']}日中。"
-        f"残りの日は「人数少（大宮）」の警告が出るのが正常）"
+        f"（各営業店舗にエコ対応者1人） ／ "
+        f"エコ供給 {result['eco_supply']}人区 → {eco_verdict}。"
+        "エコ担当はチケット対応も可能です。"
+        "大宮駅前の通常体制はエコ対応1名以上・合計3名であり、"
+        "2名体制の日数はこのエコ人数だけでは決めず、"
+        "本人希望・個人別店舗適性・全店舗の総人数を含めてソルバーが判定します。"
     )
 
     gap = int(result["east_west_gap"])

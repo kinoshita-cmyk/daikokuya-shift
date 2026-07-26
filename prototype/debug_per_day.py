@@ -66,24 +66,21 @@ def check_day(day: int) -> tuple[str, list[str]]:
             continue
         eco_count = sum(x[e.name][s] for e in eco_employees)
         ticket_count = sum(x[e.name][s] for e in ticket_employees)
+        total_count = eco_count + ticket_count
 
         if s == Store.OMIYA and (1 <= day <= 5) is False:
-            # NORMAL mode 大宮: eco 2 OR (eco 1 with omiya_short)
-            model.Add(eco_count + 2 * omiya_short >= 2)
+            # NORMAL mode 大宮: エコ対応1名以上・合計3名を優先。
+            # 合計2名は需給調整体制として許容する。
             model.Add(eco_count >= 1)
-            model.Add(eco_count <= 2)
-            model.Add(ticket_count >= 1)
+            model.Add(total_count >= 2)
+            model.Add(total_count <= 2).OnlyEnforceIf(omiya_short)
+            model.Add(total_count >= 3).OnlyEnforceIf(omiya_short.Not())
         elif s == Store.SUZURAN and (1 <= day <= 5) is False:
             model.Add(eco_count >= 1)
-            model.Add(eco_count <= 2)
-            model.Add(ticket_count >= 1)
-            model.Add(ticket_count <= 2)
-            model.Add(eco_count + ticket_count >= 3)
+            model.Add(total_count >= 3)
         else:
             model.Add(eco_count >= cap.eco_min)
-            model.Add(ticket_count >= cap.ticket_min)
-            if s != Store.HIGASHIGUCHI:
-                model.Add(eco_count <= cap.eco_max)
+            model.Add(total_count >= cap.eco_min + cap.ticket_min)
 
     # Omiya anchor
     anchor = sum(x[name][Store.OMIYA] for name in OMIYA_ANCHOR_STAFF

@@ -622,15 +622,15 @@ def _check_store_capacity(
                     ))
                 continue
 
-            # 大宮の基本はエコ2名+チケット1名。需給調整時のみ
-            # エコ1名+チケット1名の合計2名を許容する（警告のみ）。
+            # 大宮の通常体制はエコ対応1名以上・合計3名以上。
+            # エコ担当はチケット対応もできるため、専任者の内訳は固定しない。
+            # 需給調整時はエコ対応1名以上・合計2名を許容する（警告のみ）。
             if store == Store.OMIYA and mode == OperationMode.NORMAL:
-                if eco_count >= 2 and ticket_count >= 1 and total >= 3:
+                if eco_count >= 1 and total >= 3:
                     continue
                 if (
                     allow_omiya_short
-                    and eco_count == 1
-                    and ticket_count == 1
+                    and eco_count >= 1
                     and total == 2
                 ):
                     result.issues.append(Issue(
@@ -638,24 +638,37 @@ def _check_store_capacity(
                         category="人数少（大宮）",
                         day=day, employee=None,
                         message=(
-                            f"大宮駅前店 エコ1名＋チケット1名の2名体制"
+                            f"大宮駅前店 エコ対応{eco_count}名・合計2名体制"
                             f"（需給調整）"
                             f"／配属: {worker_str}"
-                            f"／通常はエコ2名＋チケット1名の3名体制を優先"
+                            f"／通常はエコ対応1名以上・合計3名体制を優先"
                         ),
                     ))
                     continue
-                if ticket_count < 1:
+                if eco_count < 1:
                     result.issues.append(Issue(
                         severity="ERROR",
                         category="店舗人数",
                         day=day, employee=None,
                         message=(
-                            f"大宮駅前店 チケット要員不足"
-                            f"（必要1名、実績{ticket_count}名）"
+                            f"大宮駅前店 エコ要員不足"
+                            f"（必要1名、実績{eco_count}名）"
                             f"／配属: {worker_str}"
                         ),
                     ))
+                required_total = 2 if allow_omiya_short else 3
+                if total < required_total:
+                    result.issues.append(Issue(
+                        severity="ERROR",
+                        category="店舗人数",
+                        day=day, employee=None,
+                        message=(
+                            f"大宮駅前店 人員不足"
+                            f"（必要{required_total}名、実績{total}名）"
+                            f"／配属: {worker_str}"
+                        ),
+                    ))
+                continue
 
             # すずらん: エコ対応者1名以上 + 合計3名以上。
             # エコ担当はチケット対応もできるため、チケット専任2名に固定しない。
