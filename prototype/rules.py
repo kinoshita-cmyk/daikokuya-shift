@@ -140,11 +140,10 @@ STANDARD_265_MONTHLY_WORK_TARGETS: dict[int, int] = dict(
     zip(MONTHLY_TARGET_MONTH_ORDER, (23, 22, 22, 23, 22, 22, 21, 21, 23, 22, 22, 22))
 )
 MONTHLY_WORK_TARGETS: dict[str, dict[int, int]] = {
-    name: dict(STANDARD_265_MONTHLY_WORK_TARGETS)
-    for name in (
-        "今津", "鈴木", "楯", "牧野", "春山", "下地", "長尾", "土井",
-        "板倉", "田中", "岩野", "大類", "黒澤", "野澤",
-    )
+    # 2026年7月に年間基準265日へ統一。通常の社員は
+    # STANDARD_265_MONTHLY_WORK_TARGETS（265日の月別配分）が自動適用される。
+    # ここには「標準と異なる人」だけを書く（現在は該当者なし）。
+    # 南=出勤希望のみ勤務 / 大塚=自由記載の月別指定 / 山本=補助要員。
 }
 EMPLOYEE_TARGET_NAME_ALIASES: dict[str, str] = {
     "今津悠貴": "今津",
