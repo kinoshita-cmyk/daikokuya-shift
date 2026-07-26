@@ -389,6 +389,30 @@ def yamamoto_monthly_max_days(month: int) -> int:
     """山本さんの月間最大出勤日数（1・2月=14日、3〜12月=15日）。"""
     return 14 if int(month) in (1, 2) else 15
 
+
+def active_code_managed_monthly_rules(year: int, month: int) -> list:
+    """コード内で管理している月限定ルールの説明文を返す（画面表示用）。
+
+    画面から変更できない特別ルールも「効いていることは必ず見える」ように、
+    経営者ビューと生成メッセージに表示する。
+    """
+    ym = (int(year), int(month))
+    notes = []
+    if is_tanaka_pair_training_month(year, month):
+        notes.append(
+            "田中さんの研修ペア勤務: "
+            f"西口(楯さんと同日)×{TANAKA_NISHIGUCHI_PAIR_COUNT}回・"
+            f"赤羽(楯さん＋鈴木or板倉さんと同日)×{TANAKA_AKABANE_TRIO_COUNT}回・"
+            f"東口(土井さんと同日・{TANAKA_HIGASHI_FROM_DAY}日以降)"
+            f"×{TANAKA_HIGASHI_PAIR_COUNT}回。"
+            "この組み合わせ以外の日は東口・西口に入らない"
+        )
+    for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(ym, ()):
+        notes.append(f"{f_name}さんは{f_store.display_name}に配置しない")
+    for (w_name, w_store), _w in MONTHLY_STORE_EXTRA_WEIGHTS.get(ym, {}).items():
+        notes.append(f"{w_name}さんは{w_store.display_name}を主担当扱いで優先配置")
+    return notes
+
 # 月内の最低巡回条件。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {}
