@@ -45,6 +45,10 @@ from .rules import (
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
     WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
+    is_omiya_two_person_allowed_month,
+    tanaka_pair_training_rule,
+    monthly_employee_store_override,
+    yamamoto_monthly_max_days,
 )
 
 
@@ -229,7 +233,7 @@ def validate(
     employee_max_consecutive_off: Optional[dict[str, int]] = None,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     max_consec: Optional[int] = None,
-    allow_omiya_short: bool = True,
+    allow_omiya_short: Optional[bool] = None,
     monthly_store_count_rules: Optional[list[dict]] = None,
     required_assignments: Optional[list[dict]] = None,
     preferred_work_requests: Optional[list] = None,
@@ -262,6 +266,10 @@ def validate(
     required_assignments = required_assignments or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
+    if allow_omiya_short is None:
+        allow_omiya_short = is_omiya_two_person_allowed_month(
+            shift.year, shift.month,
+        )
 
     # 1. 店舗別の必要人数チェック
     _check_store_capacity(shift, result, days_in_month, allow_omiya_short=allow_omiya_short)
@@ -367,7 +375,10 @@ def validate(
         exact_holiday_days,
     )
 
-    # 24. 統計情報の集計
+    # 24. 山本さんの手動調整後の月間上限
+    _check_yamamoto_monthly_max(shift, result)
+
+    # 25. 統計情報の集計
     _compute_stats(shift, result, days_in_month)
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
@@ -522,15 +533,25 @@ def _check_store_capacity(
             # 赤羽東口店はエコ1名のみ。
             # 例外は2026年8月の田中研修日（20日以降・土井＋田中の2名）だけ。
             if store == Store.HIGASHIGUCHI:
-                from .rules import (
-                    TANAKA_HIGASHI_FROM_DAY as _t_from,
-                    is_tanaka_pair_training_month as _t_month,
+                _tanaka_rule = tanaka_pair_training_rule(
+                    shift.year, shift.month,
                 )
+                _tanaka_name = (
+                    str(_tanaka_rule.get("employee"))
+                    if _tanaka_rule else "田中"
+                )
+                _tanaka_partner = (
+                    str(_tanaka_rule.get("higashiguchi_partner"))
+                    if _tanaka_rule else "土井"
+                )
+                _t_from = int(
+                    _tanaka_rule.get("higashiguchi_from_day", 1)
+                ) if _tanaka_rule else 1
                 _tanaka_east_ok = (
-                    _t_month(shift.year, shift.month)
+                    _tanaka_rule is not None
                     and day >= _t_from
-                    and "田中" in all_store_workers
-                    and "土井" in all_store_workers
+                    and _tanaka_name in all_store_workers
+                    and _tanaka_partner in all_store_workers
                     and total == 2
                     and eco_count == 1
                 )
@@ -538,7 +559,7 @@ def _check_store_capacity(
                     name for name in all_store_workers
                     if name != "顧問"
                     and name not in HIGASHIGUCHI_ALLOWED_STAFF
-                    and not (name == "田中" and _tanaka_east_ok)
+                    and not (name == _tanaka_name and _tanaka_east_ok)
                 ]
                 if (
                     not _tanaka_east_ok
@@ -984,6 +1005,11 @@ def _check_absolute_forbidden_assignments(
         "牧野",
         Store.NISHIGUCHI,
     )
+    tanaka_training = tanaka_pair_training_rule(shift.year, shift.month)
+    tanaka_employee = (
+        str(tanaka_training.get("employee"))
+        if tanaka_training else ""
+    )
     for day in range(1, days + 1):
         for assignment in shift.get_day_assignments(day):
             if assignment.store == Store.OFF:
@@ -1010,6 +1036,17 @@ def _check_absolute_forbidden_assignments(
                 and makino_nishi_training_enabled
             )
             if is_makino_nishi_exception:
+                continue
+            is_tanaka_training_exception = (
+                bool(tanaka_training)
+                and emp.name == tanaka_employee
+                and assignment.store in (
+                    Store.HIGASHIGUCHI,
+                    Store.NISHIGUCHI,
+                )
+            )
+            if is_tanaka_training_exception:
+                # 日付・相手・回数は月限定研修ルール側で厳密に検証する。
                 continue
 
             if emp.affinities.get(assignment.store) == Affinity.NONE:
@@ -1268,80 +1305,82 @@ def _check_month_edge_assignments(
 def _check_monthly_special_rules(
     shift: MonthlyShift, result: ValidationResult, days: int,
 ) -> None:
-    """月限定の特別条件（配置禁止・田中さん研修ペア回数）を検証する。"""
-    from .rules import (
-        MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS,
-        TANAKA_AKABANE_THIRD_CANDIDATES,
-        TANAKA_AKABANE_TRIO_COUNT,
-        TANAKA_HIGASHI_FROM_DAY,
-        TANAKA_HIGASHI_PAIR_COUNT,
-        TANAKA_NISHIGUCHI_PAIR_COUNT,
-        is_tanaka_pair_training_month,
-    )
-
-    # 月限定の配置禁止（例: 2026年8月の大類さんは赤羽に入らない）
-    for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(
-        (int(shift.year), int(shift.month)), (),
-    ):
-        for day in range(1, days + 1):
-            a = shift.get_assignment(f_name, day)
-            if a is not None and a.store == f_store:
-                result.issues.append(Issue(
-                    severity="ERROR",
-                    category="月限定配置禁止",
-                    day=day, employee=f_name,
-                    message=(
-                        f"{f_name}は今月{f_store.display_name}に"
-                        "配置しないルールです。"
-                    ),
-                ))
-
-    # 田中さんの研修ペア回数（2026年8月限定）
-    if not is_tanaka_pair_training_month(shift.year, shift.month):
+    """月限定の田中さん研修ペア回数を検証する。"""
+    rule = tanaka_pair_training_rule(shift.year, shift.month)
+    if not rule:
         return
+    employee = str(rule["employee"])
+    nishi_partner = str(rule["nishiguchi_partner"])
+    akabane_partner = str(rule["akabane_partner"])
+    higashi_partner = str(rule["higashiguchi_partner"])
+    third_candidates = tuple(rule["akabane_third_candidates"])
+    nishi_count = int(rule["nishiguchi_count"])
+    akabane_count = int(rule["akabane_count"])
+    higashi_count = int(rule["higashiguchi_count"])
+    higashi_from_day = int(rule["higashiguchi_from_day"])
 
     def _at(name: str, day: int, store: Store) -> bool:
         a = shift.get_assignment(name, day)
         return a is not None and a.store == store
 
-    west_days = [d for d in range(1, days + 1) if _at("田中", d, Store.NISHIGUCHI)]
-    east_days = [d for d in range(1, days + 1) if _at("田中", d, Store.HIGASHIGUCHI)]
+    west_days = [
+        d for d in range(1, days + 1)
+        if _at(employee, d, Store.NISHIGUCHI)
+    ]
+    east_days = [
+        d for d in range(1, days + 1)
+        if _at(employee, d, Store.HIGASHIGUCHI)
+    ]
     trio_days = [
         d for d in range(1, days + 1)
-        if _at("楯", d, Store.AKABANE) and _at("田中", d, Store.AKABANE)
-        and any(_at(c, d, Store.AKABANE) for c in TANAKA_AKABANE_THIRD_CANDIDATES)
+        if _at(akabane_partner, d, Store.AKABANE)
+        and _at(employee, d, Store.AKABANE)
+        and any(_at(c, d, Store.AKABANE) for c in third_candidates)
     ]
     checks = [
-        (len(west_days), TANAKA_NISHIGUCHI_PAIR_COUNT,
-         f"西口の楯・田中ペア勤務は{TANAKA_NISHIGUCHI_PAIR_COUNT}回の指定"),
-        (len(east_days), TANAKA_HIGASHI_PAIR_COUNT,
-         f"東口の土井・田中ペア勤務は{TANAKA_HIGASHI_PAIR_COUNT}回の指定"),
-        (len(trio_days), TANAKA_AKABANE_TRIO_COUNT,
-         f"赤羽の楯・田中・(鈴木or板倉)勤務は{TANAKA_AKABANE_TRIO_COUNT}回の指定"),
+        (
+            len(west_days),
+            nishi_count,
+            f"西口の{nishi_partner}・{employee}ペア勤務は{nishi_count}回の指定",
+        ),
+        (
+            len(east_days),
+            higashi_count,
+            f"東口の{higashi_partner}・{employee}ペア勤務は{higashi_count}回の指定",
+        ),
+        (
+            len(trio_days),
+            akabane_count,
+            f"赤羽の{akabane_partner}・{employee}・"
+            f"({'or'.join(third_candidates)})勤務は{akabane_count}回の指定",
+        ),
     ]
     for actual, expected, label in checks:
         if actual != expected:
             result.issues.append(Issue(
                 severity="ERROR",
                 category="研修ペア回数",
-                day=None, employee="田中",
+                day=None, employee=employee,
                 message=f"{label}ですが、現在{actual}回です。",
             ))
     for d in west_days:
-        if not _at("楯", d, Store.NISHIGUCHI):
+        if not _at(nishi_partner, d, Store.NISHIGUCHI):
             result.issues.append(Issue(
                 severity="ERROR", category="研修ペア",
-                day=d, employee="田中",
-                message="西口勤務は楯さんと同日の指定です。",
+                day=d, employee=employee,
+                message=f"西口勤務は{nishi_partner}さんと同日の指定です。",
             ))
     for d in east_days:
-        if d < TANAKA_HIGASHI_FROM_DAY or not _at("土井", d, Store.HIGASHIGUCHI):
+        if (
+            d < higashi_from_day
+            or not _at(higashi_partner, d, Store.HIGASHIGUCHI)
+        ):
             result.issues.append(Issue(
                 severity="ERROR", category="研修ペア",
-                day=d, employee="田中",
+                day=d, employee=employee,
                 message=(
-                    f"東口勤務は{TANAKA_HIGASHI_FROM_DAY}日以降で"
-                    "土井さんと同日の指定です。"
+                    f"東口勤務は{higashi_from_day}日以降で"
+                    f"{higashi_partner}さんと同日の指定です。"
                 ),
             ))
 
@@ -1429,9 +1468,18 @@ def _check_balanced_normal_store_assignments(
     for emp in _validation_employees():
         if getattr(emp, "home_store", None) is not None:
             continue
+        monthly_override = monthly_employee_store_override(
+            shift.year, shift.month, emp.name,
+        )
+        if monthly_override.get("primary_store") is not None:
+            continue
+        removed_support_stores = set(
+            monthly_override.get("remove_support_stores", ())
+        )
         normal_stores = [
             store for store, affinity in (getattr(emp, "affinities", {}) or {}).items()
             if affinity == Affinity.MEDIUM
+            and store not in removed_support_stores
         ]
         if len(normal_stores) < 2:
             continue
@@ -1777,6 +1825,33 @@ def _check_monthly_workday_balance(
                     f"{note}"
                 ),
             ))
+
+
+def _check_yamamoto_monthly_max(
+    shift: MonthlyShift,
+    result: ValidationResult,
+) -> None:
+    """山本さんの手動調整後の月間出勤上限だけを検証する。"""
+    worked_days = {
+        int(assignment.day)
+        for assignment in shift.assignments
+        if assignment.employee == YamamotoLogic.EMPLOYEE_NAME
+        and assignment.store != Store.OFF
+    }
+    maximum = int(yamamoto_monthly_max_days(shift.month))
+    if len(worked_days) <= maximum:
+        return
+    result.issues.append(Issue(
+        severity="ERROR",
+        category="山本月間出勤上限",
+        day=None,
+        employee=YamamotoLogic.EMPLOYEE_NAME,
+        message=(
+            f"山本は{len(worked_days)}日出勤です。"
+            f"{int(shift.month)}月の手動調整上限は{maximum}日です。"
+            "赤羽の不足日以外に追加した勤務を見直してください。"
+        ),
+    ))
 
 
 def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> None:

@@ -35,14 +35,13 @@ ONLY_ON_REQUEST_TARGET_DAYS = 8
 EAST_WEST_DEDICATED = ("土井", "楯")
 EAST_WEST_SUBSTITUTES = ("春山", "長尾", "今津")
 
-# 補助要員（山本さん）の月間供給人区は rules.yamamoto_monthly_max_days に従う
-# （1・2月=14、3〜12月=15）。総供給にのみ計上し、エコ・東西口には含めない。
-from .rules import yamamoto_monthly_max_days
-
-
 def _auxiliary_monthly_supply(name: str, month: int) -> int:
-    if str(name) == "山本":
-        return int(yamamoto_monthly_max_days(month))
+    """補助要員は事前の供給人数に加えない。
+
+    山本さんは通常スタッフのシフト完成後、赤羽の不足日にだけ自動表示し、
+    追加勤務は管理者が手動で決める。月14日・15日は手動調整後の上限であり、
+    生成前の供給日数や自動配置目標ではない。
+    """
     return 0
 
 
@@ -139,26 +138,10 @@ def compute_monthly_capacity_balance(
         if role_text in ("顧問", "ADVISOR"):
             continue  # 顧問は自動配置しない方針のため供給に数えない
         if getattr(e, "is_auxiliary", False):
-            # 補助要員（山本さん）: 前任者の計算方式に合わせて
-            # 固定の月間供給（半月=15人区）で総供給にのみ計上する
-            aux_base = _auxiliary_monthly_supply(name, int(month))
-            if aux_base <= 0:
-                excluded_names.append(f"{name}（補助要員・供給目安なし）")
-                continue
-            aux_paid = int(submitted_paid_leave.get(name, 0) or 0) + int(
-                admin_paid_leave.get(name, 0) or 0
-            )
-            aux_supply = max(0, aux_base - aux_paid)
-            supply_total += aux_supply
-            formula = f"月上限{aux_base}人区（補助要員の固定計算）"
-            if aux_paid:
-                formula += f" − 有給{aux_paid}日"
-            supply_rows.append({
-                "氏名": name,
-                "供給人区": aux_supply,
-                "計算式": formula + "／エコ・東西口には含めない",
-                "エコ": "",
-            })
+            # 補助要員は生成前の供給人数に含めない。
+            # 山本さんは通常シフト完成後の不足日だけ自動表示し、
+            # 追加勤務は管理者が手動で決める。
+            excluded_names.append(f"{name}（補助要員・事前供給に含めない）")
             continue
 
         paid = int(submitted_paid_leave.get(name, 0) or 0) + int(

@@ -304,6 +304,23 @@ def _load_monthly_exceptions() -> Optional[dict]:
         return None
 
 
+def _store_from_config(value) -> Optional[Store]:
+    """設定JSONの店舗名・記号を Store に変換する。"""
+    if isinstance(value, Store):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return Store[text]
+    except KeyError:
+        pass
+    for store in Store:
+        if text in (store.value, store.display_name):
+            return store
+    return None
+
+
 # 2026年7月は大型連休の重なりが大きい超イレギュラー月。
 # 本人の×休み希望を守るため、この月だけ大宮駅前アンカー条件を外し、
 # 店舗ごとの最低エコ・最低人数で運用可とする。
@@ -352,76 +369,139 @@ MAKINO_SOLO_NG_STORES: tuple[Store, ...] = (
 MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 
 # ============================================================
-# 2026年8月限定: 田中さんの研修ペア勤務ルール（経営指示・コード管理）
+# 月限定の確定ルール
 # ============================================================
-# ・西口: 楯＋田中 の同日勤務をちょうど6回
-# ・赤羽: 楯＋田中＋（鈴木または板倉）の同日勤務をちょうど5回
-# ・東口: 8/20以降に 土井＋田中 の同日勤務を1回
-#   （この研修日だけ東口の2名体制を許容する）
-# ・上記の組み合わせ以外の日は、田中さんは東口・西口に入らない
-# 対象月を変えたい場合はこの月リストを編集する。
-TANAKA_PAIR_TRAINING_MONTHS: tuple = ((2026, 8),)
-TANAKA_NISHIGUCHI_PAIR_COUNT = 6
-TANAKA_AKABANE_TRIO_COUNT = 5
-TANAKA_HIGASHI_PAIR_COUNT = 1
-TANAKA_HIGASHI_FROM_DAY = 20
-TANAKA_AKABANE_THIRD_CANDIDATES: tuple = ("鈴木", "板倉")
-TANAKA_PAIR_REQUIRED_MEMBERS: tuple = ("田中", "楯", "土井", "鈴木", "板倉")
+# ここに置く値は設定ファイルが無い場合のフォールバックです。
+# 実運用では config/monthly_exceptions.json を唯一の編集元とし、
+# 生成・検証・画面表示が同じ設定を参照します。
+
+# 大宮駅前のエコ1名以上・合計2名体制を許可する月。
+# 2026年7月は確定済みシフトの履歴検証用、2026年8月は現行の月例外です。
+_DEFAULT_OMIYA_TWO_PERSON_MONTHS: tuple[tuple[int, int], ...] = (
+    (2026, 7),
+    (2026, 8),
+)
+OMIYA_TWO_PERSON_MONTHS: tuple[tuple[int, int], ...] = (
+    _DEFAULT_OMIYA_TWO_PERSON_MONTHS
+)
+
+
+def is_omiya_two_person_allowed_month(year: int, month: int) -> bool:
+    """大宮駅前の2名体制を月限定で許容するか。"""
+    return (int(year), int(month)) in OMIYA_TWO_PERSON_MONTHS
+
+
+_DEFAULT_TANAKA_PAIR_TRAINING_RULES: dict[tuple[int, int], dict] = {
+    (2026, 8): {
+        "employee": "田中",
+        "nishiguchi_partner": "楯",
+        "nishiguchi_count": 6,
+        "akabane_partner": "楯",
+        "akabane_third_candidates": ("鈴木", "板倉"),
+        "akabane_count": 5,
+        "higashiguchi_partner": "土井",
+        "higashiguchi_from_day": 20,
+        "higashiguchi_count": 1,
+    },
+}
+TANAKA_PAIR_TRAINING_RULES: dict[tuple[int, int], dict] = {
+    ym: dict(rule) for ym, rule in _DEFAULT_TANAKA_PAIR_TRAINING_RULES.items()
+}
+
+
+def tanaka_pair_training_rule(year: int, month: int) -> Optional[dict]:
+    """指定月の田中さん研修ペア条件を返す。対象外の月は None。"""
+    rule = TANAKA_PAIR_TRAINING_RULES.get((int(year), int(month)))
+    return dict(rule) if rule else None
 
 
 def is_tanaka_pair_training_month(year: int, month: int) -> bool:
     """田中さんの研修ペア勤務ルールを適用する月か。"""
-    return (int(year), int(month)) in TANAKA_PAIR_TRAINING_MONTHS
+    return tanaka_pair_training_rule(year, month) is not None
 
 
-# 月限定の配置禁止（現在は該当なし。完全禁止にしたい場合にここへ書く）
-MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS: dict = {}
-
-# 月限定の「なるべく避ける」配置（ソフト。人手不足時は配置を許容する）
-# 例: 2026年8月の大類さんは赤羽への応援を可能な限り避ける
-MONTHLY_STORE_AVOID_PENALTIES: dict = {
-    # 50 = 赤羽2人日のコスト(60)より弱い。「普段は避けるが、
-    # 赤羽が2人になるくらいなら入る」という運用意図を表す。
-    (2026, 8): {("大類", Store.AKABANE): 50},
+# 月限定の従業員別店舗区分。
+# remove_support_stores は絶対配置不可ではなく、通常候補から外す指定です。
+# 人員不足時の緊急配置までは禁止しません。
+_DEFAULT_MONTHLY_EMPLOYEE_STORE_OVERRIDES: dict[tuple[int, int], dict] = {
+    (2026, 8): {
+        "大類": {
+            "primary_store": Store.OMIYA,
+            "remove_support_stores": (Store.AKABANE,),
+        },
+    },
+}
+MONTHLY_EMPLOYEE_STORE_OVERRIDES: dict[tuple[int, int], dict] = {
+    ym: {
+        name: {
+            "primary_store": rule.get("primary_store"),
+            "remove_support_stores": tuple(rule.get("remove_support_stores", ())),
+        }
+        for name, rule in employees.items()
+    }
+    for ym, employees in _DEFAULT_MONTHLY_EMPLOYEE_STORE_OVERRIDES.items()
 }
 
-# 月限定の配置優先の追加スコア（例: 2026年8月の大類さんは大宮駅前を主担当扱い）
-MONTHLY_STORE_EXTRA_WEIGHTS: dict = {
-    (2026, 8): {("大類", Store.OMIYA): 6},
-}
+
+def monthly_employee_store_override(
+    year: int,
+    month: int,
+    employee_name: str,
+) -> dict:
+    """月限定の主担当・応援除外指定を返す。"""
+    rule = MONTHLY_EMPLOYEE_STORE_OVERRIDES.get(
+        (int(year), int(month)), {}
+    ).get(str(employee_name), {})
+    return {
+        "primary_store": rule.get("primary_store"),
+        "remove_support_stores": tuple(rule.get("remove_support_stores", ())),
+    }
 
 
 def yamamoto_monthly_max_days(month: int) -> int:
-    """山本さんの月間最大出勤日数（1・2月=14日、3〜12月=15日）。"""
+    """山本さんの手動調整後の上限（自動生成の目標日数ではない）。"""
     return 14 if int(month) in (1, 2) else 15
 
 
 def active_code_managed_monthly_rules(year: int, month: int) -> list:
-    """コード内で管理している月限定ルールの説明文を返す（画面表示用）。
-
-    画面から変更できない特別ルールも「効いていることは必ず見える」ように、
-    経営者ビューと生成メッセージに表示する。
-    """
-    ym = (int(year), int(month))
+    """設定ファイルで管理している月限定ルールの説明文を返す。"""
     notes = []
-    if is_tanaka_pair_training_month(year, month):
+    if is_omiya_two_person_allowed_month(year, month):
+        notes.append(
+            "大宮駅前は人員不足時に限り、エコ1名以上・合計2名体制を許容"
+        )
+    tanaka_rule = tanaka_pair_training_rule(year, month)
+    if tanaka_rule:
         notes.append(
             "田中さんの研修ペア勤務: "
-            f"西口(楯さんと同日)×{TANAKA_NISHIGUCHI_PAIR_COUNT}回・"
-            f"赤羽(楯さん＋鈴木or板倉さんと同日)×{TANAKA_AKABANE_TRIO_COUNT}回・"
-            f"東口(土井さんと同日・{TANAKA_HIGASHI_FROM_DAY}日以降)"
-            f"×{TANAKA_HIGASHI_PAIR_COUNT}回。"
+            f"西口({tanaka_rule['nishiguchi_partner']}さんと同日)"
+            f"×{tanaka_rule['nishiguchi_count']}回・"
+            f"赤羽({tanaka_rule['akabane_partner']}さん＋"
+            f"{'or'.join(tanaka_rule['akabane_third_candidates'])}さんと同日)"
+            f"×{tanaka_rule['akabane_count']}回・"
+            f"東口({tanaka_rule['higashiguchi_partner']}さんと同日・"
+            f"{tanaka_rule['higashiguchi_from_day']}日以降)"
+            f"×{tanaka_rule['higashiguchi_count']}回。"
             "この組み合わせ以外の日は東口・西口に入らない"
         )
-    for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(ym, ()):
-        notes.append(f"{f_name}さんは{f_store.display_name}に配置しない")
-    for (a_name, a_store), _p in MONTHLY_STORE_AVOID_PENALTIES.get(ym, {}).items():
+    for employee_name, override in MONTHLY_EMPLOYEE_STORE_OVERRIDES.get(
+        (int(year), int(month)), {}
+    ).items():
+        primary_store = override.get("primary_store")
+        removed = tuple(override.get("remove_support_stores", ()))
+        parts = []
+        if primary_store is not None:
+            parts.append(f"{primary_store.display_name}を主担当")
+        if removed:
+            parts.append(
+                "応援・巡回先から"
+                + "・".join(store.display_name for store in removed)
+                + "を外す"
+            )
         notes.append(
-            f"{a_name}さんの{a_store.display_name}配置はなるべく避ける"
-            "（人手不足時は配置あり）"
+            f"{employee_name}さん: {'、'.join(parts)}"
+            "（外した店舗も緊急時の手動配置は禁止しない）"
         )
-    for (w_name, w_store), _w in MONTHLY_STORE_EXTRA_WEIGHTS.get(ym, {}).items():
-        notes.append(f"{w_name}さんは{w_store.display_name}を主担当扱いで優先配置")
     return notes
 
 # 月内の最低巡回条件。
@@ -477,6 +557,9 @@ def reload_monthly_exceptions() -> str:
     global MONTHLY_AVOID_SAME_OFF_RULES
     global MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     global MONTHLY_OPERATION_MODES
+    global OMIYA_TWO_PERSON_MONTHS
+    global TANAKA_PAIR_TRAINING_RULES
+    global MONTHLY_EMPLOYEE_STORE_OVERRIDES
 
     data = _load_monthly_exceptions()
 
@@ -487,6 +570,23 @@ def reload_monthly_exceptions() -> str:
         _DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     )
     MONTHLY_OPERATION_MODES = dict(_DEFAULT_MONTHLY_OPERATION_MODES)
+    OMIYA_TWO_PERSON_MONTHS = _DEFAULT_OMIYA_TWO_PERSON_MONTHS
+    TANAKA_PAIR_TRAINING_RULES = {
+        ym: dict(rule)
+        for ym, rule in _DEFAULT_TANAKA_PAIR_TRAINING_RULES.items()
+    }
+    MONTHLY_EMPLOYEE_STORE_OVERRIDES = {
+        ym: {
+            name: {
+                "primary_store": rule.get("primary_store"),
+                "remove_support_stores": tuple(
+                    rule.get("remove_support_stores", ())
+                ),
+            }
+            for name, rule in employees.items()
+        }
+        for ym, employees in _DEFAULT_MONTHLY_EMPLOYEE_STORE_OVERRIDES.items()
+    }
     if not data:
         return MONTHLY_EXCEPTIONS_STATUS
 
@@ -516,6 +616,94 @@ def reload_monthly_exceptions() -> str:
             )
             if ym is not None
         )
+
+    if "omiya_two_person_months" in data:
+        OMIYA_TWO_PERSON_MONTHS = tuple(
+            ym for ym in (
+                _parse_ym(t) for t in (data["omiya_two_person_months"] or [])
+            )
+            if ym is not None
+        )
+
+    if "tanaka_training" in data:
+        training_parsed: dict = {}
+        for ym_text, raw_rule in dict(data["tanaka_training"] or {}).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(raw_rule, dict):
+                continue
+            third_candidates = tuple(
+                str(name) for name in (
+                    raw_rule.get("akabane_third_candidates") or []
+                )
+                if str(name).strip()
+            )
+            try:
+                parsed_rule = {
+                    "employee": str(raw_rule.get("employee") or "田中"),
+                    "nishiguchi_partner": str(
+                        raw_rule.get("nishiguchi_partner") or "楯"
+                    ),
+                    "nishiguchi_count": int(
+                        raw_rule.get("nishiguchi_count", 0)
+                    ),
+                    "akabane_partner": str(
+                        raw_rule.get("akabane_partner") or "楯"
+                    ),
+                    "akabane_third_candidates": third_candidates,
+                    "akabane_count": int(raw_rule.get("akabane_count", 0)),
+                    "higashiguchi_partner": str(
+                        raw_rule.get("higashiguchi_partner") or "土井"
+                    ),
+                    "higashiguchi_from_day": int(
+                        raw_rule.get("higashiguchi_from_day", 1)
+                    ),
+                    "higashiguchi_count": int(
+                        raw_rule.get("higashiguchi_count", 0)
+                    ),
+                }
+            except (TypeError, ValueError):
+                continue
+            if (
+                parsed_rule["nishiguchi_count"] >= 0
+                and parsed_rule["akabane_count"] >= 0
+                and parsed_rule["higashiguchi_count"] >= 0
+                and parsed_rule["akabane_third_candidates"]
+            ):
+                training_parsed[ym] = parsed_rule
+        TANAKA_PAIR_TRAINING_RULES = training_parsed
+
+    if "employee_store_overrides" in data:
+        overrides_parsed: dict = {}
+        for ym_text, employee_rules in dict(
+            data["employee_store_overrides"] or {}
+        ).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(employee_rules, dict):
+                continue
+            parsed_employees = {}
+            for employee_name, raw_rule in employee_rules.items():
+                if not isinstance(raw_rule, dict):
+                    continue
+                primary_store = _store_from_config(
+                    raw_rule.get("primary_store")
+                )
+                removed_stores = tuple(
+                    store for store in (
+                        _store_from_config(value)
+                        for value in (
+                            raw_rule.get("remove_support_stores") or []
+                        )
+                    )
+                    if store is not None and store != Store.OFF
+                )
+                if primary_store is not None or removed_stores:
+                    parsed_employees[str(employee_name)] = {
+                        "primary_store": primary_store,
+                        "remove_support_stores": removed_stores,
+                    }
+            if parsed_employees:
+                overrides_parsed[ym] = parsed_employees
+        MONTHLY_EMPLOYEE_STORE_OVERRIDES = overrides_parsed
 
     if "avoid_same_off" in data:
         avoid_parsed: dict = {}
@@ -567,6 +755,36 @@ def load_monthly_exceptions_raw() -> dict:
         "omiya_anchor_relaxed_months": [
             f"{y:04d}-{m:02d}" for (y, m) in OMIYA_ANCHOR_RELAXED_MONTHS
         ],
+        "omiya_two_person_months": [
+            f"{y:04d}-{m:02d}" for (y, m) in OMIYA_TWO_PERSON_MONTHS
+        ],
+        "tanaka_training": {
+            f"{y:04d}-{m:02d}": {
+                **dict(rule),
+                "akabane_third_candidates": list(
+                    rule.get("akabane_third_candidates", ())
+                ),
+            }
+            for (y, m), rule in TANAKA_PAIR_TRAINING_RULES.items()
+        },
+        "employee_store_overrides": {
+            f"{y:04d}-{m:02d}": {
+                name: {
+                    "primary_store": (
+                        rule["primary_store"].name
+                        if rule.get("primary_store") is not None
+                        else None
+                    ),
+                    "remove_support_stores": [
+                        store.name
+                        for store in rule.get("remove_support_stores", ())
+                    ],
+                }
+                for name, rule in employee_rules.items()
+            }
+            for (y, m), employee_rules
+            in MONTHLY_EMPLOYEE_STORE_OVERRIDES.items()
+        },
         "carryover_consecutive_allowances": {
             f"{y:04d}-{m:02d}": dict(allow)
             for (y, m), allow in MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES.items()

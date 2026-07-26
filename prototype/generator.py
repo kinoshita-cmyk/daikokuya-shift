@@ -50,12 +50,9 @@ from .rules import (
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
     month_edge_forced_assignments, compute_prev_consecutive_run,
-    MONTHLY_STORE_AVOID_PENALTIES,
-    is_tanaka_pair_training_month, TANAKA_NISHIGUCHI_PAIR_COUNT,
-    TANAKA_AKABANE_TRIO_COUNT, TANAKA_HIGASHI_PAIR_COUNT,
-    TANAKA_HIGASHI_FROM_DAY, TANAKA_AKABANE_THIRD_CANDIDATES,
-    TANAKA_PAIR_REQUIRED_MEMBERS,
-    MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS, MONTHLY_STORE_EXTRA_WEIGHTS,
+    is_omiya_two_person_allowed_month,
+    tanaka_pair_training_rule,
+    monthly_employee_store_override,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -480,10 +477,37 @@ def generate_shift(
             Store.NISHIGUCHI,
         )
     )
-    # 2026年8月限定: 田中さんの研修ペア勤務（西口・赤羽・東口）
+    # 月限定: 田中さんの研修ペア勤務（西口・赤羽・東口）
+    tanaka_training = tanaka_pair_training_rule(year, month)
+    tanaka_employee = (
+        str(tanaka_training.get("employee"))
+        if tanaka_training else "田中"
+    )
+    tanaka_nishi_partner = (
+        str(tanaka_training.get("nishiguchi_partner"))
+        if tanaka_training else "楯"
+    )
+    tanaka_akabane_partner = (
+        str(tanaka_training.get("akabane_partner"))
+        if tanaka_training else "楯"
+    )
+    tanaka_higashi_partner = (
+        str(tanaka_training.get("higashiguchi_partner"))
+        if tanaka_training else "土井"
+    )
+    tanaka_third_candidates = tuple(
+        tanaka_training.get("akabane_third_candidates", ())
+    ) if tanaka_training else ()
+    tanaka_required_members = {
+        tanaka_employee,
+        tanaka_nishi_partner,
+        tanaka_akabane_partner,
+        tanaka_higashi_partner,
+        *tanaka_third_candidates,
+    }
     tanaka_pair_active = (
-        is_tanaka_pair_training_month(year, month)
-        and all(n in main_employee_names for n in TANAKA_PAIR_REQUIRED_MEMBERS)
+        tanaka_training is not None
+        and all(n in main_employee_names for n in tanaka_required_members)
     )
     for e in main_employees:
         for s in main_stores:
@@ -497,7 +521,7 @@ def generate_shift(
             # 2026年8月限定: 田中さんは研修ペアの形でのみ東口・西口に入れる
             tanaka_pair_exception = (
                 tanaka_pair_active
-                and e.name == "田中"
+                and e.name == tanaka_employee
                 and s in (Store.NISHIGUCHI, Store.HIGASHIGUCHI)
             )
             hard_forbidden = (
@@ -530,37 +554,33 @@ def generate_shift(
                     <= x[MAKINO_NISHIGUCHI_TRAINING_PARTNER][d][Store.NISHIGUCHI]
                 )
 
-    # 月限定の配置禁止（例: 2026年8月の大類さんは赤羽への応援配置をしない）
-    for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(
-        (int(year), int(month)), (),
-    ):
-        if f_name in main_employee_names and f_store in main_stores:
-            for d in days:
-                model.Add(x[f_name][d][f_store] == 0)
-
-    # 2026年8月限定: 田中さんの研修ペア勤務（回数はちょうど指定回数）
+    # 月限定: 田中さんの研修ペア勤務（回数はちょうど指定回数）
     # ・西口: 田中が入る日は必ず楯も同店 → その日数がちょうど6日
     # ・東口: 20日以降のみ、田中が入る日は必ず土井も同店 → ちょうど1日
     # ・赤羽: 楯＋田中＋（鈴木or板倉）の3人同時勤務がちょうど5日
     if tanaka_pair_active:
+        tanaka_higashi_from_day = int(
+            tanaka_training["higashiguchi_from_day"]
+        )
         for d in days:
             model.AddImplication(
-                x["田中"][d][Store.NISHIGUCHI], x["楯"][d][Store.NISHIGUCHI],
+                x[tanaka_employee][d][Store.NISHIGUCHI],
+                x[tanaka_nishi_partner][d][Store.NISHIGUCHI],
             )
-            if d < TANAKA_HIGASHI_FROM_DAY:
-                model.Add(x["田中"][d][Store.HIGASHIGUCHI] == 0)
+            if d < tanaka_higashi_from_day:
+                model.Add(x[tanaka_employee][d][Store.HIGASHIGUCHI] == 0)
             else:
                 model.AddImplication(
-                    x["田中"][d][Store.HIGASHIGUCHI],
-                    x["土井"][d][Store.HIGASHIGUCHI],
+                    x[tanaka_employee][d][Store.HIGASHIGUCHI],
+                    x[tanaka_higashi_partner][d][Store.HIGASHIGUCHI],
                 )
         model.Add(
-            sum(x["田中"][d][Store.NISHIGUCHI] for d in days)
-            == TANAKA_NISHIGUCHI_PAIR_COUNT
+            sum(x[tanaka_employee][d][Store.NISHIGUCHI] for d in days)
+            == int(tanaka_training["nishiguchi_count"])
         )
         model.Add(
-            sum(x["田中"][d][Store.HIGASHIGUCHI] for d in days)
-            == TANAKA_HIGASHI_PAIR_COUNT
+            sum(x[tanaka_employee][d][Store.HIGASHIGUCHI] for d in days)
+            == int(tanaka_training["higashiguchi_count"])
         )
         tanaka_trio_days = []
         for d in days:
@@ -569,20 +589,22 @@ def generate_shift(
                 third,
                 [
                     x[c][d][Store.AKABANE]
-                    for c in TANAKA_AKABANE_THIRD_CANDIDATES
+                    for c in tanaka_third_candidates
                 ],
             )
             trio = model.NewBoolVar(f"tanaka_trio_{d}")
             model.AddMinEquality(
                 trio,
                 [
-                    x["楯"][d][Store.AKABANE],
-                    x["田中"][d][Store.AKABANE],
+                    x[tanaka_akabane_partner][d][Store.AKABANE],
+                    x[tanaka_employee][d][Store.AKABANE],
                     third,
                 ],
             )
             tanaka_trio_days.append(trio)
-        model.Add(sum(tanaka_trio_days) == TANAKA_AKABANE_TRIO_COUNT)
+        model.Add(
+            sum(tanaka_trio_days) == int(tanaka_training["akabane_count"])
+        )
 
     # エコメンバーの同店舗同勤務NG。
     # 指定グループ内のメンバー同士は同じ日に同じ店舗へ配置しない。
@@ -656,7 +678,8 @@ def generate_shift(
         if e.skill in (Skill.TICKET, Skill.ECO_SUPPORT)
     ]
 
-    # 大宮の「人数少」状態を表す変数（人員不足時はエコ1+チケット1で可）
+    # 大宮の「人数少」状態を表す変数。
+    # 2名体制を許容する月は monthly_exceptions.json で限定する。
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
     # 赤羽を正規2人のままにする日のコスト。不足のしわ寄せが赤羽だけに
     # 集中して山本さん頼みになるのを防ぐ。大宮の人数少(100)より必ず弱く
@@ -717,7 +740,7 @@ def generate_shift(
             tanaka_east_today = (
                 tanaka_pair_active
                 and s == Store.HIGASHIGUCHI
-                and d >= TANAKA_HIGASHI_FROM_DAY
+                and d >= int(tanaka_training["higashiguchi_from_day"])
             )
             staffing_limit = STORE_STAFFING_LIMITS.get(s)
             if staffing_limit is not None:
@@ -725,7 +748,7 @@ def generate_shift(
                     model.Add(
                         total_at_store
                         <= int(staffing_limit.max_total)
-                        + x["田中"][d][Store.HIGASHIGUCHI]
+                        + x[tanaka_employee][d][Store.HIGASHIGUCHI]
                     )
                 else:
                     model.Add(total_at_store <= int(staffing_limit.max_total))
@@ -744,14 +767,14 @@ def generate_shift(
             # 例外は2026年8月の田中研修日（土井＋田中の2名体制）だけ。
             if s == Store.HIGASHIGUCHI:
                 for e in main_employees:
-                    if e.name == "田中" and tanaka_east_today:
+                    if e.name == tanaka_employee and tanaka_east_today:
                         continue  # 研修日はペア制約側で土井同伴を強制する
                     if e.name != "顧問" and e.name not in HIGASHIGUCHI_ALLOWED_STAFF:
                         higashi_unexpected_assignments.append(x[e.name][d][s])
                         model.Add(x[e.name][d][s] == 0)
                 model.Add(eco_at_store == 1)
                 if tanaka_east_today:
-                    model.Add(ticket_at_store == x["田中"][d][s])
+                    model.Add(ticket_at_store == x[tanaka_employee][d][s])
                 else:
                     model.Add(ticket_at_store == 0)
                 continue
@@ -763,9 +786,15 @@ def generate_shift(
                 model.Add(eco_at_store >= 1)
                 if d in yamamoto_off_days:
                     model.Add(total_at_store >= 3)
+                    model.Add(akabane_short[d] == 0)
                 else:
                     model.Add(total_at_store >= 2)
-                    model.Add(total_at_store + akabane_short[d] >= 3)
+                    model.Add(total_at_store <= 2).OnlyEnforceIf(
+                        akabane_short[d]
+                    )
+                    model.Add(total_at_store >= 3).OnlyEnforceIf(
+                        akabane_short[d].Not()
+                    )
                 continue
 
             # 大宮の特殊ルール:
@@ -773,7 +802,17 @@ def generate_shift(
             # 人数少時: エコ対応者1名以上 + 2名体制も許容（omiya_short=1 でフラグ）
             if s == Store.OMIYA and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)  # 最低1名は必須
-                model.Add(total_at_store + omiya_short[d] >= 3)
+                if is_omiya_two_person_allowed_month(year, month):
+                    model.Add(total_at_store >= 2)
+                    model.Add(total_at_store <= 2).OnlyEnforceIf(
+                        omiya_short[d]
+                    )
+                    model.Add(total_at_store >= 3).OnlyEnforceIf(
+                        omiya_short[d].Not()
+                    )
+                else:
+                    model.Add(total_at_store >= 3)
+                    model.Add(omiya_short[d] == 0)
                 continue
 
             # すずらんの特殊ルール: エコ対応者1名以上 + 合計3名以上
@@ -1152,25 +1191,27 @@ def generate_shift(
     }
     balanced_normal_store_diff_terms = []
     for e in main_employees:
+        monthly_store_override = monthly_employee_store_override(
+            year, month, e.name,
+        )
+        monthly_primary_store = monthly_store_override.get("primary_store")
+        removed_support_stores = set(
+            monthly_store_override.get("remove_support_stores", ())
+        )
         for s in main_stores:
             aff = e.affinities.get(s, Affinity.NONE)
-            weight = AFFINITY_WEIGHT[aff]
+            if s == monthly_primary_store:
+                weight = AFFINITY_WEIGHT[Affinity.STRONG]
+            elif s in removed_support_stores:
+                # 絶対配置不可ではない。自動生成の通常候補から外すだけ。
+                weight = 0
+            else:
+                weight = AFFINITY_WEIGHT[aff]
             if weight > 0:
                 # その店舗の出勤回数 × 重み を加算
                 for d in days:
                     objective_terms.append(weight * x[e.name][d][s])
             extra_weight = STORE_ASSIGNMENT_EXTRA_WEIGHTS.get((e.name, s), 0)
-            # 月限定の追加スコア（例: 2026年8月の大類さん→大宮駅前を主担当扱い）
-            extra_weight += MONTHLY_STORE_EXTRA_WEIGHTS.get(
-                (int(year), int(month)), {},
-            ).get((e.name, s), 0)
-            # 月限定の「なるべく避ける」配置（ソフト。人手不足時は配置あり）
-            avoid_penalty = MONTHLY_STORE_AVOID_PENALTIES.get(
-                (int(year), int(month)), {},
-            ).get((e.name, s), 0)
-            if avoid_penalty > 0:
-                for d in days:
-                    objective_terms.append(-avoid_penalty * x[e.name][d][s])
             if extra_weight > 0:
                 # 個別に「少し寄せたい」店舗の追加スコア。
                 for d in days:
@@ -1178,8 +1219,13 @@ def generate_shift(
         normal_stores = [
             s for s in main_stores
             if e.affinities.get(s) == Affinity.MEDIUM
+            and s not in removed_support_stores
         ]
-        if e.home_store is None and len(normal_stores) >= 2:
+        if (
+            e.home_store is None
+            and monthly_primary_store is None
+            and len(normal_stores) >= 2
+        ):
             normal_counts = {
                 s: sum(x[e.name][d][s] for d in days)
                 for s in normal_stores

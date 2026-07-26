@@ -41,11 +41,11 @@ ECO_STAFF: list[Employee] = [
             Store.AKABANE: Affinity.STRONG,
             Store.HIGASHIGUCHI: Affinity.MEDIUM,
             Store.NISHIGUCHI: Affinity.MEDIUM,
-            Store.SUZURAN: Affinity.MEDIUM,
+            Store.SUZURAN: Affinity.WEAK,
             Store.OMIYA: Affinity.WEAK,
         },
         annual_target_days=265,
-        notes="主担当: 赤羽。通常対応可: 東口・西口・すずらん。応援・巡回可: 大宮。絶対配置不可なし。赤羽の割合を高く。",
+        notes="主担当: 赤羽。通常対応可: 東口・西口。応援・巡回可: 大宮・すずらん。絶対配置不可なし。赤羽の割合を高く。",
     ),
     Employee(
         name="鈴木",
@@ -340,7 +340,9 @@ TICKET_STAFF: list[Employee] = [
         constraint_check_excluded=True,
         is_auxiliary=True,
         notes="70代後半・今年退職予定の特別枠。年間基準出勤日数は定めなし。"
-              "赤羽がエコ1+チケット0または1の日に補助投入される。カウント対象外",
+              "通常スタッフのシフト完成後、赤羽のチケット対応不足日にだけ補助投入し、"
+              "その他の追加勤務は管理者が手動入力する。通常人数・月間目標の計算対象外。"
+              "手動調整後は1・2月14日、3〜12月15日を上限として検証する。",
     ),
 ]
 
