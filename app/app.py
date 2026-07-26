@@ -5370,6 +5370,24 @@ if mode == "📊 経営者ビュー":
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
                     )
                     modes = determine_operation_modes(_saved_target_year, _saved_target_month)
+                    # 営業モードを必ず明示する（黙って条件を緩めない）
+                    _mode_days: dict = {}
+                    for _md, _mv in modes.items():
+                        if _mv != OperationMode.NORMAL:
+                            _mode_days.setdefault(_mv.value, []).append(int(_md))
+                    if _mode_days:
+                        for _mode_label, _mode_list in _mode_days.items():
+                            _mode_text = "、".join(
+                                f"{_saved_target_month}/{d}" for d in sorted(_mode_list)
+                            )
+                            data_source_msg += (
+                                f"\n📅 営業モード: {_mode_text} は"
+                                f"**{_mode_label}**で計算しました（月例外設定による）。"
+                            )
+                    else:
+                        data_source_msg += (
+                            "\n📅 営業モード: 全日、通常体制で計算しました。"
+                        )
                     use_monthly_store_count_rules = active_monthly_store_count_rules(
                         rule_cfg, _saved_target_year, _saved_target_month,
                     )
@@ -8483,6 +8501,70 @@ elif mode == "⚙️ 設定":
 
         if _mx_new_data is not None:
             _mx_save_and_push(_mx_new_data, actor="管理者")
+
+        st.markdown("---")
+        st.markdown("#### 🏪 営業モード（省人員・休業日の設定）")
+        st.caption(
+            "基本は**全日「通常」体制**で計算します。連休などで休み希望が集中し、"
+            "やむを得ず少人数で営業する日だけ、ここで設定してください（経営判断）。"
+            "解なしの原因調査で「人員不足」が出た日を設定するのが目安です。"
+        )
+        _om_map = dict(_mx_raw.get("operation_modes", {}) or {})
+        if _om_map:
+            for _om_ym in sorted(_om_map):
+                _om_day_map = dict(_om_map[_om_ym] or {})
+                for _om_day in sorted(_om_day_map, key=lambda t: int(t)):
+                    _omc1, _omc2 = st.columns([4, 1])
+                    _omc1.write(
+                        f"　- {_ym_jp(_om_ym)}{int(_om_day)}日 ／ "
+                        f"{_om_day_map[_om_day]}"
+                    )
+                    if _omc2.button(
+                        "🗑 削除", key=f"mx_del_om_{_om_ym}_{_om_day}",
+                    ):
+                        _new = dict(_mx_raw)
+                        _new_om = {k: dict(v) for k, v in _om_map.items()}
+                        _new_om[_om_ym].pop(_om_day, None)
+                        if not _new_om[_om_ym]:
+                            _new_om.pop(_om_ym)
+                        _new["operation_modes"] = _new_om
+                        _mx_save_and_push(_new, actor="管理者")
+        else:
+            st.caption("現在、省人員・休業の設定はありません（全日通常）。")
+
+        _omf1, _omf2, _omf3 = st.columns([1.2, 2, 1])
+        with _omf1:
+            _om_ym_sel = st.selectbox(
+                "対象の月", _mx_month_options,
+                format_func=_ym_jp, key="mx_om_ym",
+            )
+        with _omf2:
+            _om_days_sel = st.multiselect(
+                "対象の日（複数選択可）",
+                list(range(
+                    1,
+                    monthrange(int(_om_ym_sel[:4]), int(_om_ym_sel[5:]))[1] + 1,
+                )),
+                key="mx_om_days",
+            )
+        with _omf3:
+            _om_mode_sel = st.selectbox(
+                "モード", ["省人員", "最小営業", "営業停止"], key="mx_om_mode",
+            )
+        if st.button("営業モードを設定", key="mx_om_add", type="primary"):
+            if not _om_days_sel:
+                st.error("対象の日を選んでください。")
+            else:
+                _new = dict(_mx_raw)
+                _new_om = {
+                    k: dict(v)
+                    for k, v in (_new.get("operation_modes", {}) or {}).items()
+                }
+                _new_om.setdefault(_om_ym_sel, {})
+                for _om_d in _om_days_sel:
+                    _new_om[_om_ym_sel][str(int(_om_d))] = _om_mode_sel
+                _new["operation_modes"] = _new_om
+                _mx_save_and_push(_new, actor="管理者")
 
         st.markdown("---")
         st.caption(
