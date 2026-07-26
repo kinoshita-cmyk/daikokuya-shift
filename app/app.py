@@ -4977,6 +4977,21 @@ if mode == "📊 経営者ビュー":
     with st.expander("📅 月例外・営業モード（この月だけの特例）", expanded=False):
         render_monthly_exceptions_panel()
 
+    # コード管理の月限定ルール（画面から変更不可だが、効いていることは明示する）
+    try:
+        from prototype.rules import active_code_managed_monthly_rules
+        _code_rules = active_code_managed_monthly_rules(
+            int(target_year), int(target_month),
+        )
+        if _code_rules:
+            st.info(
+                "🧩 **この月はコード管理の特別ルールが有効です**"
+                "（変更は技術者対応。効いている内容は以下の通り）\n\n"
+                + "\n".join(f"- {t}" for t in _code_rules)
+            )
+    except Exception:
+        pass
+
     with st.expander("📌 今月だけの特別ルール", expanded=False):
         current_month_rules = active_monthly_store_count_rules(
             rule_cfg, int(target_year), int(target_month),
@@ -5713,6 +5728,17 @@ if mode == "📊 経営者ビュー":
                         data_source_msg += (
                             "\n📅 営業モード: 全日、通常体制で計算しました。"
                         )
+                    # コード管理の月限定ルールも生成メッセージに明示する
+                    try:
+                        from prototype.rules import (
+                            active_code_managed_monthly_rules as _acm_rules,
+                        )
+                        for _cr_text in _acm_rules(
+                            _saved_target_year, _saved_target_month,
+                        ):
+                            data_source_msg += f"\n🧩 月限定ルール適用: {_cr_text}"
+                    except Exception:
+                        pass
                     use_monthly_store_count_rules = active_monthly_store_count_rules(
                         rule_cfg, _saved_target_year, _saved_target_month,
                     )
