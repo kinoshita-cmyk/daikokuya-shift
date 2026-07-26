@@ -156,9 +156,12 @@ BALANCED_NORMAL_STORE_DIFF_PENALTY = 160
 
 # 月別設定で「応援・巡回先から外す」とした店舗は、絶対禁止にはせず、
 # 山本さんの不足補助より先に通常配置されない程度の回避対象にする。
-# 赤羽2名体制のコスト60より少し強く、大宮2名体制のコスト100より弱い。
+# 大宮はエコ1名+チケット1名の2名体制を需給調整として許容するが、
+# 通常対応可店舗間の配分バランスや赤羽の山本さん補助よりは、
+# エコ2名+チケット1名の3名体制を明確に優先する。
+# 顧問投入（50000）とは桁が異なり、同じ緊急措置としては扱わない。
 REMOVED_SUPPORT_STORE_ASSIGNMENT_PENALTY = 80
-OMIYA_SHORTAGE_PENALTY = 100
+OMIYA_SHORTAGE_PENALTY = 400
 AKABANE_SHORTAGE_PENALTY = 60
 
 # 南さんのような「出勤希望日のみ稼働」のパートは年間目標日数を持たないため、
@@ -686,12 +689,12 @@ def generate_shift(
         if e.skill in (Skill.TICKET, Skill.ECO_SUPPORT)
     ]
 
-    # 大宮の「人数少」状態を表す変数。
-    # 2名体制を許容する月は monthly_exceptions.json で限定する。
+    # 大宮の「エコ1名+チケット1名」の需給調整体制を表す変数。
+    # 全月で許容し、目的関数で通常のエコ2名+チケット1名を優先する。
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
     # 赤羽を正規2人のままにする日のコスト。不足のしわ寄せが赤羽だけに
-    # 集中して山本さん頼みになるのを防ぐ。大宮の人数少(100)より必ず弱く
-    # 設定すること（強くすると他店から人を引き抜いてしまう＝ver4の failure）
+    # 集中して山本さん頼みになるのを防ぐ。大宮の人数少より必ず弱く設定し、
+    # 大宮を3名に戻せる場合は赤羽の山本さん補助を優先する。
     akabane_short = {d: model.NewBoolVar(f"akabane_short_{d}") for d in days}
     higashi_unexpected_assignments = []
     over_standard_staffing_terms = []
@@ -806,19 +809,25 @@ def generate_shift(
                 continue
 
             # 大宮の特殊ルール:
-            # 通常: エコ対応者1名以上 + 合計3名以上
-            # 人数少時: エコ対応者1名以上 + 2名体制も許容（omiya_short=1 でフラグ）
+            # 基本: エコ2名 + チケット1名 = 合計3名以上
+            # 需給調整時: エコ1名 + チケット1名 = 合計2名
+            # （omiya_short=1 でフラグ）
             if s == Store.OMIYA and mode == OperationMode.NORMAL:
                 model.Add(eco_at_store >= 1)  # 最低1名は必須
+                model.Add(ticket_at_store >= 1)  # チケット要員も最低1名は必須
                 if is_omiya_two_person_allowed_month(year, month):
                     model.Add(total_at_store >= 2)
                     model.Add(total_at_store <= 2).OnlyEnforceIf(
                         omiya_short[d]
                     )
+                    model.Add(eco_at_store >= 2).OnlyEnforceIf(
+                        omiya_short[d].Not()
+                    )
                     model.Add(total_at_store >= 3).OnlyEnforceIf(
                         omiya_short[d].Not()
                     )
                 else:
+                    model.Add(eco_at_store >= 2)
                     model.Add(total_at_store >= 3)
                     model.Add(omiya_short[d] == 0)
                 continue
@@ -1441,7 +1450,9 @@ def generate_shift(
             cp_model.SELECT_MIN_VALUE,
         )
         obj = obj - 50000 * sum(advisor_assignments)
-    # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
+    # 大宮のエコ1名+チケット1名は需給調整として許容するが、店舗配分の
+    # 均等さより通常のエコ2名+チケット1名を優先する。
+    # 顧問投入と同じ緊急措置にはしない。
     obj = obj - OMIYA_SHORTAGE_PENALTY * sum(omiya_short.values())
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
     # 赤羽3人目に回り、他店の最低・標準は削られない。

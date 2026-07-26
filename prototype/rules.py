@@ -375,20 +375,14 @@ MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 # 実運用では config/monthly_exceptions.json を唯一の編集元とし、
 # 生成・検証・画面表示が同じ設定を参照します。
 
-# 大宮駅前のエコ1名以上・合計2名体制を許可する月。
-# 2026年7月は確定済みシフトの履歴検証用、2026年8月は現行の月例外です。
-_DEFAULT_OMIYA_TWO_PERSON_MONTHS: tuple[tuple[int, int], ...] = (
-    (2026, 7),
-    (2026, 8),
-)
-OMIYA_TWO_PERSON_MONTHS: tuple[tuple[int, int], ...] = (
-    _DEFAULT_OMIYA_TWO_PERSON_MONTHS
-)
-
-
 def is_omiya_two_person_allowed_month(year: int, month: int) -> bool:
-    """大宮駅前の2名体制を月限定で許容するか。"""
-    return (int(year), int(month)) in OMIYA_TWO_PERSON_MONTHS
+    """大宮駅前のエコ1名・チケット1名の合計2名体制を許容するか。
+
+    現在人員では毎月一定数起こり得る需給調整なので全月で許容する。
+    通常はエコ2名・チケット1名の合計3名体制を優先し、その強さは
+    生成側のペナルティで管理する。
+    """
+    return True
 
 
 _DEFAULT_TANAKA_PAIR_TRAINING_RULES: dict[tuple[int, int], dict] = {
@@ -468,7 +462,8 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
     notes = []
     if is_omiya_two_person_allowed_month(year, month):
         notes.append(
-            "大宮駅前は人員不足時に限り、エコ1名以上・合計2名体制を許容"
+            "固定ルール: 大宮駅前はエコ1名＋チケット1名の合計2名体制を許容"
+            "（通常はエコ2名＋チケット1名の合計3名体制を優先）"
         )
     tanaka_rule = tanaka_pair_training_rule(year, month)
     if tanaka_rule:
@@ -557,7 +552,6 @@ def reload_monthly_exceptions() -> str:
     global MONTHLY_AVOID_SAME_OFF_RULES
     global MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     global MONTHLY_OPERATION_MODES
-    global OMIYA_TWO_PERSON_MONTHS
     global TANAKA_PAIR_TRAINING_RULES
     global MONTHLY_EMPLOYEE_STORE_OVERRIDES
 
@@ -570,7 +564,6 @@ def reload_monthly_exceptions() -> str:
         _DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     )
     MONTHLY_OPERATION_MODES = dict(_DEFAULT_MONTHLY_OPERATION_MODES)
-    OMIYA_TWO_PERSON_MONTHS = _DEFAULT_OMIYA_TWO_PERSON_MONTHS
     TANAKA_PAIR_TRAINING_RULES = {
         ym: dict(rule)
         for ym, rule in _DEFAULT_TANAKA_PAIR_TRAINING_RULES.items()
@@ -613,14 +606,6 @@ def reload_monthly_exceptions() -> str:
         OMIYA_ANCHOR_RELAXED_MONTHS = tuple(
             ym for ym in (
                 _parse_ym(t) for t in (data["omiya_anchor_relaxed_months"] or [])
-            )
-            if ym is not None
-        )
-
-    if "omiya_two_person_months" in data:
-        OMIYA_TWO_PERSON_MONTHS = tuple(
-            ym for ym in (
-                _parse_ym(t) for t in (data["omiya_two_person_months"] or [])
             )
             if ym is not None
         )
@@ -754,9 +739,6 @@ def load_monthly_exceptions_raw() -> dict:
     return {
         "omiya_anchor_relaxed_months": [
             f"{y:04d}-{m:02d}" for (y, m) in OMIYA_ANCHOR_RELAXED_MONTHS
-        ],
-        "omiya_two_person_months": [
-            f"{y:04d}-{m:02d}" for (y, m) in OMIYA_TWO_PERSON_MONTHS
         ],
         "tanaka_training": {
             f"{y:04d}-{m:02d}": {
