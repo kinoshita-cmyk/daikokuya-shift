@@ -61,34 +61,24 @@ from .rules import (
 
 def determine_operation_modes(year: int, month: int) -> dict[int, OperationMode]:
     """
-    日本のカレンダーに基づき、各日の営業モードを自動判定する。
+    各日の営業モードを返す。
 
-    暫定実装: GW・お盆・SW・年末年始のみ判定。
-    本番では内閣府の祝日CSVと連携する予定。
+    経営方針（2026-07 決定）: 基本は全日「通常」体制。
+    省人員・休業は経営判断として「📅 月例外 → 営業モード」で
+    明示的に設定した日だけ適用する。
+    （旧仕様の GW・お盆・SW・年末年始の自動適用は廃止。
+      過去に生成・確定したシフトは当時のモードを内部に保持しているため
+      影響しない）
     """
+    from .rules import monthly_operation_mode_overrides
+
     days = monthrange(year, month)[1]
-    modes: dict[int, OperationMode] = {}
-
-    for day in range(1, days + 1):
-        d = date(year, month, day)
-
-        # 年末年始休業
-        if (month == 12 and day == 31) or (month == 1 and day in (1, 2)):
-            modes[day] = OperationMode.CLOSED
-        # ゴールデンウィーク（パターンB：連休全体）
-        elif month == 4 and day == 29:
-            modes[day] = OperationMode.REDUCED
-        elif month == 5 and 1 <= day <= 5:
-            modes[day] = OperationMode.REDUCED
-        # お盆
-        elif month == 8 and 13 <= day <= 16:
-            modes[day] = OperationMode.REDUCED
-        # シルバーウィーク（簡易版：9月の連休）
-        elif month == 9 and 19 <= day <= 23:
-            modes[day] = OperationMode.REDUCED
-        else:
-            modes[day] = OperationMode.NORMAL
-
+    modes: dict[int, OperationMode] = {
+        day: OperationMode.NORMAL for day in range(1, days + 1)
+    }
+    for day, mode in monthly_operation_mode_overrides(year, month).items():
+        if 1 <= int(day) <= days:
+            modes[int(day)] = mode
     return modes
 
 

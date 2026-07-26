@@ -346,7 +346,8 @@ def diagnose_known_conflicts(
                     ),
                     "対処": (
                         "該当日の×休みの調整を依頼するか、"
-                        "営業モード（省人員）の適用を検討してください。"
+                        "「⚙️ 設定 → 📅 月例外 → 営業モード」で"
+                        "この日を省人員に設定することを検討してください。"
                     ),
                 })
             elif available_total < required_total:
@@ -357,7 +358,11 @@ def diagnose_known_conflicts(
                         f"{int(month)}月{d}日: 必要総数{required_total}名に対し、"
                         f"休み確定を除く出勤可能者が{available_total}名です。"
                     ),
-                    "対処": "該当日の×休みの調整や応援の検討をしてください。",
+                    "対処": (
+                        "該当日の×休みの調整・応援の検討、または"
+                        "「⚙️ 設定 → 📅 月例外 → 営業モード」での"
+                        "省人員設定を検討してください。"
+                    ),
                 })
 
     return findings

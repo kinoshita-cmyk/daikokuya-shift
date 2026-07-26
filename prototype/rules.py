@@ -379,6 +379,20 @@ MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES: dict[
     tuple[int, int], dict[str, int]
 ] = dict(_DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES)
 
+# 営業モードの月別設定（{(年, 月): {日: OperationMode}}）。
+# 経営方針: 基本は全日通常体制。省人員・休業は経営判断として
+# 画面（📅 月例外）から明示的に設定した日だけ適用する。
+# （旧仕様の GW・お盆・SW の自動適用は廃止した）
+_DEFAULT_MONTHLY_OPERATION_MODES: dict = {}
+MONTHLY_OPERATION_MODES: dict = dict(_DEFAULT_MONTHLY_OPERATION_MODES)
+
+_MODE_LABEL_TO_ENUM = {m.value: m for m in OperationMode}
+
+
+def monthly_operation_mode_overrides(year: int, month: int) -> dict:
+    """指定月の営業モード設定（{日: OperationMode}）を返す。"""
+    return dict(MONTHLY_OPERATION_MODES.get((int(year), int(month)), {}))
+
 
 def reload_monthly_exceptions() -> str:
     """設定ファイルを読み直し、月例外ルールを実行中のシステムに反映する。
@@ -390,6 +404,7 @@ def reload_monthly_exceptions() -> str:
     global OMIYA_ANCHOR_RELAXED_MONTHS
     global MONTHLY_AVOID_SAME_OFF_RULES
     global MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
+    global MONTHLY_OPERATION_MODES
 
     data = _load_monthly_exceptions()
 
@@ -399,8 +414,28 @@ def reload_monthly_exceptions() -> str:
     MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES = dict(
         _DEFAULT_MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     )
+    MONTHLY_OPERATION_MODES = dict(_DEFAULT_MONTHLY_OPERATION_MODES)
     if not data:
         return MONTHLY_EXCEPTIONS_STATUS
+
+    if "operation_modes" in data:
+        modes_parsed: dict = {}
+        for ym_text, day_map in dict(data["operation_modes"] or {}).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(day_map, dict):
+                continue
+            entries3 = {}
+            for day_text, mode_label in day_map.items():
+                mode = _MODE_LABEL_TO_ENUM.get(str(mode_label))
+                try:
+                    day_num = int(day_text)
+                except (TypeError, ValueError):
+                    continue
+                if mode is not None and 1 <= day_num <= 31:
+                    entries3[day_num] = mode
+            if entries3:
+                modes_parsed[ym] = entries3
+        MONTHLY_OPERATION_MODES = modes_parsed
 
     if "omiya_anchor_relaxed_months" in data:
         OMIYA_ANCHOR_RELAXED_MONTHS = tuple(
