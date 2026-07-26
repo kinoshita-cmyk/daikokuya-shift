@@ -4261,9 +4261,18 @@ if mode == "📊 経営者ビュー":
             _cb_wr_counts: dict = {}
             for _cb_emp, _cb_day, _cb_store in _cb_sub.work_requests:
                 _cb_wr_counts[_cb_emp] = _cb_wr_counts.get(_cb_emp, 0) + 1
+            # 補助要員（山本さん）も供給計上の対象に含める
+            _cb_employees = list(shift_active_employees())
+            _cb_names = {_e.name for _e in _cb_employees}
+            for _cb_aux in ALL_EMPLOYEES:
+                if (
+                    getattr(_cb_aux, "is_auxiliary", False)
+                    and _cb_aux.name not in _cb_names
+                ):
+                    _cb_employees.append(_cb_aux)
             _cb_result = compute_monthly_capacity_balance(
                 int(target_year), int(target_month),
-                list(shift_active_employees()),
+                _cb_employees,
                 determine_operation_modes(int(target_year), int(target_month)),
                 submitted_paid_leave=_cb_sub.paid_leave_days,
                 admin_paid_leave=admin_paid_leave_days_for_month(
@@ -4277,9 +4286,9 @@ if mode == "📊 経営者ビュー":
             for _cb_line in balance_summary_lines(_cb_result):
                 st.markdown("- " + _cb_line)
             _cb_notes = [
-                f"省人員モード {_cb_result['reduced_days']}日・"
-                f"東口定休 {_cb_result['higashi_closed_days']}日を考慮済み",
-                "補助要員（山本さん）は供給に含めない控えめな概算です",
+                f"東口定休 {_cb_result['higashi_closed_days']}日を控除済み",
+                "補助要員（山本さん）は毎月15人区として総供給にのみ計上"
+                "（エコ・東西口の計算には含めない）",
             ]
             if _cb_result.get("excluded_names"):
                 _cb_notes.append(
