@@ -56,7 +56,6 @@ from .rules import (
     TANAKA_HIGASHI_FROM_DAY, TANAKA_AKABANE_THIRD_CANDIDATES,
     TANAKA_PAIR_REQUIRED_MEMBERS,
     MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS, MONTHLY_STORE_EXTRA_WEIGHTS,
-    yamamoto_monthly_max_days,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
@@ -659,8 +658,6 @@ def generate_shift(
 
     # 大宮の「人数少」状態を表す変数（人員不足時はエコ1+チケット1で可）
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
-    # 赤羽を正規2人のままにする日（山本さん頼み）を強く避けるためのフラグ
-    akabane_short = {d: model.NewBoolVar(f"akabane_short_{d}") for d in days}
     higashi_unexpected_assignments = []
     over_standard_staffing_terms = []
     over_daily_staffing_terms = []
@@ -764,10 +761,6 @@ def generate_shift(
                     model.Add(total_at_store >= 3)
                 else:
                     model.Add(total_at_store >= 2)
-                    # 正規2人のまま（山本さん頼み）は強いペナルティ。
-                    # 正規で3人組めない日だけが2人になり、その日だけ
-                    # 山本さんが自動投入される（高齢のため連続投入を防ぐ）。
-                    model.Add(total_at_store + akabane_short[d] >= 3)
                 continue
 
             # 大宮の特殊ルール:
@@ -1361,8 +1354,6 @@ def generate_shift(
         obj = obj - 50000 * sum(advisor_assignments)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
     obj = obj - 100 * sum(omiya_short.values())
-    # 赤羽の正規2人運用（山本さん頼み）は大宮の人数少より強く回避する
-    obj = obj - 150 * sum(akabane_short.values())
     if higashi_unexpected_assignments:
         # 東口は土井さんまたは指定代替4名を強く優先する。
         # ただし過去月の実態確認前なので、解なしにせず大きめのペナルティに留める。
@@ -1422,11 +1413,6 @@ def generate_shift(
     # ============================================================
     if yamamoto is not None:
         yamamoto_off = set(off_requests.get("山本", []))
-        # 山本さんの月間最大出勤日数（1・2月=14日、3〜12月=15日）
-        yamamoto_max = yamamoto_monthly_max_days(month)
-
-        # 1周目: 投入候補日（赤羽の構成が薄い日）をすべて洗い出す
-        yamamoto_candidates = []
         for d in days:
             mode = operation_modes.get(d, OperationMode.NORMAL)
             if mode == OperationMode.CLOSED:
@@ -1451,21 +1437,9 @@ def generate_shift(
                 if get_employee(a.employee).skill in (Skill.TICKET, Skill.ECO_SUPPORT)
             )
             if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
-                yamamoto_candidates.append((d, akabane_eco + akabane_ticket))
-
-        # 2周目: 自動投入は「山本さんがいないと赤羽が2人以下のままに
-        # なる日」だけに限定する（運用ルール）。
-        #   1. いないと困る日 → あらかじめシフトに入れる（ここで自動投入）
-        #   2. 本人の×休み希望 → 必ず休み（1周目で反映済み）
-        #   3. それ以外の枠 → 自動では埋めず、管理者が手作業で追加する
-        # 月上限（1・2月=14日／3〜12月=15日）は需給計算上の人区の目安で
-        # あり、自動投入はその範囲内で「必須日」だけを埋める。
-        must_days = [d for d, t in yamamoto_candidates if t <= 2]
-        yamamoto_selected = must_days[:yamamoto_max]
-        for d in yamamoto_selected:
-            shift.assignments.append(ShiftAssignment(
-                employee="山本", day=d, store=Store.AKABANE,
-            ))
+                shift.assignments.append(ShiftAssignment(
+                    employee="山本", day=d, store=Store.AKABANE,
+                ))
             # それ以外は山本の assignment を作らない（出勤も休みもしない＝空白扱い）
 
     return shift
