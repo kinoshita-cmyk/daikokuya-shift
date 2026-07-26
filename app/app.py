@@ -857,7 +857,10 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
             total_count = eco_count + ticket_count
 
             if store == Store.HIGASHIGUCHI:
-                if not (eco_count == 1 and ticket_count == 0 and total_count == 1):
+                # 「人員少」欄は不足だけを示す。2名以上の配置は
+                # 通常月なら検証側の人数超過警告で扱い、ここには表示しない。
+                # 2026年8月の土井＋田中研修ペアも人数不足ではない。
+                if eco_count < 1:
                     short_by_store.setdefault(d, set()).add(store)
                 continue
 
