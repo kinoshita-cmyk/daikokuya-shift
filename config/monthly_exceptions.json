@@ -2,6 +2,9 @@
   "_説明": "月限定の例外ルール。画面（⚙️ 設定 → 📅 月例外）から編集できます。書式は『YYYY-MM』。このファイルにキーがある場合、コード内のデフォルト値よりこちらが優先されます。",
   "_各キーの意味": {
     "omiya_anchor_relaxed_months": "大宮アンカー条件（春山・下地のどちらか必須）を緩和する月のリスト",
+    "omiya_two_person_months": "大宮駅前を人員不足時にエコ1名以上・合計2名体制で運用できる月。2026-07は確定済み履歴、2026-08は現行例外",
+    "tanaka_training": "田中の月限定研修ペア勤務。指定回数・相手・開始日を生成と検証の両方で使用",
+    "employee_store_overrides": "従業員別の月限定主担当・応援除外。応援除外は絶対配置不可ではなく、自動生成の通常候補から外す指定",
     "carryover_consecutive_allowances": "前月末から続く連勤に限り、月初の連勤上限を指定日数だけ延長する。例: {\"2026-08\": {\"下地\": 1}} は2026年8月の下地さんの境界連勤を+1日許可",
     "avoid_same_off": "指定した2人の同時休みをなるべく避ける月限定ソフトルール",
     "operation_modes": "営業モードの月別設定。基本は全日通常。省人員・休業にする日だけ記載。例: {\"2026-08\": {\"13\": \"省人員\"}}"
@@ -9,6 +12,36 @@
   "omiya_anchor_relaxed_months": [
     "2026-07"
   ],
+  "omiya_two_person_months": [
+    "2026-07",
+    "2026-08"
+  ],
+  "tanaka_training": {
+    "2026-08": {
+      "employee": "田中",
+      "nishiguchi_partner": "楯",
+      "nishiguchi_count": 6,
+      "akabane_partner": "楯",
+      "akabane_third_candidates": [
+        "鈴木",
+        "板倉"
+      ],
+      "akabane_count": 5,
+      "higashiguchi_partner": "土井",
+      "higashiguchi_from_day": 20,
+      "higashiguchi_count": 1
+    }
+  },
+  "employee_store_overrides": {
+    "2026-08": {
+      "大類": {
+        "primary_store": "OMIYA",
+        "remove_support_stores": [
+          "AKABANE"
+        ]
+      }
+    }
+  },
   "carryover_consecutive_allowances": {
     "2026-08": {
       "下地": 1
@@ -23,6 +56,6 @@
       }
     ]
   },
-  "updated_at": "2026-07-26T17:37:18",
-  "updated_by": "管理者（お盆の省人員設定を削除）"
+  "updated_at": "2026-07-26T21:21:30",
+  "updated_by": "Codex（8月限定条件を生成・検証の共通設定へ集約）"
 }
