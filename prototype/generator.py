@@ -1445,23 +1445,15 @@ def generate_shift(
             if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
                 yamamoto_candidates.append((d, akabane_eco + akabane_ticket))
 
-        # 2周目: 候補が上限を超える場合の選び方
-        #   優先1: 山本さんがいないと赤羽が2人以下のままになる日を必ずカバー
-        #   優先2: 残り枠は月全体へ均等に分散（ご高齢のため連続・偏り回避）
-        # （初版は先着順で前半に使い切る問題、第2版は均等分散のみで
-        #   手薄な日を取りこぼす問題があった）
-        if len(yamamoto_candidates) <= yamamoto_max:
-            yamamoto_selected = [d for d, _t in yamamoto_candidates]
-        else:
-            must_days = [d for d, t in yamamoto_candidates if t <= 2]
-            must_days = must_days[:yamamoto_max]
-            others = [d for d, t in yamamoto_candidates if d not in must_days]
-            rest_slots = yamamoto_max - len(must_days)
-            extra_days = []
-            if rest_slots > 0 and others:
-                stride = len(others) / float(rest_slots)
-                extra_days = [others[int(i * stride)] for i in range(rest_slots)]
-            yamamoto_selected = sorted(set(must_days + extra_days))
+        # 2周目: 自動投入は「山本さんがいないと赤羽が2人以下のままに
+        # なる日」だけに限定する（運用ルール）。
+        #   1. いないと困る日 → あらかじめシフトに入れる（ここで自動投入）
+        #   2. 本人の×休み希望 → 必ず休み（1周目で反映済み）
+        #   3. それ以外の枠 → 自動では埋めず、管理者が手作業で追加する
+        # 月上限（1・2月=14日／3〜12月=15日）は需給計算上の人区の目安で
+        # あり、自動投入はその範囲内で「必須日」だけを埋める。
+        must_days = [d for d, t in yamamoto_candidates if t <= 2]
+        yamamoto_selected = must_days[:yamamoto_max]
         for d in yamamoto_selected:
             shift.assignments.append(ShiftAssignment(
                 employee="山本", day=d, store=Store.AKABANE,
