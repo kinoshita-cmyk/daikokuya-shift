@@ -4237,6 +4237,67 @@ if mode == "📊 経営者ビュー":
             st.session_state["preflight_sweep_results"] = _sw
             st.rerun()
 
+    # ============================================================
+    # 📊 今月の需給バランス（前任者の手計算の自動化・概算）
+    # ============================================================
+    with st.expander("📊 今月の需給バランス（生成前の概算チェック）", expanded=False):
+        st.caption(
+            "前任者が手計算していた「そもそも人が足りるか」の検算を、"
+            "提出データ・営業モード・店舗定休日から自動計算したものです。"
+            "×休みの並びや連勤などの詳細条件は含まない概算で、"
+            "正確な成立可否はシフト生成が判定します。"
+        )
+        try:
+            from prototype.capacity_balance import (
+                balance_summary_lines,
+                compute_monthly_capacity_balance,
+            )
+            from prototype.submission_loader import (
+                load_submissions_for_month as _cb_load_submissions,
+            )
+            _cb_sub = _cb_load_submissions(
+                int(target_year), int(target_month), expected_employees,
+            )
+            _cb_wr_counts: dict = {}
+            for _cb_emp, _cb_day, _cb_store in _cb_sub.work_requests:
+                _cb_wr_counts[_cb_emp] = _cb_wr_counts.get(_cb_emp, 0) + 1
+            _cb_result = compute_monthly_capacity_balance(
+                int(target_year), int(target_month),
+                list(shift_active_employees()),
+                determine_operation_modes(int(target_year), int(target_month)),
+                submitted_paid_leave=_cb_sub.paid_leave_days,
+                admin_paid_leave=admin_paid_leave_days_for_month(
+                    int(target_year), int(target_month),
+                ),
+                work_request_counts=_cb_wr_counts,
+                requested_holiday_days=getattr(
+                    _cb_sub, "requested_holiday_days", {},
+                ),
+            )
+            for _cb_line in balance_summary_lines(_cb_result):
+                st.markdown("- " + _cb_line)
+            _cb_notes = [
+                f"省人員モード {_cb_result['reduced_days']}日・"
+                f"東口定休 {_cb_result['higashi_closed_days']}日を考慮済み",
+                "補助要員（山本さん）は供給に含めない控えめな概算です",
+            ]
+            if _cb_result.get("excluded_names"):
+                _cb_notes.append(
+                    "概算対象外: " + "、".join(_cb_result["excluded_names"])
+                )
+            st.caption("／".join(_cb_notes))
+            if _cb_result.get("supply_rows"):
+                st.markdown("**供給の内訳（1人ずつの人区）**")
+                st.dataframe(
+                    pd.DataFrame(_cb_result["supply_rows"]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+        except Exception as _cb_exc:
+            st.caption(
+                f"需給バランスを計算できませんでした（{type(_cb_exc).__name__}）"
+            )
+
     # 提出状況サマリーを目立つボックスで表示
     completion_pct = int(summary["completion_rate"] * 100)
     if summary["total_pending"] == 0:
