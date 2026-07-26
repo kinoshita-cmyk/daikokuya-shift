@@ -374,9 +374,13 @@ def is_tanaka_pair_training_month(year: int, month: int) -> bool:
     return (int(year), int(month)) in TANAKA_PAIR_TRAINING_MONTHS
 
 
-# 月限定の配置禁止（例: 2026年8月の大類さんは赤羽への応援配置をしない）
-MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS: dict = {
-    (2026, 8): (("大類", Store.AKABANE),),
+# 月限定の配置禁止（現在は該当なし。完全禁止にしたい場合にここへ書く）
+MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS: dict = {}
+
+# 月限定の「なるべく避ける」配置（ソフト。人手不足時は配置を許容する）
+# 例: 2026年8月の大類さんは赤羽への応援を可能な限り避ける
+MONTHLY_STORE_AVOID_PENALTIES: dict = {
+    (2026, 8): {("大類", Store.AKABANE): 800},
 }
 
 # 月限定の配置優先の追加スコア（例: 2026年8月の大類さんは大宮駅前を主担当扱い）
@@ -409,6 +413,11 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
         )
     for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(ym, ()):
         notes.append(f"{f_name}さんは{f_store.display_name}に配置しない")
+    for (a_name, a_store), _p in MONTHLY_STORE_AVOID_PENALTIES.get(ym, {}).items():
+        notes.append(
+            f"{a_name}さんの{a_store.display_name}配置はなるべく避ける"
+            "（人手不足時は配置あり）"
+        )
     for (w_name, w_store), _w in MONTHLY_STORE_EXTRA_WEIGHTS.get(ym, {}).items():
         notes.append(f"{w_name}さんは{w_store.display_name}を主担当扱いで優先配置")
     return notes

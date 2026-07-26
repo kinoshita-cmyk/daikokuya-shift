@@ -50,6 +50,7 @@ from .rules import (
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
     month_edge_forced_assignments, compute_prev_consecutive_run,
+    MONTHLY_STORE_AVOID_PENALTIES,
     is_tanaka_pair_training_month, TANAKA_NISHIGUCHI_PAIR_COUNT,
     TANAKA_AKABANE_TRIO_COUNT, TANAKA_HIGASHI_PAIR_COUNT,
     TANAKA_HIGASHI_FROM_DAY, TANAKA_AKABANE_THIRD_CANDIDATES,
@@ -1159,6 +1160,13 @@ def generate_shift(
             extra_weight += MONTHLY_STORE_EXTRA_WEIGHTS.get(
                 (int(year), int(month)), {},
             ).get((e.name, s), 0)
+            # 月限定の「なるべく避ける」配置（ソフト。人手不足時は配置あり）
+            avoid_penalty = MONTHLY_STORE_AVOID_PENALTIES.get(
+                (int(year), int(month)), {},
+            ).get((e.name, s), 0)
+            if avoid_penalty > 0:
+                for d in days:
+                    objective_terms.append(-avoid_penalty * x[e.name][d][s])
             if extra_weight > 0:
                 # 個別に「少し寄せたい」店舗の追加スコア。
                 for d in days:
@@ -1408,7 +1416,9 @@ def generate_shift(
         yamamoto_off = set(off_requests.get("山本", []))
         # 山本さんの月間最大出勤日数（1・2月=14日、3〜12月=15日）
         yamamoto_max = yamamoto_monthly_max_days(month)
-        yamamoto_deployed = 0
+
+        # 1周目: 投入候補日（赤羽の構成が薄い日）をすべて洗い出す
+        yamamoto_candidates = []
         for d in days:
             mode = operation_modes.get(d, OperationMode.NORMAL)
             if mode == OperationMode.CLOSED:
@@ -1419,9 +1429,6 @@ def generate_shift(
                     employee="山本", day=d, store=Store.OFF,
                 ))
                 continue
-
-            if yamamoto_deployed >= yamamoto_max:
-                continue  # 月間上限に達したら以降は投入しない
 
             # その日の赤羽の構成を確認
             # ECO_SUPPORT はチケット枠としてカウント（店頭応対しないため）
@@ -1436,10 +1443,23 @@ def generate_shift(
                 if get_employee(a.employee).skill in (Skill.TICKET, Skill.ECO_SUPPORT)
             )
             if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
-                shift.assignments.append(ShiftAssignment(
-                    employee="山本", day=d, store=Store.AKABANE,
-                ))
-                yamamoto_deployed += 1
+                yamamoto_candidates.append(d)
+
+        # 2周目: 候補が上限を超える場合は月全体へ均等に分散して選ぶ。
+        # （旧実装は先着順で、月前半に15回を使い切り後半が手薄になる
+        #   問題があった。ご高齢のため連続・偏り配置も避ける）
+        if len(yamamoto_candidates) <= yamamoto_max:
+            yamamoto_selected = list(yamamoto_candidates)
+        else:
+            stride = len(yamamoto_candidates) / float(yamamoto_max)
+            yamamoto_selected = [
+                yamamoto_candidates[int(i * stride)]
+                for i in range(yamamoto_max)
+            ]
+        for d in yamamoto_selected:
+            shift.assignments.append(ShiftAssignment(
+                employee="山本", day=d, store=Store.AKABANE,
+            ))
             # それ以外は山本の assignment を作らない（出勤も休みもしない＝空白扱い）
 
     return shift
