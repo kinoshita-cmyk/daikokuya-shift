@@ -348,6 +348,9 @@ def validate(
     # 20. 月別の同時休み回避チェック
     _check_monthly_avoid_same_off_rules(shift, result, days_in_month)
 
+    # 21. 月限定の特別条件チェック（配置禁止・田中さん研修ペア回数）
+    _check_monthly_special_rules(shift, result, days_in_month)
+
     # 21. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
@@ -516,13 +519,31 @@ def _check_store_capacity(
                         ),
                     ))
 
-            # 赤羽東口店はエコ1名のみ。例外なし。
+            # 赤羽東口店はエコ1名のみ。
+            # 例外は2026年8月の田中研修日（20日以降・土井＋田中の2名）だけ。
             if store == Store.HIGASHIGUCHI:
+                from .rules import (
+                    TANAKA_HIGASHI_FROM_DAY as _t_from,
+                    is_tanaka_pair_training_month as _t_month,
+                )
+                _tanaka_east_ok = (
+                    _t_month(shift.year, shift.month)
+                    and day >= _t_from
+                    and "田中" in all_store_workers
+                    and "土井" in all_store_workers
+                    and total == 2
+                    and eco_count == 1
+                )
                 unexpected_workers = [
                     name for name in all_store_workers
-                    if name != "顧問" and name not in HIGASHIGUCHI_ALLOWED_STAFF
+                    if name != "顧問"
+                    and name not in HIGASHIGUCHI_ALLOWED_STAFF
+                    and not (name == "田中" and _tanaka_east_ok)
                 ]
-                if eco_count != 1 or ticket_count != 0 or total != 1:
+                if (
+                    not _tanaka_east_ok
+                    and (eco_count != 1 or ticket_count != 0 or total != 1)
+                ):
                     result.issues.append(Issue(
                         severity="ERROR",
                         category="1名体制（東口）",
@@ -1242,6 +1263,87 @@ def _check_month_edge_assignments(
                 f"現在は{actual_store.display_name}です。"
             ),
         ))
+
+
+def _check_monthly_special_rules(
+    shift: MonthlyShift, result: ValidationResult, days: int,
+) -> None:
+    """月限定の特別条件（配置禁止・田中さん研修ペア回数）を検証する。"""
+    from .rules import (
+        MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS,
+        TANAKA_AKABANE_THIRD_CANDIDATES,
+        TANAKA_AKABANE_TRIO_COUNT,
+        TANAKA_HIGASHI_FROM_DAY,
+        TANAKA_HIGASHI_PAIR_COUNT,
+        TANAKA_NISHIGUCHI_PAIR_COUNT,
+        is_tanaka_pair_training_month,
+    )
+
+    # 月限定の配置禁止（例: 2026年8月の大類さんは赤羽に入らない）
+    for f_name, f_store in MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS.get(
+        (int(shift.year), int(shift.month)), (),
+    ):
+        for day in range(1, days + 1):
+            a = shift.get_assignment(f_name, day)
+            if a is not None and a.store == f_store:
+                result.issues.append(Issue(
+                    severity="ERROR",
+                    category="月限定配置禁止",
+                    day=day, employee=f_name,
+                    message=(
+                        f"{f_name}は今月{f_store.display_name}に"
+                        "配置しないルールです。"
+                    ),
+                ))
+
+    # 田中さんの研修ペア回数（2026年8月限定）
+    if not is_tanaka_pair_training_month(shift.year, shift.month):
+        return
+
+    def _at(name: str, day: int, store: Store) -> bool:
+        a = shift.get_assignment(name, day)
+        return a is not None and a.store == store
+
+    west_days = [d for d in range(1, days + 1) if _at("田中", d, Store.NISHIGUCHI)]
+    east_days = [d for d in range(1, days + 1) if _at("田中", d, Store.HIGASHIGUCHI)]
+    trio_days = [
+        d for d in range(1, days + 1)
+        if _at("楯", d, Store.AKABANE) and _at("田中", d, Store.AKABANE)
+        and any(_at(c, d, Store.AKABANE) for c in TANAKA_AKABANE_THIRD_CANDIDATES)
+    ]
+    checks = [
+        (len(west_days), TANAKA_NISHIGUCHI_PAIR_COUNT,
+         f"西口の楯・田中ペア勤務は{TANAKA_NISHIGUCHI_PAIR_COUNT}回の指定"),
+        (len(east_days), TANAKA_HIGASHI_PAIR_COUNT,
+         f"東口の土井・田中ペア勤務は{TANAKA_HIGASHI_PAIR_COUNT}回の指定"),
+        (len(trio_days), TANAKA_AKABANE_TRIO_COUNT,
+         f"赤羽の楯・田中・(鈴木or板倉)勤務は{TANAKA_AKABANE_TRIO_COUNT}回の指定"),
+    ]
+    for actual, expected, label in checks:
+        if actual != expected:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="研修ペア回数",
+                day=None, employee="田中",
+                message=f"{label}ですが、現在{actual}回です。",
+            ))
+    for d in west_days:
+        if not _at("楯", d, Store.NISHIGUCHI):
+            result.issues.append(Issue(
+                severity="ERROR", category="研修ペア",
+                day=d, employee="田中",
+                message="西口勤務は楯さんと同日の指定です。",
+            ))
+    for d in east_days:
+        if d < TANAKA_HIGASHI_FROM_DAY or not _at("土井", d, Store.HIGASHIGUCHI):
+            result.issues.append(Issue(
+                severity="ERROR", category="研修ペア",
+                day=d, employee="田中",
+                message=(
+                    f"東口勤務は{TANAKA_HIGASHI_FROM_DAY}日以降で"
+                    "土井さんと同日の指定です。"
+                ),
+            ))
 
 
 def _check_higashiguchi_monday_closed(

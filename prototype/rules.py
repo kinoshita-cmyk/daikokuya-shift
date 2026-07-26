@@ -351,6 +351,44 @@ MAKINO_SOLO_NG_STORES: tuple[Store, ...] = (
 )
 MAKINO_NISHIGUCHI_TRAINING_PARTNER = "楯"
 
+# ============================================================
+# 2026年8月限定: 田中さんの研修ペア勤務ルール（経営指示・コード管理）
+# ============================================================
+# ・西口: 楯＋田中 の同日勤務をちょうど6回
+# ・赤羽: 楯＋田中＋（鈴木または板倉）の同日勤務をちょうど5回
+# ・東口: 8/20以降に 土井＋田中 の同日勤務を1回
+#   （この研修日だけ東口の2名体制を許容する）
+# ・上記の組み合わせ以外の日は、田中さんは東口・西口に入らない
+# 対象月を変えたい場合はこの月リストを編集する。
+TANAKA_PAIR_TRAINING_MONTHS: tuple = ((2026, 8),)
+TANAKA_NISHIGUCHI_PAIR_COUNT = 6
+TANAKA_AKABANE_TRIO_COUNT = 5
+TANAKA_HIGASHI_PAIR_COUNT = 1
+TANAKA_HIGASHI_FROM_DAY = 20
+TANAKA_AKABANE_THIRD_CANDIDATES: tuple = ("鈴木", "板倉")
+TANAKA_PAIR_REQUIRED_MEMBERS: tuple = ("田中", "楯", "土井", "鈴木", "板倉")
+
+
+def is_tanaka_pair_training_month(year: int, month: int) -> bool:
+    """田中さんの研修ペア勤務ルールを適用する月か。"""
+    return (int(year), int(month)) in TANAKA_PAIR_TRAINING_MONTHS
+
+
+# 月限定の配置禁止（例: 2026年8月の大類さんは赤羽への応援配置をしない）
+MONTHLY_FORBIDDEN_STORE_ASSIGNMENTS: dict = {
+    (2026, 8): (("大類", Store.AKABANE),),
+}
+
+# 月限定の配置優先の追加スコア（例: 2026年8月の大類さんは大宮駅前を主担当扱い）
+MONTHLY_STORE_EXTRA_WEIGHTS: dict = {
+    (2026, 8): {("大類", Store.OMIYA): 6},
+}
+
+
+def yamamoto_monthly_max_days(month: int) -> int:
+    """山本さんの月間最大出勤日数（1・2月=14日、3〜12月=15日）。"""
+    return 14 if int(month) in (1, 2) else 15
+
 # 月内の最低巡回条件。
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {}
