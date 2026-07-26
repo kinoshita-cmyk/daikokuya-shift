@@ -35,6 +35,10 @@ ONLY_ON_REQUEST_TARGET_DAYS = 8
 EAST_WEST_DEDICATED = ("土井", "楯")
 EAST_WEST_SUBSTITUTES = ("春山", "長尾", "今津")
 
+# 補助要員の月間供給人区（前任者の計算方式: 山本さんは半月＝毎月15人区）
+# 総供給にのみ計上し、エコ・東西口の計算には含めない（前任者と同じ扱い）
+AUXILIARY_MONTHLY_SUPPLY = {"山本": 15}
+
 
 def compute_monthly_capacity_balance(
     year: int,
@@ -62,8 +66,12 @@ def compute_monthly_capacity_balance(
     requested_holiday_days = requested_holiday_days or {}
     days_in_month = monthrange(int(year), int(month))[1]
 
-    # ---- 需要side（日ごとに営業モード・定休日を考慮） ----------
-    demand_total = 0          # 標準人数ベースの必要延べ人区
+    # ---- 需要side ------------------------------------------------
+    # 前任者の計算と突き合わせられるよう、需要は「全日を標準人数で
+    # 回す場合」を主表示にする（例: 8月 31日×11人−東口休5日=336）。
+    # 省人員モード適用時の軽減分は mode_reduction として別に返す。
+    demand_total = 0          # 標準人数ベースの必要延べ人区（前任者方式）
+    mode_reduction = 0        # 省人員・休業モード適用時に減る人区
     demand_eco_baseline = 0   # エコ最低ライン（大宮を1人として数える）
     east_west_demand = 0      # 東口＋西口の必要延べ人区
     omiya_normal_open_days = 0  # 大宮を2人体制に格上げできる候補日数
@@ -73,27 +81,34 @@ def compute_monthly_capacity_balance(
 
     for d in range(1, days_in_month + 1):
         mode = operation_modes.get(d, OperationMode.NORMAL)
-        if mode == OperationMode.CLOSED:
-            closed_days += 1
-            continue
         if mode == OperationMode.REDUCED:
             reduced_days += 1
-        capacity = get_capacity(mode)
+        elif mode == OperationMode.CLOSED:
+            closed_days += 1
+        mode_capacity = get_capacity(mode)
         weekday = date(int(year), int(month), d).weekday()
-        for store, cap in capacity.items():
-            if cap is None:
+        for store, std in STORE_STAFFING_LIMITS.items():
+            std_cap = get_capacity(OperationMode.NORMAL).get(store)
+            if std_cap is None:
                 continue
-            if weekday in cap.closed_dow:
+            if weekday in std_cap.closed_dow:
                 if store == Store.HIGASHIGUCHI:
                     higashi_closed_days += 1
                 continue
-            # 標準人数（通常モードは店舗標準、省人員等は最低人数）
-            if mode == OperationMode.NORMAL and store in STORE_STAFFING_LIMITS:
-                demand_total += int(STORE_STAFFING_LIMITS[store].standard_total)
+            # 標準需要（前任者方式: モードに関わらず標準人数で数える）
+            standard_need = int(std.standard_total)
+            demand_total += standard_need
+            # モード適用時の実需要との差分
+            mode_cap = mode_capacity.get(store)
+            if mode == OperationMode.CLOSED or mode_cap is None:
+                actual_need = 0
+            elif mode == OperationMode.NORMAL:
+                actual_need = standard_need
             else:
-                demand_total += int(cap.eco_min) + int(cap.ticket_min)
+                actual_need = int(mode_cap.eco_min) + int(mode_cap.ticket_min)
+            mode_reduction += max(0, standard_need - actual_need)
             # エコ最低ライン（エコが必要な店に1人ずつ。大宮も1人と数える）
-            if int(cap.eco_min) >= 1:
+            if int(std_cap.eco_min) >= 1:
                 demand_eco_baseline += 1
             # 東口・西口
             if store in (Store.HIGASHIGUCHI, Store.NISHIGUCHI):
@@ -118,9 +133,25 @@ def compute_monthly_capacity_balance(
         if role_text in ("顧問", "ADVISOR"):
             continue  # 顧問は自動配置しない方針のため供給に数えない
         if getattr(e, "is_auxiliary", False):
-            # 補助要員（山本さん）は必要時のみ投入されるため、
-            # 控えめに見るため供給に含めない（実際はこの分の余裕が上乗せ）
-            excluded_names.append(f"{name}（補助要員）")
+            # 補助要員（山本さん）: 前任者の計算方式に合わせて
+            # 固定の月間供給（半月=15人区）で総供給にのみ計上する
+            aux_base = int(AUXILIARY_MONTHLY_SUPPLY.get(name, 0))
+            if aux_base <= 0:
+                excluded_names.append(f"{name}（補助要員・供給目安なし）")
+                continue
+            aux_paid = int(submitted_paid_leave.get(name, 0) or 0) + int(
+                admin_paid_leave.get(name, 0) or 0
+            )
+            aux_supply = max(0, aux_base - aux_paid)
+            supply_total += aux_supply
+            supply_rows.append({
+                "氏名": name,
+                "目標出勤": aux_base,
+                "有給": aux_paid,
+                "供給人区": aux_supply,
+                "エコ": "",
+                "備考": "補助要員（毎月15人区の計算。エコ・東西口には含めない）",
+            })
             continue
 
         note = ""
@@ -180,6 +211,7 @@ def compute_monthly_capacity_balance(
         "higashi_closed_days": higashi_closed_days,
         # 1. 全体需給
         "demand_total": demand_total,
+        "mode_reduction": mode_reduction,
         "supply_total": supply_total,
         "slack_total": slack_total,
         # 2. エコ需給
@@ -211,10 +243,18 @@ def balance_summary_lines(result: dict) -> list:
         verdict1 = f"🟡 余裕 **{slack}人区**（ギリギリ。休み希望の重なりに注意）"
     else:
         verdict1 = f"🟢 余裕 **{slack}人区**"
-    lines.append(
-        f"**1. 全体の需給**: 必要 {result['demand_total']}人区 ／ "
+    line1 = (
+        f"**1. 全体の需給**: 必要 {result['demand_total']}人区"
+        "（全日を標準人数で計算） ／ "
         f"供給 {result['supply_total']}人区 → {verdict1}"
     )
+    reduction = int(result.get("mode_reduction", 0) or 0)
+    if reduction > 0:
+        line1 += (
+            f"　※省人員モード適用日はさらに{reduction}人区軽くなります"
+            f"（実質必要 {int(result['demand_total']) - reduction}人区）"
+        )
+    lines.append(line1)
 
     lines.append(
         f"**2. エコの需給**: 最低ライン {result['demand_eco_baseline']}人区"
