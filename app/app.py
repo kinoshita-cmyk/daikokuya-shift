@@ -3753,7 +3753,6 @@ def render_monthly_exceptions_panel() -> None:
     st.markdown("#### 現在設定されている例外")
 
     _anchor_list = list(_mx_raw.get("omiya_anchor_relaxed_months", []) or [])
-    _two_person_list = list(_mx_raw.get("omiya_two_person_months", []) or [])
     _training_map = dict(_mx_raw.get("tanaka_training", {}) or {})
     _employee_override_map = dict(
         _mx_raw.get("employee_store_overrides", {}) or {}
@@ -3770,7 +3769,6 @@ def render_monthly_exceptions_panel() -> None:
 
     _has_any = bool(
         _anchor_list
-        or _two_person_list
         or _training_map
         or _employee_override_map
         or _carry_map
@@ -3790,14 +3788,6 @@ def render_monthly_exceptions_panel() -> None:
                     t for t in _anchor_list if t != _ym
                 ]
                 _mx_save_and_push(_new, actor="管理者")
-
-    if _two_person_list:
-        st.markdown(
-            "**👥 大宮駅前2名体制**"
-            "（人員不足時に限り、エコ1名以上・合計2名を許容）"
-        )
-        for _ym in sorted(_two_person_list):
-            st.write(f"　- {_ym_jp(_ym)}")
 
     if _training_map:
         st.markdown("**🎓 月限定の研修配置**（生成・検証で回数を強制）")
