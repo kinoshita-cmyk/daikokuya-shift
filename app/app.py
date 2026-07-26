@@ -3767,6 +3767,18 @@ def render_monthly_exceptions_panel() -> None:
         except (ValueError, AttributeError):
             return str(ym_text)
 
+    def _store_jp(raw_store) -> str:
+        """月例外の保存値（英字ID）を管理画面では日本語表示する。"""
+        store_labels = {
+            "AKABANE": "赤羽",
+            "HIGASHIGUCHI": "東口",
+            "OMIYA": "大宮",
+            "NISHIGUCHI": "西口",
+            "SUZURAN": "すずらん",
+        }
+        raw_text = str(raw_store or "").strip()
+        return store_labels.get(raw_text.upper(), raw_text or "なし")
+
     _has_any = bool(
         _anchor_list
         or _training_map
@@ -3809,9 +3821,9 @@ def render_monthly_exceptions_panel() -> None:
         st.markdown("**👤 月限定の店舗区分**")
         for _ym, _employees in sorted(_employee_override_map.items()):
             for _employee, _rule in sorted(dict(_employees or {}).items()):
-                _primary = str(_rule.get("primary_store") or "なし")
+                _primary = _store_jp(_rule.get("primary_store"))
                 _removed = "、".join(
-                    str(store)
+                    _store_jp(store)
                     for store in (_rule.get("remove_support_stores") or [])
                 ) or "なし"
                 st.write(
@@ -9108,7 +9120,7 @@ elif mode == "⚙️ 設定":
             "work_request": "出勤希望・希望店舗の考慮",
             "omiya_anchor": "大宮アンカー（春山 or 下地必須）",
             "higashi_monday": "東口の月曜休店",
-            "omiya_short_warning": "大宮人数少（エコ1名運営）の警告表示",
+            "omiya_short_warning": "大宮人数少（合計2名運営）の警告表示",
         }
 
         param_specs = {
