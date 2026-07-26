@@ -659,6 +659,8 @@ def generate_shift(
 
     # 大宮の「人数少」状態を表す変数（人員不足時はエコ1+チケット1で可）
     omiya_short = {d: model.NewBoolVar(f"omiya_short_{d}") for d in days}
+    # 赤羽を正規2人のままにする日（山本さん頼み）を強く避けるためのフラグ
+    akabane_short = {d: model.NewBoolVar(f"akabane_short_{d}") for d in days}
     higashi_unexpected_assignments = []
     over_standard_staffing_terms = []
     over_daily_staffing_terms = []
@@ -762,6 +764,10 @@ def generate_shift(
                     model.Add(total_at_store >= 3)
                 else:
                     model.Add(total_at_store >= 2)
+                    # 正規2人のまま（山本さん頼み）は強いペナルティ。
+                    # 正規で3人組めない日だけが2人になり、その日だけ
+                    # 山本さんが自動投入される（高齢のため連続投入を防ぐ）。
+                    model.Add(total_at_store + akabane_short[d] >= 3)
                 continue
 
             # 大宮の特殊ルール:
@@ -1355,6 +1361,8 @@ def generate_shift(
         obj = obj - 50000 * sum(advisor_assignments)
     # 大宮の2名体制は最終手段。解がある限り通常の3名体制を優先する。
     obj = obj - 100 * sum(omiya_short.values())
+    # 赤羽の正規2人運用（山本さん頼み）は大宮の人数少より強く回避する
+    obj = obj - 150 * sum(akabane_short.values())
     if higashi_unexpected_assignments:
         # 東口は土井さんまたは指定代替4名を強く優先する。
         # ただし過去月の実態確認前なので、解なしにせず大きめのペナルティに留める。
