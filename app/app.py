@@ -4297,25 +4297,24 @@ if mode == "📊 経営者ビュー":
             st.caption("／".join(_cb_notes))
             if _cb_result.get("supply_rows"):
                 st.markdown("**供給の内訳（1人ずつの人区）**")
+                st.caption(
+                    "「計算式」は人によって算出方法が異なるため、"
+                    "1人ずつ明記しています（基準日数型／自由記載型／出勤希望型）。"
+                )
                 _cb_rows_disp = list(_cb_result["supply_rows"])
                 _cb_rows_disp.append({
                     "氏名": "◆ 合計",
-                    "目標出勤": sum(
-                        int(r["目標出勤"]) for r in _cb_result["supply_rows"]
-                    ),
-                    "有給": sum(
-                        int(r["有給"]) for r in _cb_result["supply_rows"]
-                    ),
                     "供給人区": int(_cb_result["supply_total"]),
+                    "計算式": (
+                        f"うちエコ担当の供給 {int(_cb_result['eco_supply'])}人区"
+                    ),
                     "エコ": "",
-                    "備考": f"うちエコ担当の供給 {int(_cb_result['eco_supply'])}人区",
                 })
                 render_scrollable_dict_table(
                     _cb_rows_disp,
-                    columns=["氏名", "目標出勤", "有給", "供給人区", "エコ", "備考"],
+                    columns=["氏名", "供給人区", "計算式", "エコ"],
                     widths={
-                        "氏名": 100, "目標出勤": 90, "有給": 70,
-                        "供給人区": 90, "エコ": 60, "備考": 430,
+                        "氏名": 100, "供給人区": 90, "計算式": 430, "エコ": 60,
                     },
                     empty_message="内訳がありません",
                     max_height=560,
