@@ -144,17 +144,17 @@ def compute_monthly_capacity_balance(
             )
             aux_supply = max(0, aux_base - aux_paid)
             supply_total += aux_supply
+            formula = f"毎月{aux_base}人区（補助要員の固定計算）"
+            if aux_paid:
+                formula += f" − 有給{aux_paid}日"
             supply_rows.append({
                 "氏名": name,
-                "目標出勤": aux_base,
-                "有給": aux_paid,
                 "供給人区": aux_supply,
+                "計算式": formula + "／エコ・東西口には含めない",
                 "エコ": "",
-                "備考": "補助要員（毎月15人区の計算。エコ・東西口には含めない）",
             })
             continue
 
-        note = ""
         paid = int(submitted_paid_leave.get(name, 0) or 0) + int(
             admin_paid_leave.get(name, 0) or 0
         )
@@ -162,16 +162,19 @@ def compute_monthly_capacity_balance(
             base = int(work_request_counts.get(name, 0) or 0)
             if base <= 0:
                 base = int(ONLY_ON_REQUEST_TARGET_DAYS)
-                note = "出勤希望のみ勤務（未提出のため目安値）"
+                formula = f"出勤希望のみ勤務（未提出のため目安 {base}日）"
             else:
-                note = "出勤希望のみ勤務（提出された希望日数）"
+                formula = f"出勤希望 {base}日（出勤希望のみ勤務）"
             supply = max(0, base - paid)
+            if paid:
+                formula += f" − 有給{paid}日"
         elif name in requested_holiday_days:
             # 自由記載で「休み計◯日」を指定した人（勤務日数が確定している）
             req_off = int(requested_holiday_days.get(name, 0) or 0)
-            base = max(0, days_in_month - req_off)
-            note = f"自由記載の指定（休み計{req_off}日）から算出"
-            supply = base  # 有給は指定休日数に含まれているため引かない
+            supply = max(0, days_in_month - req_off)
+            formula = f"{days_in_month}日 − 休み計{req_off}日（自由記載の指定）"
+            if paid:
+                formula += f"※有給{paid}日は休み計に含む"
         else:
             target = get_monthly_work_target(
                 name, int(month), getattr(e, "annual_target_days", None),
@@ -181,6 +184,9 @@ def compute_monthly_capacity_balance(
                 continue
             base = int(target)
             supply = max(0, base - paid)
+            formula = f"基準 {base}日"
+            if paid:
+                formula += f" − 有給{paid}日"
         supply_total += supply
         is_eco = getattr(e, "skill", None) == Skill.ECO
         if is_eco:
@@ -189,11 +195,9 @@ def compute_monthly_capacity_balance(
             east_west_dedicated_supply += supply
         supply_rows.append({
             "氏名": name,
-            "目標出勤": base,
-            "有給": paid,
             "供給人区": supply,
+            "計算式": formula,
             "エコ": "○" if is_eco else "",
-            "備考": note,
         })
 
     # ---- 判定 ---------------------------------------------------
@@ -315,5 +319,4 @@ if __name__ == "__main__":
         print(" ", line.replace("**", ""))
     print("\n供給明細:")
     for row in result["supply_rows"]:
-        print(f"  {row['氏名']}: 目標{row['目標出勤']} − 有給{row['有給']}"
-              f" = {row['供給人区']}人区 {row['エコ']} {row['備考']}")
+        print(f"  {row['氏名']}: {row['供給人区']}人区 ← {row['計算式']} {row['エコ']}")
