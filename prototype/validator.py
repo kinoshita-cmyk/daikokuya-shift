@@ -38,7 +38,8 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, avoid_same_off_rules,
+    fixed_suzuran_core_presence_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
     month_edge_forced_assignments, compute_prev_consecutive_run,
@@ -1460,10 +1461,37 @@ def _check_monthly_avoid_same_off_rules(
     result: ValidationResult,
     days: int,
 ) -> None:
-    """月限定の同時休み回避ルールを警告として確認する。"""
-    for first_name, second_name, reason in MONTHLY_AVOID_SAME_OFF_RULES.get(
-        (int(shift.year), int(shift.month)),
-        (),
+    """全月共通のすずらん不在と月限定の同時休みを警告確認する。"""
+    for first_name, second_name, reason in fixed_suzuran_core_presence_rules():
+        for day in range(1, days + 1):
+            first_assignment = shift.get_assignment(first_name, day)
+            second_assignment = shift.get_assignment(second_name, day)
+            first_at_suzuran = (
+                first_assignment is not None
+                and first_assignment.store == Store.SUZURAN
+            )
+            second_at_suzuran = (
+                second_assignment is not None
+                and second_assignment.store == Store.SUZURAN
+            )
+            if first_at_suzuran or second_at_suzuran:
+                continue
+            result.issues.append(Issue(
+                severity="WARNING",
+                category="すずらん主力不在",
+                day=day,
+                employee=None,
+                message=(
+                    f"{first_name}・{second_name}のどちらも"
+                    f"すずらんにいません。{reason}。"
+                    "本人の×休み希望や他店舗の必要人数を優先する場合は"
+                    "許容してください。"
+                ),
+            ))
+
+    for first_name, second_name, reason in avoid_same_off_rules(
+        shift.year,
+        shift.month,
     ):
         for day in range(1, days + 1):
             first_assignment = shift.get_assignment(first_name, day)
@@ -1474,7 +1502,7 @@ def _check_monthly_avoid_same_off_rules(
                 continue
             result.issues.append(Issue(
                 severity="WARNING",
-                category="月別同時休み回避",
+                category="同時休み回避",
                 day=day,
                 employee=None,
                 message=(

@@ -46,7 +46,8 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTHLY_AVOID_SAME_OFF_RULES,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, fixed_suzuran_core_presence_rules,
+    monthly_avoid_same_off_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
     month_edge_forced_assignments, compute_prev_consecutive_run,
@@ -55,6 +56,7 @@ from .rules import (
     monthly_employee_store_override,
     yamamoto_monthly_max_days,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
+    WORK_TARGET_ERROR_DIFF_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
 )
 
@@ -153,6 +155,13 @@ MONTHLY_RULE_PENALTY = 2200
 # 主担当なし・通常対応可が複数あるスタッフは、同じ店舗に偏りすぎないよう
 # 通常対応可店舗間の配属回数差を避ける。
 BALANCED_NORMAL_STORE_DIFF_PENALTY = 160
+# 管理画面でその月に明示設定した同時休みは、通常店舗の単純な配分差より
+# 強く避けるが、大宮のエコ2名+チケット1名体制（400）は優先する。
+# 全月共通の確認ルールは生成結果を不安定にしないよう検証WARNINGだけにする。
+AVOID_SAME_OFF_PENALTY = 200
+# 大宮の需給上限と店舗最低人数を守った範囲で、
+# すずらん主力2名のどちらも不在となる日を強く避ける。
+SUZURAN_CORE_ABSENCE_PENALTY = 1000
 
 # 月別設定で「応援・巡回先から外す」とした店舗は、絶対禁止にはせず、
 # 山本さんの不足補助より先に通常配置されない程度の回避対象にする。
@@ -162,6 +171,12 @@ BALANCED_NORMAL_STORE_DIFF_PENALTY = 160
 # 顧問投入（50000）とは桁が異なり、同じ緊急措置としては扱わない。
 REMOVED_SUPPORT_STORE_ASSIGNMENT_PENALTY = 80
 OMIYA_SHORTAGE_PENALTY = 400
+# 月間エコ需給から算出した「大宮2名体制の目安日数」を超えた分は、
+# 単日の配分嗜好より強く避ける。目安以内は通常の需給調整として許容する。
+OMIYA_SHORTAGE_EXCESS_PENALTY = 6000
+# 理論目安は日別の休み・連勤配置を含まないため、1日の余裕を持って探索する。
+# この上限で解が見つからない月は、同じ生成処理内で自動的に上限を外して再探索する。
+OMIYA_SHORTAGE_BUDGET_BUFFER = 1
 AKABANE_SHORTAGE_PENALTY = 60
 
 # 南さんのような「出勤希望日のみ稼働」のパートは年間目標日数を持たないため、
@@ -169,6 +184,77 @@ AKABANE_SHORTAGE_PENALTY = 60
 # 候補日が十分ある月は8日程度の勤務を目標にする。
 ONLY_ON_REQUEST_TARGET_DAYS = 8
 ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
+
+
+def _estimate_omiya_shortage_budget(
+    year: int,
+    month: int,
+    employees: list,
+    off_requests: dict[str, list[int]],
+    holiday_overrides: dict[str, int],
+    exact_holiday_days: dict[str, int],
+    operation_modes: dict[int, OperationMode],
+    default_holidays: int,
+) -> dict[str, int]:
+    """月間エコ需給から大宮2名体制の日数目安を算出する。
+
+    大宮をエコ1名として全店舗の最低エコ需要を数え、エコ供給の余剰分だけ
+    大宮をエコ2名へ格上げできると考える。個別の休みの並びや連勤制約までは
+    ここでは見ないため、生成では絶対上限ではなく強い目標として使う。
+    """
+    days_in_month = monthrange(int(year), int(month))[1]
+    capacity_by_mode = {
+        OperationMode.NORMAL: NORMAL_CAPACITY,
+        OperationMode.REDUCED: REDUCED_CAPACITY,
+        OperationMode.MINIMUM: MINIMUM_CAPACITY,
+        OperationMode.CLOSED: {},
+    }
+    baseline_eco_demand = 0
+    omiya_normal_days = 0
+    for day in range(1, days_in_month + 1):
+        mode = operation_modes.get(day, OperationMode.NORMAL)
+        weekday = date(int(year), int(month), day).weekday()
+        for store, store_cap in capacity_by_mode[mode].items():
+            if weekday in store_cap.closed_dow:
+                continue
+            if int(store_cap.eco_min) >= 1:
+                # 大宮もまずエコ1名として最低需要を数える。
+                baseline_eco_demand += 1
+            if store == Store.OMIYA and mode == OperationMode.NORMAL:
+                omiya_normal_days += 1
+
+    eco_supply_upper = 0
+    for employee in employees:
+        if employee.skill != Skill.ECO or employee.role == Role.ADVISOR:
+            continue
+        requested_off = len(set(off_requests.get(employee.name, [])))
+        if employee.name in exact_holiday_days:
+            required_off = int(exact_holiday_days[employee.name])
+        else:
+            required_off = int(holiday_overrides.get(
+                employee.name,
+                get_monthly_required_holiday_days(
+                    employee.name,
+                    month,
+                    days_in_month,
+                    employee.annual_target_days,
+                    default_holidays,
+                ),
+            ))
+        required_off = max(required_off, requested_off)
+        eco_supply_upper += max(0, days_in_month - required_off)
+
+    extra_eco_for_omiya = max(0, eco_supply_upper - baseline_eco_demand)
+    omiya_normal_target = min(omiya_normal_days, extra_eco_for_omiya)
+    return {
+        "baseline_eco_demand": int(baseline_eco_demand),
+        "eco_supply_upper": int(eco_supply_upper),
+        "omiya_normal_days": int(omiya_normal_days),
+        "omiya_normal_target": int(omiya_normal_target),
+        "omiya_shortage_budget": int(
+            max(0, omiya_normal_days - omiya_normal_target)
+        ),
+    }
 
 
 def generate_shift(
@@ -699,6 +785,16 @@ def generate_shift(
     higashi_unexpected_assignments = []
     over_standard_staffing_terms = []
     over_daily_staffing_terms = []
+    omiya_budget = _estimate_omiya_shortage_budget(
+        year=year,
+        month=month,
+        employees=main_employees,
+        off_requests=off_requests,
+        holiday_overrides=holiday_overrides,
+        exact_holiday_days=exact_holiday_days,
+        operation_modes=operation_modes,
+        default_holidays=default_holidays,
+    )
 
     for d in days:
         mode = operation_modes.get(d, OperationMode.NORMAL)
@@ -842,6 +938,34 @@ def generate_shift(
             # 通常の制約
             model.Add(eco_at_store >= store_cap.eco_min)
             model.Add(total_at_store >= store_cap.eco_min + store_cap.ticket_min)
+
+    normal_omiya_short_terms = [
+        omiya_short[d]
+        for d in days
+        if operation_modes.get(d, OperationMode.NORMAL) == OperationMode.NORMAL
+    ]
+    omiya_shortage_excess = model.NewIntVar(
+        0,
+        len(normal_omiya_short_terms),
+        "omiya_shortage_excess",
+    )
+    model.Add(
+        omiya_shortage_excess
+        >= (
+            sum(normal_omiya_short_terms)
+            - int(omiya_budget["omiya_shortage_budget"])
+        )
+    )
+    model.Add(omiya_shortage_excess >= 0)
+    omiya_budget_enforced = model.NewBoolVar("omiya_budget_enforced")
+    model.Add(
+        sum(normal_omiya_short_terms)
+        <= (
+            int(omiya_budget["omiya_shortage_budget"])
+            + int(OMIYA_SHORTAGE_BUDGET_BUFFER)
+        )
+    ).OnlyEnforceIf(omiya_budget_enforced)
+    model.AddAssumption(omiya_budget_enforced)
 
     # 山本さんは通常スタッフを組んだ後、赤羽が正規2名の日だけ補助投入する。
     # 自動投入数も手動調整後と同じ月上限内に収める。ただし通常スタッフの
@@ -1066,6 +1190,7 @@ def generate_shift(
     monthly_rule_penalty_terms = []
     historical_actual_terms = []
     monthly_avoid_same_off_terms = []
+    suzuran_core_absence_terms = []
     removed_support_assignment_terms = []
 
     # 提出フォームの「○」や自由記載の「出勤希望」「○日は赤羽希望」などはソフト制約。
@@ -1208,9 +1333,9 @@ def generate_shift(
         if name in main_employee_names and store in main_stores:
             monthly_rule_terms.append(x[name][day][store])
 
-    # 月限定の「同時休みをなるべく避ける」条件。
-    # 本人の×希望や解の成立を優先するため、ハード制約ではなく強めのペナルティにする。
-    for first_name, second_name, _reason in MONTHLY_AVOID_SAME_OFF_RULES.get((int(year), int(month)), ()):
+    # 管理画面でその月に明示設定した「同時休みをなるべく避ける」条件。
+    # 全月共通の確認ルールは検証WARNINGに留め、生成結果には影響させない。
+    for first_name, second_name, _reason in monthly_avoid_same_off_rules(year, month):
         if first_name not in main_employee_names or second_name not in main_employee_names:
             continue
         for d in days:
@@ -1218,6 +1343,29 @@ def generate_shift(
             model.AddBoolAnd([off[first_name][d], off[second_name][d]]).OnlyEnforceIf(both_off)
             model.AddBoolOr([off[first_name][d].Not(), off[second_name][d].Not()]).OnlyEnforceIf(both_off.Not())
             monthly_avoid_same_off_terms.append(both_off)
+
+    # 全月共通: 長尾・野澤のどちらもすずらんにいない日をなるべく避ける。
+    # 2人の本人×休みが重なる日は不可避なので、評価対象から外す。
+    for first_name, second_name, _reason in fixed_suzuran_core_presence_rules():
+        if first_name not in main_employee_names or second_name not in main_employee_names:
+            continue
+        first_forced_off = set(off_requests.get(first_name, []))
+        second_forced_off = set(off_requests.get(second_name, []))
+        for d in days:
+            if d in first_forced_off and d in second_forced_off:
+                continue
+            both_absent = model.NewBoolVar(
+                f"suzuran_core_absent_{first_name}_{second_name}_{d}"
+            )
+            model.AddBoolAnd([
+                x[first_name][d][Store.SUZURAN].Not(),
+                x[second_name][d][Store.SUZURAN].Not(),
+            ]).OnlyEnforceIf(both_absent)
+            model.AddBoolOr([
+                x[first_name][d][Store.SUZURAN],
+                x[second_name][d][Store.SUZURAN],
+            ]).OnlyEnforceIf(both_absent.Not())
+            suzuran_core_absence_terms.append(both_absent)
 
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
@@ -1319,6 +1467,17 @@ def generate_shift(
             max(0, days_in_month - requested_off_count),
         )
         actual = sum(1 - off[e.name][d] for d in days)
+        # 検証でERRORになる3日以上の不足を、完成版の生成段階でも許可しない。
+        # 本人×休みが多い人は target_monthly 自体を上で下げているため、
+        # 休み希望を破る制約にはならない。
+        model.Add(
+            actual
+            >= max(
+                0,
+                target_monthly
+                - (int(WORK_TARGET_ERROR_DIFF_DAYS) - 1),
+            )
+        )
         # actual < target なら強いペナルティ。過剰勤務も軽く避ける。
         shortfall = model.NewIntVar(0, days_in_month, f"shortfall_{e.name}")
         model.Add(shortfall >= target_monthly - actual)
@@ -1418,7 +1577,17 @@ def generate_shift(
     if monthly_rule_penalty_terms:
         obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
     if monthly_avoid_same_off_terms:
-        obj = obj - 2400 * sum(monthly_avoid_same_off_terms)
+        obj = (
+            obj
+            - AVOID_SAME_OFF_PENALTY
+            * sum(monthly_avoid_same_off_terms)
+        )
+    if suzuran_core_absence_terms:
+        obj = (
+            obj
+            - SUZURAN_CORE_ABSENCE_PENALTY
+            * sum(suzuran_core_absence_terms)
+        )
     if balanced_normal_store_diff_terms:
         obj = (
             obj
@@ -1454,6 +1623,11 @@ def generate_shift(
     # 均等さより通常のエコ2名+チケット1名を優先する。
     # 顧問投入と同じ緊急措置にはしない。
     obj = obj - OMIYA_SHORTAGE_PENALTY * sum(omiya_short.values())
+    obj = (
+        obj
+        - OMIYA_SHORTAGE_EXCESS_PENALTY
+        * omiya_shortage_excess
+    )
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
     # 赤羽3人目に回り、他店の最低・標準は削られない。
     obj = obj - AKABANE_SHORTAGE_PENALTY * sum(akabane_short.values())
@@ -1466,22 +1640,77 @@ def generate_shift(
     # ============================================================
     # ソルバー実行
     # ============================================================
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = time_limit_seconds
-    # 並列ワーカーは1にして決定論的動作を保証
-    # （複数ワーカーで並列探索すると実行ごとに別解になる）
-    solver.parameters.num_search_workers = 1
-    # シード固定: 同じ入力に対して毎回同じシフトが生成されるようにする
-    solver.parameters.random_seed = random_seed
+    def _new_solver(limit_seconds: float) -> cp_model.CpSolver:
+        configured = cp_model.CpSolver()
+        configured.parameters.max_time_in_seconds = max(1.0, float(limit_seconds))
+        # 並列ワーカーは1にして決定論的動作を保証
+        # （複数ワーカーで並列探索すると実行ごとに別解になる）
+        configured.parameters.num_search_workers = 1
+        # シード固定: 同じ入力に対して毎回同じシフトが生成されるようにする
+        configured.parameters.random_seed = random_seed
+        return configured
+
+    # まず月間需給目安+1日以内で探索し、見つからない月だけ残り時間で
+    # 上限を外して再探索する。これにより大宮体制を優先しつつ生成不能を防ぐ。
+    primary_time_limit = max(
+        1.0,
+        min(
+            float(time_limit_seconds),
+            max(30.0, float(time_limit_seconds) * 0.65),
+        ),
+    )
+    solver = _new_solver(primary_time_limit)
     if verbose:
-        print(f"ソルバー実行中... (制限時間: {time_limit_seconds}秒, シード: {random_seed})")
+        print(
+            "ソルバー実行中... "
+            f"(大宮2名体制の目安上限: "
+            f"{int(omiya_budget['omiya_shortage_budget']) + int(OMIYA_SHORTAGE_BUDGET_BUFFER)}日, "
+            f"第1段階: {primary_time_limit:.0f}秒, シード: {random_seed})"
+        )
 
     status = solver.Solve(model)
+    first_status_name = solver.StatusName(status)
+    first_wall_time = float(solver.WallTime())
+    omiya_budget_retry_used = False
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        remaining_time = max(
+            1.0,
+            float(time_limit_seconds) - first_wall_time,
+        )
+        model.ClearAssumptions()
+        model.Add(omiya_budget_enforced == 0)
+        solver = _new_solver(remaining_time)
+        omiya_budget_retry_used = True
+        if verbose:
+            print(
+                "大宮2名体制の目安上限内で解が見つからなかったため、"
+                f"上限を自動緩和して再探索します（残り{remaining_time:.0f}秒）。"
+            )
+        status = solver.Solve(model)
 
     if status_out is not None:
         # 解なしの原因調査用: INFEASIBLE(矛盾) と UNKNOWN(時間切れ) を区別できるようにする
         status_out["status"] = solver.StatusName(status)
-        status_out["wall_time_seconds"] = round(solver.WallTime(), 1)
+        status_out["wall_time_seconds"] = round(
+            first_wall_time
+            + (float(solver.WallTime()) if omiya_budget_retry_used else 0.0),
+            1,
+        )
+        status_out["omiya_capacity_target"] = dict(omiya_budget)
+        status_out["omiya_budget_limit_days"] = (
+            int(omiya_budget["omiya_shortage_budget"])
+            + int(OMIYA_SHORTAGE_BUDGET_BUFFER)
+        )
+        status_out["omiya_budget_first_status"] = first_status_name
+        status_out["omiya_budget_relaxed_retry"] = omiya_budget_retry_used
+        if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["omiya_shortage_actual_days"] = sum(
+                solver.Value(omiya_short[d])
+                for d in days
+                if operation_modes.get(d, OperationMode.NORMAL)
+                == OperationMode.NORMAL
+            )
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         if verbose:

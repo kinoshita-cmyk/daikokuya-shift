@@ -503,16 +503,54 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
 # 本人の休み希望は最優先したうえで、生成できる解では必ず満たす。
 STORE_ROTATION_MINIMUMS: dict[str, list[tuple[tuple[Store, ...], int]]] = {}
 
-# 月限定の「同時休みをなるべく避ける」ルール。
-# ソフト制約なので、本人の×休み希望や解の成立を優先する。
-_DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = {
-    (2026, 7): (
-        ("長尾", "野澤", "すずらんメイン2名の同時休みは可能な限り避ける"),
-    ),
-}
+# 全月共通の「すずらん主力2名の同時不在をなるべく避ける」ルール。
+# 2人の×休みが重なる日や、他店舗の必要人数を崩す場合は許容する。
+FIXED_SUZURAN_CORE_PRESENCE_RULES: tuple[tuple[str, str, str], ...] = (
+    ("長尾", "野澤", "すずらんメイン2名のどちらも不在になる日を可能な限り避ける"),
+)
+
+# 月限定で追加する同時休み回避ルール。
+_DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES: dict[
+    tuple[int, int], tuple[tuple[str, str, str], ...]
+] = {}
 MONTHLY_AVOID_SAME_OFF_RULES: dict[tuple[int, int], tuple[tuple[str, str, str], ...]] = dict(
     _DEFAULT_MONTHLY_AVOID_SAME_OFF_RULES
 )
+
+
+def avoid_same_off_rules(
+    year: int,
+    month: int,
+) -> tuple[tuple[str, str, str], ...]:
+    """管理画面でその月に設定した同時休み回避ルールを返す。"""
+    combined = list(
+        MONTHLY_AVOID_SAME_OFF_RULES.get((int(year), int(month)), ())
+    )
+    result = []
+    seen_pairs = set()
+    for first_name, second_name, reason in combined:
+        pair_key = tuple(sorted((str(first_name), str(second_name))))
+        if pair_key in seen_pairs:
+            continue
+        seen_pairs.add(pair_key)
+        result.append((str(first_name), str(second_name), str(reason)))
+    return tuple(result)
+
+
+def fixed_suzuran_core_presence_rules(
+) -> tuple[tuple[str, str, str], ...]:
+    """全月共通のすずらん主力同時不在回避ルールを返す。"""
+    return FIXED_SUZURAN_CORE_PRESENCE_RULES
+
+
+def monthly_avoid_same_off_rules(
+    year: int,
+    month: int,
+) -> tuple[tuple[str, str, str], ...]:
+    """管理画面でその月に明示設定した同時休み回避ルールだけを返す。"""
+    return tuple(
+        MONTHLY_AVOID_SAME_OFF_RULES.get((int(year), int(month)), ())
+    )
 
 # 前月末から月初へまたがる連勤だけに適用する月別例外。
 # 月内の連勤上限は緩めず、前月確定シフト・月初固定配置・本人の×休みが
