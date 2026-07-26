@@ -3750,6 +3750,11 @@ def render_monthly_exceptions_panel() -> None:
     st.markdown("#### 現在設定されている例外")
 
     _anchor_list = list(_mx_raw.get("omiya_anchor_relaxed_months", []) or [])
+    _two_person_list = list(_mx_raw.get("omiya_two_person_months", []) or [])
+    _training_map = dict(_mx_raw.get("tanaka_training", {}) or {})
+    _employee_override_map = dict(
+        _mx_raw.get("employee_store_overrides", {}) or {}
+    )
     _carry_map = dict(_mx_raw.get("carryover_consecutive_allowances", {}) or {})
     _avoid_map = dict(_mx_raw.get("avoid_same_off", {}) or {})
 
@@ -3760,7 +3765,14 @@ def render_monthly_exceptions_panel() -> None:
         except (ValueError, AttributeError):
             return str(ym_text)
 
-    _has_any = bool(_anchor_list or _carry_map or _avoid_map)
+    _has_any = bool(
+        _anchor_list
+        or _two_person_list
+        or _training_map
+        or _employee_override_map
+        or _carry_map
+        or _avoid_map
+    )
     if not _has_any:
         st.info("現在、月例外は設定されていません（すべての月が通常ルールで動きます）。")
 
@@ -3775,6 +3787,44 @@ def render_monthly_exceptions_panel() -> None:
                     t for t in _anchor_list if t != _ym
                 ]
                 _mx_save_and_push(_new, actor="管理者")
+
+    if _two_person_list:
+        st.markdown(
+            "**👥 大宮駅前2名体制**"
+            "（人員不足時に限り、エコ1名以上・合計2名を許容）"
+        )
+        for _ym in sorted(_two_person_list):
+            st.write(f"　- {_ym_jp(_ym)}")
+
+    if _training_map:
+        st.markdown("**🎓 月限定の研修配置**（生成・検証で回数を強制）")
+        for _ym, _rule in sorted(_training_map.items()):
+            _third = "または".join(
+                str(name)
+                for name in (_rule.get("akabane_third_candidates") or [])
+            )
+            st.write(
+                f"　- {_ym_jp(_ym)} ／ 田中: "
+                f"西口{int(_rule.get('nishiguchi_count', 0))}回、"
+                f"赤羽{int(_rule.get('akabane_count', 0))}回"
+                f"（3人目は{_third}）、"
+                f"東口{int(_rule.get('higashiguchi_count', 0))}回"
+                f"（{int(_rule.get('higashiguchi_from_day', 1))}日以降）"
+            )
+
+    if _employee_override_map:
+        st.markdown("**👤 月限定の店舗区分**")
+        for _ym, _employees in sorted(_employee_override_map.items()):
+            for _employee, _rule in sorted(dict(_employees or {}).items()):
+                _primary = str(_rule.get("primary_store") or "なし")
+                _removed = "、".join(
+                    str(store)
+                    for store in (_rule.get("remove_support_stores") or [])
+                ) or "なし"
+                st.write(
+                    f"　- {_ym_jp(_ym)} ／ {_employee}: "
+                    f"主担当 {_primary}、応援・巡回から外す {_removed}"
+                )
 
     if _carry_map:
         st.markdown("**🔗 境界連勤の延長**（前月から続く連勤に限り、月初の連勤上限を延長）")
@@ -4977,7 +5027,7 @@ if mode == "📊 経営者ビュー":
     with st.expander("📅 月例外・営業モード（この月だけの特例）", expanded=False):
         render_monthly_exceptions_panel()
 
-    # コード管理の月限定ルール（画面から変更不可だが、効いていることは明示する）
+    # 月別設定ファイルで確定しているルールを明示する。
     try:
         from prototype.rules import active_code_managed_monthly_rules
         _code_rules = active_code_managed_monthly_rules(
@@ -4985,8 +5035,8 @@ if mode == "📊 経営者ビュー":
         )
         if _code_rules:
             st.info(
-                "🧩 **この月はコード管理の特別ルールが有効です**"
-                "（変更は技術者対応。効いている内容は以下の通り）\n\n"
+                "🧩 **この月の確定ルールが有効です**"
+                "（生成と検証の両方に同じ内容を反映します）\n\n"
                 + "\n".join(f"- {t}" for t in _code_rules)
             )
     except Exception:
@@ -5261,93 +5311,6 @@ if mode == "📊 経営者ビュー":
 
     st.markdown("---")
     st.markdown("## ✅ 3. 生成前チェック")
-
-    # ============================================================
-    # 📊 今月の需給バランス（前任者の手計算の自動化・概算）
-    # ============================================================
-    with st.expander("📊 今月の需給バランス（生成前の概算チェック）", expanded=False):
-        st.caption(
-            "前任者が手計算していた「そもそも人が足りるか」の検算を、"
-            "提出データ・営業モード・店舗定休日から自動計算したものです。"
-            "×休みの並びや連勤などの詳細条件は含まない概算で、"
-            "正確な成立可否はシフト生成が判定します。"
-        )
-        try:
-            from prototype.capacity_balance import (
-                balance_summary_lines,
-                compute_monthly_capacity_balance,
-            )
-            from prototype.submission_loader import (
-                load_submissions_for_month as _cb_load_submissions,
-            )
-            _cb_sub = _cb_load_submissions(
-                int(target_year), int(target_month), expected_employees,
-            )
-            _cb_wr_counts: dict = {}
-            for _cb_emp, _cb_day, _cb_store in _cb_sub.work_requests:
-                _cb_wr_counts[_cb_emp] = _cb_wr_counts.get(_cb_emp, 0) + 1
-            # 補助要員（山本さん）も供給計上の対象に含める
-            _cb_employees = list(shift_active_employees())
-            _cb_names = {_e.name for _e in _cb_employees}
-            for _cb_aux in ALL_EMPLOYEES:
-                if (
-                    getattr(_cb_aux, "is_auxiliary", False)
-                    and _cb_aux.name not in _cb_names
-                ):
-                    _cb_employees.append(_cb_aux)
-            _cb_result = compute_monthly_capacity_balance(
-                int(target_year), int(target_month),
-                _cb_employees,
-                determine_operation_modes(int(target_year), int(target_month)),
-                submitted_paid_leave=_cb_sub.paid_leave_days,
-                admin_paid_leave=admin_paid_leave_days_for_month(
-                    int(target_year), int(target_month),
-                ),
-                work_request_counts=_cb_wr_counts,
-                requested_holiday_days=getattr(
-                    _cb_sub, "requested_holiday_days", {},
-                ),
-            )
-            for _cb_line in balance_summary_lines(_cb_result):
-                st.markdown("- " + _cb_line)
-            _cb_notes = [
-                f"東口定休 {_cb_result['higashi_closed_days']}日を控除済み",
-                "補助要員（山本さん）は毎月15人区として総供給にのみ計上"
-                "（エコ・東西口の計算には含めない）",
-            ]
-            if _cb_result.get("excluded_names"):
-                _cb_notes.append(
-                    "概算対象外: " + "、".join(_cb_result["excluded_names"])
-                )
-            st.caption("／".join(_cb_notes))
-            if _cb_result.get("supply_rows"):
-                st.markdown("**供給の内訳（1人ずつの人区）**")
-                st.caption(
-                    "「計算式」は人によって算出方法が異なるため、"
-                    "1人ずつ明記しています（基準日数型／自由記載型／出勤希望型）。"
-                )
-                _cb_rows_disp = list(_cb_result["supply_rows"])
-                _cb_rows_disp.append({
-                    "氏名": "◆ 合計",
-                    "供給人区": int(_cb_result["supply_total"]),
-                    "計算式": (
-                        f"うちエコ担当の供給 {int(_cb_result['eco_supply'])}人区"
-                    ),
-                    "エコ": "",
-                })
-                render_scrollable_dict_table(
-                    _cb_rows_disp,
-                    columns=["氏名", "供給人区", "計算式", "エコ"],
-                    widths={
-                        "氏名": 100, "供給人区": 90, "計算式": 430, "エコ": 60,
-                    },
-                    empty_message="内訳がありません",
-                    max_height=560,
-                )
-        except Exception as _cb_exc:
-            st.caption(
-                f"需給バランスを計算できませんでした（{type(_cb_exc).__name__}）"
-            )
 
     # ============================================================
     # 📅 カレンダー掃引テスト（将来月の事前検査）
@@ -5728,7 +5691,7 @@ if mode == "📊 経営者ビュー":
                         data_source_msg += (
                             "\n📅 営業モード: 全日、通常体制で計算しました。"
                         )
-                    # コード管理の月限定ルールも生成メッセージに明示する
+                    # 月別設定の確定ルールも生成メッセージに明示する
                     try:
                         from prototype.rules import (
                             active_code_managed_monthly_rules as _acm_rules,
@@ -9491,7 +9454,10 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "山本さん補助ロジック",
-                "赤羽駅前店のチケット対応が不足する時だけ補助配置。その他は手動入力対象。",
+                "本人の×は必ず休み。通常スタッフのシフト完成後、赤羽駅前店の"
+                "チケット対応が不足する時だけ補助配置し、その他は空白のまま"
+                "管理者が手動入力する。1・2月14日、3〜12月15日は"
+                "手動調整後の上限エラー判定だけに使い、自動配置目標には使わない。",
                 "反映中", "反映中", "シフト表では空白/赤羽補助として表示",
                 "コード固定", "反映中",
             ),
