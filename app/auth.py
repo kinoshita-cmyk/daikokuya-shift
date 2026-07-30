@@ -1,7 +1,8 @@
 """
-認証モジュール（経営者：パスワード / 従業員：マジックリンク）
+認証モジュール（経営者・シフト担当者：パスワード / 従業員：マジックリンク）
 ================================================
 - 経営者: MANAGER_PASSWORD でパスワード認証
+- シフト担当者: SHIFT_MANAGER_PASSWORD でシフト管理機能だけ利用
 - 従業員: URL に ?token=xxx 付きでアクセスすると自動ログイン
 
 設計方針:
@@ -29,6 +30,7 @@ from prototype.employees import get_employee, shift_active_employees
 
 # Streamlit Secrets のキー名
 SECRET_MANAGER_PASSWORD = "MANAGER_PASSWORD"
+SECRET_SHIFT_MANAGER_PASSWORD = "SHIFT_MANAGER_PASSWORD"
 SECRET_BYPASS_AUTH = "BYPASS_AUTH"
 SECRET_MANAGER_REMEMBER_DAYS = "MANAGER_REMEMBER_DAYS"
 QUERY_MANAGER_AUTH = "manager_auth"
@@ -88,49 +90,64 @@ def _get_manager_remember_days() -> int:
     return max(1, min(days, 90))
 
 
-def _manager_auth_secret() -> str:
-    """期限付きログイントークンの署名に使う秘密値。"""
-    manager_pw = _get_secret(SECRET_MANAGER_PASSWORD)
-    if not manager_pw:
+def _management_auth_secret(role: str) -> str:
+    """役割別の期限付きログイントークンの署名に使う秘密値。"""
+    password_key = (
+        SECRET_SHIFT_MANAGER_PASSWORD
+        if role == "shift_manager"
+        else SECRET_MANAGER_PASSWORD
+    )
+    password = _get_secret(password_key)
+    if not password:
         return ""
-    # MAGIC_LINK_SALT があれば混ぜる。未設定でも経営者PWだけで署名できる。
+    # MAGIC_LINK_SALT があれば混ぜる。未設定でも管理用PWだけで署名できる。
     salt = _get_secret("MAGIC_LINK_SALT")
-    return f"{manager_pw}:{salt}"
+    return f"{role}:{password}:{salt}"
 
 
-def _create_manager_auth_token() -> str:
-    """経営者ログイン保持用の期限付きトークンを作る。"""
-    secret = _manager_auth_secret()
+def _create_management_auth_token(role: str) -> str:
+    """経営者・シフト担当者のログイン保持用トークンを作る。"""
+    if role not in {"manager", "shift_manager"}:
+        return ""
+    secret = _management_auth_secret(role)
     if not secret:
         return ""
     expires_at = int(time.time()) + _get_manager_remember_days() * 24 * 60 * 60
-    payload = f"manager:{expires_at}"
+    payload = f"{role}:{expires_at}"
     encoded = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii").rstrip("=")
     signature = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
     return f"{encoded}.{signature}"
 
 
-def _verify_manager_auth_token(token: str) -> bool:
-    """期限付きログイントークンを検証する。"""
-    secret = _manager_auth_secret()
-    if not secret or "." not in token:
-        return False
+def _verify_management_auth_token(token: str) -> str:
+    """期限付きログイントークンを検証し、正しい役割を返す。"""
+    if "." not in token:
+        return ""
     encoded, signature = token.rsplit(".", 1)
-    expected = hmac.new(secret.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
-        return False
     try:
         padded = encoded + "=" * (-len(encoded) % 4)
         payload = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         role, expires_at = payload.split(":", 1)
-        return role == "manager" and int(expires_at) >= int(time.time())
+        if role not in {"manager", "shift_manager"}:
+            return ""
+        secret = _management_auth_secret(role)
+        if not secret:
+            return ""
+        expected = hmac.new(
+            secret.encode("utf-8"),
+            encoded.encode("ascii"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(signature, expected):
+            return ""
+        return role if int(expires_at) >= int(time.time()) else ""
     except Exception:
-        return False
+        return ""
 
 
-def _remember_manager_login() -> None:
-    """経営者ログインをURLに期限付きで保持する。"""
-    token = _create_manager_auth_token()
+def _remember_management_login(role: str) -> None:
+    """管理系ログインをURLに期限付きで保持する。"""
+    token = _create_management_auth_token(role)
     if token:
         try:
             st.query_params[QUERY_MANAGER_AUTH] = token
@@ -138,19 +155,20 @@ def _remember_manager_login() -> None:
             pass
 
 
-def _try_manager_remember_login() -> bool:
-    """URLに残った期限付きトークンで経営者ログインを復元する。"""
+def _try_management_remember_login() -> bool:
+    """URLに残った期限付きトークンで管理系ログインを復元する。"""
     token = _get_query_value(QUERY_MANAGER_AUTH)
-    if not token or not _verify_manager_auth_token(token):
+    role = _verify_management_auth_token(token) if token else ""
+    if not role:
         return False
     st.session_state[SESSION_AUTHENTICATED] = True
-    st.session_state[SESSION_ROLE] = "manager"
+    st.session_state[SESSION_ROLE] = role
     st.session_state[SESSION_EMPLOYEE_NAME] = ""
     return True
 
 
 def get_user_role() -> str:
-    """現在のユーザーの役割 ("manager" / "employee" / "")"""
+    """現在の役割 ("manager" / "shift_manager" / "employee" / "")"""
     return st.session_state.get(SESSION_ROLE, "")
 
 
@@ -161,6 +179,15 @@ def get_logged_in_employee() -> str:
 
 def is_manager() -> bool:
     return get_user_role() == "manager"
+
+
+def is_shift_manager() -> bool:
+    return get_user_role() == "shift_manager"
+
+
+def can_manage_shifts() -> bool:
+    """提出確認・生成・調整・ロック・月別条件を操作できるか。"""
+    return get_user_role() in {"manager", "shift_manager"}
 
 
 def is_employee() -> bool:
@@ -223,8 +250,8 @@ def require_auth() -> bool:
         st.session_state[SESSION_ROLE] = "manager"
         return True
 
-    # 経営者ログインの期限付き保持を試みる
-    if _try_manager_remember_login():
+    # 経営者・シフト担当者ログインの期限付き保持を試みる
+    if _try_management_remember_login():
         return True
 
     # マジックリンクでのログインを試みる
@@ -233,8 +260,11 @@ def require_auth() -> bool:
 
     # 設定が不十分な場合
     manager_pw_set = bool(_get_secret(SECRET_MANAGER_PASSWORD))
+    shift_manager_pw_set = bool(
+        _get_secret(SECRET_SHIFT_MANAGER_PASSWORD)
+    )
     salt_set = is_salt_configured()
-    if not manager_pw_set and not salt_set:
+    if not manager_pw_set and not shift_manager_pw_set and not salt_set:
         st.error(
             "🔒 **認証設定が完了していません**\n\n"
             "アプリ管理者は Streamlit Cloud の Settings → Secrets で以下を設定してください：\n"
@@ -250,7 +280,7 @@ def require_auth() -> bool:
 
 
 def _render_manager_login_form() -> None:
-    """経営者用ログイン画面"""
+    """経営者・シフト担当者用ログイン画面"""
     _, mid, _ = st.columns([1, 2, 1])
     with mid:
         st.markdown(
@@ -261,7 +291,7 @@ def _render_manager_login_form() -> None:
                 大黒屋シフト管理システム
               </div>
               <div style="font-size:14px; color:#64748b; margin-top:8px;">
-                経営者用ログイン
+                管理用ログイン
               </div>
             </div>
             """,
@@ -270,7 +300,7 @@ def _render_manager_login_form() -> None:
 
         with st.form("login_form", clear_on_submit=False):
             password = st.text_input(
-                "経営者パスワード",
+                "管理用パスワード",
                 type="password",
                 placeholder="パスワードを入力",
                 label_visibility="collapsed",
@@ -281,13 +311,22 @@ def _render_manager_login_form() -> None:
 
             if submit:
                 manager_pw = _get_secret(SECRET_MANAGER_PASSWORD)
+                shift_manager_pw = _get_secret(
+                    SECRET_SHIFT_MANAGER_PASSWORD
+                )
                 if not password:
                     st.error("パスワードを入力してください")
                 elif manager_pw and password == manager_pw:
                     st.session_state[SESSION_AUTHENTICATED] = True
                     st.session_state[SESSION_ROLE] = "manager"
-                    _remember_manager_login()
+                    _remember_management_login("manager")
                     st.success("✅ 経営者としてログインしました")
+                    st.rerun()
+                elif shift_manager_pw and password == shift_manager_pw:
+                    st.session_state[SESSION_AUTHENTICATED] = True
+                    st.session_state[SESSION_ROLE] = "shift_manager"
+                    _remember_management_login("shift_manager")
+                    st.success("✅ シフト担当者としてログインしました")
                     st.rerun()
                 else:
                     st.error("❌ パスワードが正しくありません")
@@ -317,6 +356,11 @@ def render_logout_button() -> None:
         if is_manager():
             st.sidebar.markdown(f"👤 ログイン中: **経営者**")
             st.sidebar.caption(f"ログイン保持: 最大{_get_manager_remember_days()}日")
+        elif is_shift_manager():
+            st.sidebar.markdown("👤 ログイン中: **シフト担当者**")
+            st.sidebar.caption(
+                f"ログイン保持: 最大{_get_manager_remember_days()}日"
+            )
         elif is_employee():
             emp_name = get_logged_in_employee() or "従業員"
             st.sidebar.markdown(f"👤 ログイン中: **{emp_name}さん**")

@@ -72,7 +72,14 @@ _startup_log("import prototype paths done")
 
 # 認証モジュール（同じ app/ ディレクトリに配置）
 _startup_log("import auth start")
-from auth import require_auth, render_logout_button, is_manager, get_user_role
+from auth import (
+    require_auth,
+    render_logout_button,
+    is_manager,
+    is_shift_manager,
+    can_manage_shifts,
+    get_user_role,
+)
 _startup_log("import auth done")
 
 
@@ -759,6 +766,10 @@ st.sidebar.markdown("---")
 # 従業員: 「従業員ビュー」と「過去シフト閲覧」のみ
 if is_manager():
     available_modes = ["📊 経営者ビュー", "👤 従業員ビュー", "📁 過去シフト閲覧", "⚙️ 設定"]
+elif is_shift_manager():
+    # シフト担当者は日々のシフト業務だけ。従業員マスタ・有給・APIキー・
+    # バックアップを含むシステム設定にはアクセスできない。
+    available_modes = ["📊 経営者ビュー", "👤 従業員ビュー", "📁 過去シフト閲覧"]
 else:
     # 従業員ロールは設定画面・経営者画面にアクセスできない
     available_modes = ["👤 従業員ビュー", "📁 過去シフト閲覧"]
@@ -774,7 +785,7 @@ st.sidebar.markdown("---")
 render_logout_button()
 
 # 経営者向け: 提出データ件数の表示（バックアップ意識喚起）
-if is_manager():
+if can_manage_shifts():
     try:
         from prototype.data_export import get_all_data_summary as _ds
         _data = _ds()
@@ -784,8 +795,12 @@ if is_manager():
                 f'border-radius:6px; border-left:3px solid #f59e0b; '
                 f'font-size:12px; margin:8px 0;">'
                 f'💾 提出データ <strong>{_data["submissions_total"]}件</strong> 保存中<br>'
-                f'<span style="color:#78350f;">「⚙️ 設定 → 💾 バックアップ」から定期DL推奨</span>'
-                f'</div>',
+                + (
+                    f'<span style="color:#78350f;">「⚙️ 設定 → 💾 バックアップ」から定期DL推奨</span>'
+                    if is_manager()
+                    else f'<span style="color:#78350f;">月別条件・生成・調整・確定を操作できます</span>'
+                )
+                + f'</div>',
                 unsafe_allow_html=True,
             )
     except Exception:
@@ -3686,7 +3701,7 @@ def format_monthly_rule_condition(rule: dict) -> str:
 # ============================================================
 
 def render_monthly_exceptions_panel() -> None:
-    """月例外（アンカー緩和・境界連勤・同時休み回避・営業モード）の管理パネル。
+    """月例外（店舗区分・研修・連勤・同時休み等）の管理パネル。
 
     経営者ビューの「2. 今月の条件を整える」と、⚙️ 設定タブの両方から呼ばれる。
     （表示モードは同時に1つなので、ウィジェットキーは衝突しない）
@@ -3703,6 +3718,9 @@ def render_monthly_exceptions_panel() -> None:
         load_monthly_exceptions_raw,
         save_monthly_exceptions,
         reload_monthly_exceptions,
+        validate_monthly_exceptions_data,
+        summarize_monthly_exceptions_change,
+        monthly_exceptions_history,
         MONTHLY_EXCEPTIONS_STATUS as _mx_status_now,
     )
 
@@ -3717,10 +3735,23 @@ def render_monthly_exceptions_panel() -> None:
     except Exception:
         pass
     st.caption(_status_line)
+    _mx_actor = st.text_input(
+        "設定者名",
+        value="管理者",
+        key="monthly_exception_actor",
+        help=(
+            "誰が変更したかを履歴に残します。"
+            "管理者画面を使う店長・経営メンバーの名前を入力してください。"
+        ),
+    ).strip() or "管理者"
 
-    def _mx_save_and_push(new_data: dict, actor: str) -> None:
-        """保存→即時反映→GitHubバックアップまで行い、結果を画面に出す。"""
-        ok, msg = save_monthly_exceptions(new_data, actor=actor)
+    def _mx_commit(new_data: dict, actor: str, action: str) -> None:
+        """確認済みの設定を保存し、GitHubバックアップまで行う。"""
+        ok, msg = save_monthly_exceptions(
+            new_data,
+            actor=actor,
+            action=action,
+        )
         if not ok:
             st.error(f"保存に失敗しました: {msg}")
             return
@@ -3747,18 +3778,110 @@ def render_monthly_exceptions_panel() -> None:
                 "保存は完了しましたが、GitHubバックアップでエラーが発生しました"
                 f"（{type(_push_exc).__name__}）。時間をおいてもう一度保存してください。"
             )
+        st.session_state.pop("monthly_exception_pending", None)
         st.rerun()
+
+    def _mx_save_and_push(
+        new_data: dict,
+        actor: str,
+        action: str = "月例外を変更",
+    ) -> None:
+        """変更を即保存せず、確認画面へ送る。"""
+        errors, warnings = validate_monthly_exceptions_data(new_data)
+        st.session_state["monthly_exception_pending"] = {
+            "data": new_data,
+            "actor": actor,
+            "action": action,
+            "changed_sections": summarize_monthly_exceptions_change(
+                _mx_raw, new_data,
+            ),
+            "errors": errors,
+            "warnings": warnings,
+        }
+        st.rerun()
+
+    _mx_pending = st.session_state.get("monthly_exception_pending")
+    if isinstance(_mx_pending, dict):
+        st.warning("保存前の確認です。まだ本設定には反映されていません。")
+        st.markdown(
+            "**変更する項目:** "
+            + "、".join(_mx_pending.get("changed_sections") or ["月例外"])
+        )
+        st.write(f"操作内容: {_mx_pending.get('action', '月例外を変更')}")
+        _pending_data = dict(_mx_pending.get("data") or {})
+        _pending_lines = []
+        _pending_store_labels = {
+            "AKABANE": "赤羽",
+            "HIGASHIGUCHI": "東口",
+            "OMIYA": "大宮",
+            "NISHIGUCHI": "西口",
+            "SUZURAN": "すずらん",
+        }
+        for _ym, _plans in sorted(
+            dict(_pending_data.get("training_plans", {}) or {}).items()
+        ):
+            for _plan in list(_plans or []):
+                _phase_labels = [
+                    (
+                        f"{int(_phase.get('start_day', 1))}〜"
+                        f"{int(_phase.get('end_day', 31))}日 "
+                        f"{_pending_store_labels.get(str(_phase.get('store')), _phase.get('store'))} "
+                        f"指導担当{'・'.join(_phase.get('mentors') or [])} "
+                        f"{int(_phase.get('target_count', 0))}回"
+                    )
+                    for _phase in list(_plan.get("phases") or [])
+                ]
+                _pending_lines.append(
+                    f"{_ym}: {_plan.get('trainee')}の研修 ／ "
+                    + " ／ ".join(_phase_labels)
+                )
+        for _ym, _policy in sorted(
+            dict(_pending_data.get("yamamoto_policy", {}) or {}).items()
+        ):
+            _pending_lines.append(
+                f"{_ym}: 山本は赤羽で必要な日だけ自動投入、"
+                f"月{int(_policy.get('max_days', 15))}日以内、"
+                f"連続{int(_policy.get('max_consecutive', 2))}日以内"
+            )
+        for _line in _pending_lines:
+            st.write(f"- {_line}")
+        for _warning in _mx_pending.get("warnings", []):
+            st.warning(_warning)
+        for _error in _mx_pending.get("errors", []):
+            st.error(_error)
+        _pc1, _pc2 = st.columns(2)
+        if _pc1.button(
+            "✅ 内容を確認して保存",
+            key="mx_confirm_pending",
+            type="primary",
+            disabled=bool(_mx_pending.get("errors")),
+        ):
+            _mx_commit(
+                dict(_mx_pending["data"]),
+                str(_mx_pending.get("actor") or _mx_actor),
+                str(_mx_pending.get("action") or "月例外を変更"),
+            )
+        if _pc2.button("キャンセル", key="mx_cancel_pending"):
+            st.session_state.pop("monthly_exception_pending", None)
+            st.rerun()
+        st.markdown("---")
 
     # ---- 現在の設定一覧 ----------------------------------------
     st.markdown("#### 現在設定されている例外")
 
     _anchor_list = list(_mx_raw.get("omiya_anchor_relaxed_months", []) or [])
     _training_map = dict(_mx_raw.get("tanaka_training", {}) or {})
+    _training_plans_map = dict(
+        _mx_raw.get("training_plans", {}) or {}
+    )
     _employee_override_map = dict(
         _mx_raw.get("employee_store_overrides", {}) or {}
     )
     _carry_map = dict(_mx_raw.get("carryover_consecutive_allowances", {}) or {})
     _avoid_map = dict(_mx_raw.get("avoid_same_off", {}) or {})
+    _yamamoto_policy_map = dict(
+        _mx_raw.get("yamamoto_policy", {}) or {}
+    )
 
     def _ym_jp(ym_text: str) -> str:
         try:
@@ -3782,9 +3905,12 @@ def render_monthly_exceptions_panel() -> None:
     _has_any = bool(
         _anchor_list
         or _training_map
+        or _training_plans_map
         or _employee_override_map
         or _carry_map
         or _avoid_map
+        or _yamamoto_policy_map
+        or (_mx_raw.get("operation_modes", {}) or {})
     )
     if not _has_any:
         st.info("現在、月例外は設定されていません（すべての月が通常ルールで動きます）。")
@@ -3799,23 +3925,87 @@ def render_monthly_exceptions_panel() -> None:
                 _new["omiya_anchor_relaxed_months"] = [
                     t for t in _anchor_list if t != _ym
                 ]
-                _mx_save_and_push(_new, actor="管理者")
+                _mx_save_and_push(_new, actor=_mx_actor)
 
     if _training_map:
-        st.markdown("**🎓 月限定の研修配置**（生成・検証で回数を強制）")
+        st.markdown("**🎓 従来型の研修組み合わせ**（既存月との互換用）")
         for _ym, _rule in sorted(_training_map.items()):
+            _training_employee = str(_rule.get("employee") or "田中")
             _third = "または".join(
                 str(name)
                 for name in (_rule.get("akabane_third_candidates") or [])
             )
-            st.write(
-                f"　- {_ym_jp(_ym)} ／ 田中: "
+            _c1, _c2 = st.columns([4, 1])
+            _c1.write(
+                f"　- {_ym_jp(_ym)} ／ {_training_employee}: "
                 f"西口{int(_rule.get('nishiguchi_count', 0))}回、"
                 f"赤羽{int(_rule.get('akabane_count', 0))}回"
                 f"（3人目は{_third}）、"
                 f"東口{int(_rule.get('higashiguchi_count', 0))}回"
                 f"（{int(_rule.get('higashiguchi_from_day', 1))}日以降）"
             )
+            if _c2.button("🗑 削除", key=f"mx_del_training_{_ym}"):
+                _new = dict(_mx_raw)
+                _new_training = {
+                    key: dict(value)
+                    for key, value in _training_map.items()
+                    if key != _ym
+                }
+                _new["tanaka_training"] = _new_training
+                _mx_save_and_push(
+                    _new,
+                    actor=_mx_actor,
+                    action=f"{_ym_jp(_ym)}の従来型研修を削除",
+                )
+
+    if _training_plans_map:
+        st.markdown("**🧑‍🏫 段階別研修計画**（対象者・期間・店舗・指導担当）")
+        for _ym, _plans in sorted(_training_plans_map.items()):
+            for _idx, _plan in enumerate(list(_plans or [])):
+                _phase_texts = []
+                for _phase in list(_plan.get("phases") or []):
+                    _comparison = (
+                        "ちょうど"
+                        if _phase.get("comparison") == "exact"
+                        else "以上"
+                    )
+                    _phase_texts.append(
+                        f"{int(_phase.get('start_day', 1))}〜"
+                        f"{int(_phase.get('end_day', 31))}日 "
+                        f"{_store_jp(_phase.get('store'))} "
+                        f"{'・'.join(_phase.get('mentors') or [])}と"
+                        f"{int(_phase.get('target_count', 0))}回{_comparison}"
+                    )
+                _tc1, _tc2 = st.columns([4, 1])
+                _importance = (
+                    "絶対条件"
+                    if str(_plan.get("severity")).upper() == "ERROR"
+                    else "強い目標"
+                )
+                _tc1.write(
+                    f"　- {_ym_jp(_ym)} ／ "
+                    f"{_plan.get('name') or str(_plan.get('trainee')) + '研修'} "
+                    f"（{_importance}）: "
+                    + " ／ ".join(_phase_texts)
+                )
+                if _tc2.button(
+                    "🗑 削除",
+                    key=f"mx_del_training_plan_{_ym}_{_idx}",
+                ):
+                    _new = dict(_mx_raw)
+                    _new_plans = {
+                        key: [dict(value) for value in list(values or [])]
+                        for key, values in _training_plans_map.items()
+                    }
+                    _new_plans[_ym].pop(_idx)
+                    if not _new_plans[_ym]:
+                        _new_plans.pop(_ym)
+                    _new["training_plans"] = _new_plans
+                    _mx_save_and_push(
+                        _new,
+                        actor=_mx_actor,
+                        action=f"{_ym_jp(_ym)}の段階別研修計画を削除",
+                    )
 
     if _employee_override_map:
         st.markdown("**👤 月限定の店舗区分**")
@@ -3826,10 +4016,28 @@ def render_monthly_exceptions_panel() -> None:
                     _store_jp(store)
                     for store in (_rule.get("remove_support_stores") or [])
                 ) or "なし"
-                st.write(
+                _c1, _c2 = st.columns([4, 1])
+                _c1.write(
                     f"　- {_ym_jp(_ym)} ／ {_employee}: "
                     f"主担当 {_primary}、応援・巡回から外す {_removed}"
                 )
+                if _c2.button(
+                    "🗑 削除",
+                    key=f"mx_del_employee_override_{_ym}_{_employee}",
+                ):
+                    _new = dict(_mx_raw)
+                    _new_overrides = {
+                        key: {
+                            name: dict(value)
+                            for name, value in dict(employees or {}).items()
+                        }
+                        for key, employees in _employee_override_map.items()
+                    }
+                    _new_overrides[_ym].pop(_employee, None)
+                    if not _new_overrides[_ym]:
+                        _new_overrides.pop(_ym)
+                    _new["employee_store_overrides"] = _new_overrides
+                    _mx_save_and_push(_new, actor=_mx_actor)
 
     if _carry_map:
         st.markdown("**🔗 境界連勤の延長**（前月から続く連勤に限り、月初の連勤上限を延長）")
@@ -3846,7 +4054,7 @@ def render_monthly_exceptions_panel() -> None:
                     if not _new_carry[_ym]:
                         _new_carry.pop(_ym)
                     _new["carryover_consecutive_allowances"] = _new_carry
-                    _mx_save_and_push(_new, actor="管理者")
+                    _mx_save_and_push(_new, actor=_mx_actor)
 
     if _avoid_map:
         st.markdown("**🚫 同時休みの回避**（指定した2人が同じ日に休むのをなるべく避ける）")
@@ -3869,7 +4077,34 @@ def render_monthly_exceptions_panel() -> None:
                     if not _new_avoid[_ym]:
                         _new_avoid.pop(_ym)
                     _new["avoid_same_off"] = _new_avoid
-                    _mx_save_and_push(_new, actor="管理者")
+                    _mx_save_and_push(_new, actor=_mx_actor)
+
+    if _yamamoto_policy_map:
+        st.markdown("**🧓 山本の補助勤務方針**")
+        for _ym, _policy in sorted(_yamamoto_policy_map.items()):
+            _yc1, _yc2 = st.columns([4, 1])
+            _yc1.write(
+                f"　- {_ym_jp(_ym)} ／ 赤羽で必要な日だけ自動投入、"
+                f"月間上限{int(_policy.get('max_days', 15))}日、"
+                f"連続{int(_policy.get('max_consecutive', 2))}日まで。"
+                "追加勤務は完成後に手動調整"
+            )
+            if _yc2.button(
+                "🗑 標準に戻す",
+                key=f"mx_del_yamamoto_policy_{_ym}",
+            ):
+                _new = dict(_mx_raw)
+                _new_policy = {
+                    key: dict(value)
+                    for key, value in _yamamoto_policy_map.items()
+                    if key != _ym
+                }
+                _new["yamamoto_policy"] = _new_policy
+                _mx_save_and_push(
+                    _new,
+                    actor=_mx_actor,
+                    action=f"{_ym_jp(_ym)}の山本補助勤務方針を標準に戻す",
+                )
 
     st.markdown("---")
 
@@ -3880,6 +4115,10 @@ def render_monthly_exceptions_panel() -> None:
         "どんな例外を追加しますか？",
         [
             "🏬 大宮アンカー緩和（大宮の春山・下地必須ルールをその月だけ外す）",
+            "👤 月限定の店舗区分（主担当変更・応援先から外す）",
+            "🧑‍🏫 段階別研修計画（期間・店舗・指導担当・回数）",
+            "🎓 従来型の研修組み合わせ（西口・赤羽・東口の回数指定）",
+            "🧓 山本の補助勤務方針（月上限・連続勤務上限）",
             "🔗 境界連勤の延長（前月から続く連勤の上限をその月初だけ延長）",
             "🚫 同時休みの回避（2人が同じ日に休むのをなるべく避ける）",
         ],
@@ -3911,6 +4150,10 @@ def render_monthly_exceptions_panel() -> None:
     _mx_emp_names = [
         e.name for e in shift_active_employees() if not e.is_auxiliary
     ]
+    _mx_store_options = [s.name for s in Store if s != Store.OFF]
+    _mx_store_labels = {
+        s.name: s.display_name for s in Store if s != Store.OFF
+    }
 
     _mx_new_data = None
     if _mx_type.startswith("🏬"):
@@ -3924,6 +4167,409 @@ def render_monthly_exceptions_panel() -> None:
             if _mx_ym not in _lst:
                 _lst.append(_mx_ym)
             _new["omiya_anchor_relaxed_months"] = sorted(_lst)
+            _mx_new_data = _new
+    elif _mx_type.startswith("👤"):
+        _mso1, _mso2 = st.columns(2)
+        with _mso1:
+            _mx_override_employee = st.selectbox(
+                "対象の従業員",
+                _mx_emp_names,
+                key="mx_add_override_employee",
+            )
+            _mx_primary_store = st.selectbox(
+                "この月の主担当",
+                options=[""] + _mx_store_options,
+                format_func=lambda value: (
+                    "変更しない"
+                    if not value
+                    else _mx_store_labels.get(value, value)
+                ),
+                key="mx_add_override_primary",
+                help="基本ルールの主担当を、この月だけ上書きします。",
+            )
+        with _mso2:
+            _mx_removed_support = st.multiselect(
+                "この月だけ応援・巡回先から外す店舗",
+                options=_mx_store_options,
+                format_func=lambda value: _mx_store_labels.get(value, value),
+                key="mx_add_override_removed",
+                help=(
+                    "絶対配置不可にはしません。通常の自動配置候補から外し、"
+                    "人員不足時の緊急配置だけは許容します。"
+                ),
+            )
+        _override_parts = []
+        if _mx_primary_store:
+            _override_parts.append(
+                f"主担当を{_mx_store_labels[_mx_primary_store]}に変更"
+            )
+        if _mx_removed_support:
+            _override_parts.append(
+                "応援・巡回先から"
+                + "・".join(_mx_store_labels[s] for s in _mx_removed_support)
+                + "を外す"
+            )
+        st.caption(
+            f"{_ym_jp(_mx_ym)}の{_mx_override_employee}さん: "
+            + ("、".join(_override_parts) if _override_parts else "変更内容を選択してください。")
+        )
+        if st.button(
+            "この内容で追加・上書き",
+            key="mx_add_employee_override",
+            type="primary",
+        ):
+            if not _mx_primary_store and not _mx_removed_support:
+                st.error("主担当または、応援・巡回先から外す店舗を選んでください。")
+            elif (
+                _mx_primary_store
+                and _mx_primary_store in _mx_removed_support
+            ):
+                st.error("主担当店舗を、応援・巡回先から外す店舗には指定できません。")
+            else:
+                _new = dict(_mx_raw)
+                _new_overrides = {
+                    key: {
+                        name: dict(value)
+                        for name, value in dict(employees or {}).items()
+                    }
+                    for key, employees in (
+                        _new.get("employee_store_overrides", {}) or {}
+                    ).items()
+                }
+                _new_overrides.setdefault(_mx_ym, {})[
+                    _mx_override_employee
+                ] = {
+                    "primary_store": _mx_primary_store or None,
+                    "remove_support_stores": list(_mx_removed_support),
+                }
+                _new["employee_store_overrides"] = _new_overrides
+                _mx_new_data = _new
+    elif _mx_type.startswith("🧑‍🏫"):
+        _max_plan_day = monthrange(
+            int(_mx_ym[:4]), int(_mx_ym[5:]),
+        )[1]
+        st.caption(
+            "研修を前半・後半などの段階に分けて設定します。"
+            "通常は「強い目標」がおすすめです。本人の休み希望や店舗運営を"
+            "優先しながら、可能な限り指定回数へ寄せます。"
+        )
+        _gp1, _gp2 = st.columns(2)
+        with _gp1:
+            _gp_trainee = st.selectbox(
+                "研修対象者",
+                _mx_emp_names,
+                key="mx_generic_training_trainee",
+            )
+            _gp_name = st.text_input(
+                "研修計画名",
+                value=f"{_mx_ym} {_gp_trainee}研修",
+                key="mx_generic_training_name",
+            )
+        with _gp2:
+            _gp_severity_label = st.selectbox(
+                "重要度",
+                ["強い目標（おすすめ）", "絶対条件"],
+                key="mx_generic_training_severity",
+                help=(
+                    "絶対条件は、休み希望や必要人数と両立しない場合に"
+                    "シフト自体が生成できなくなります。"
+                ),
+            )
+            _gp_all_workdays = st.checkbox(
+                "研修対象者の全出勤日に、指定した指導担当の誰かを同店舗へ置く",
+                value=False,
+                key="mx_generic_training_all_days",
+            )
+        _gp_partner_options = [
+            name for name in _mx_emp_names if name != _gp_trainee
+        ]
+        _gp_approved = st.multiselect(
+            "月全体の指導担当（上の全出勤日チェックを使う場合）",
+            _gp_partner_options,
+            key="mx_generic_training_approved",
+        )
+
+        def _training_phase_fields(
+            prefix: str,
+            title: str,
+            default_start: int,
+            default_end: int,
+            enabled: bool = True,
+        ) -> Optional[dict]:
+            if not enabled:
+                return None
+            st.markdown(f"**{title}**")
+            _p1, _p2, _p3, _p4 = st.columns(4)
+            with _p1:
+                start_day = int(st.number_input(
+                    "開始日",
+                    min_value=1,
+                    max_value=_max_plan_day,
+                    value=min(default_start, _max_plan_day),
+                    key=f"{prefix}_start",
+                ))
+                end_day = int(st.number_input(
+                    "終了日",
+                    min_value=1,
+                    max_value=_max_plan_day,
+                    value=min(default_end, _max_plan_day),
+                    key=f"{prefix}_end",
+                ))
+            with _p2:
+                store = st.selectbox(
+                    "研修店舗",
+                    _mx_store_options,
+                    format_func=lambda value: _mx_store_labels.get(value, value),
+                    key=f"{prefix}_store",
+                )
+            with _p3:
+                mentors = st.multiselect(
+                    "指導担当",
+                    _gp_partner_options,
+                    key=f"{prefix}_mentors",
+                )
+            with _p4:
+                target = int(st.number_input(
+                    "目標回数",
+                    min_value=1,
+                    max_value=_max_plan_day,
+                    value=1,
+                    key=f"{prefix}_target",
+                ))
+                comparison_label = st.selectbox(
+                    "回数の意味",
+                    ["以上", "ちょうど"],
+                    key=f"{prefix}_comparison",
+                )
+            return {
+                "label": title,
+                "start_day": start_day,
+                "end_day": end_day,
+                "store": store,
+                "mentors": list(mentors),
+                "target_count": target,
+                "comparison": (
+                    "exact" if comparison_label == "ちょうど" else "min"
+                ),
+                "severity": (
+                    "ERROR"
+                    if _gp_severity_label == "絶対条件"
+                    else "WARNING"
+                ),
+            }
+
+        _phase1 = _training_phase_fields(
+            "mx_generic_phase1",
+            "第1段階",
+            1,
+            min(15, _max_plan_day),
+        )
+        _use_phase2 = st.checkbox(
+            "第2段階も設定する",
+            value=True,
+            key="mx_generic_use_phase2",
+        )
+        _phase2 = _training_phase_fields(
+            "mx_generic_phase2",
+            "第2段階",
+            min(16, _max_plan_day),
+            _max_plan_day,
+            enabled=_use_phase2,
+        )
+        if st.button(
+            "この研修計画を追加",
+            key="mx_add_generic_training",
+            type="primary",
+        ):
+            _phases = [phase for phase in (_phase1, _phase2) if phase]
+            _new = dict(_mx_raw)
+            _new_plans = {
+                key: [dict(value) for value in list(values or [])]
+                for key, values in (
+                    _new.get("training_plans", {}) or {}
+                ).items()
+            }
+            _new_plans.setdefault(_mx_ym, []).append({
+                "id": (
+                    f"{_mx_ym}-{_gp_trainee}-"
+                    f"{datetime.now().strftime('%H%M%S%f')}"
+                ),
+                "name": _gp_name.strip() or f"{_gp_trainee}研修",
+                "trainee": _gp_trainee,
+                "severity": (
+                    "ERROR"
+                    if _gp_severity_label == "絶対条件"
+                    else "WARNING"
+                ),
+                "require_mentor_on_workday": bool(_gp_all_workdays),
+                "approved_mentors": list(_gp_approved),
+                "phases": _phases,
+            })
+            _new["training_plans"] = _new_plans
+            _mx_new_data = _new
+    elif _mx_type.startswith("🎓"):
+        st.caption(
+            "8月の田中さん研修で使用した形式です。"
+            "対象者を、西口は指定相手と、赤羽は指定相手＋候補者の誰かと、"
+            "東口は指定相手と同じ日に配置します。1か月につき1セット設定できます。"
+        )
+        _mx_training_employee = st.selectbox(
+            "研修対象者",
+            _mx_emp_names,
+            key="mx_add_training_employee",
+        )
+        _mx_partner_names = [
+            name for name in _mx_emp_names
+            if name != _mx_training_employee
+        ]
+        _tr1, _tr2, _tr3 = st.columns(3)
+        with _tr1:
+            st.markdown("**西口**")
+            _mx_nishi_partner = st.selectbox(
+                "一緒に勤務する人",
+                _mx_partner_names,
+                key="mx_add_training_nishi_partner",
+            )
+            _mx_nishi_count = int(st.number_input(
+                "西口の回数",
+                min_value=1,
+                max_value=31,
+                value=1,
+                key="mx_add_training_nishi_count",
+            ))
+        with _tr2:
+            st.markdown("**赤羽**")
+            _mx_akabane_partner = st.selectbox(
+                "必ず一緒に勤務する人",
+                _mx_partner_names,
+                key="mx_add_training_akabane_partner",
+            )
+            _mx_third_candidates = st.multiselect(
+                "さらに一緒に勤務する候補",
+                options=[
+                    name for name in _mx_partner_names
+                    if name != _mx_akabane_partner
+                ],
+                key="mx_add_training_third_candidates",
+                help="候補のうち、毎回少なくとも1人が同じ日に赤羽へ入ります。",
+            )
+            _mx_akabane_count = int(st.number_input(
+                "赤羽の回数",
+                min_value=1,
+                max_value=31,
+                value=1,
+                key="mx_add_training_akabane_count",
+            ))
+        with _tr3:
+            st.markdown("**東口**")
+            _mx_higashi_partner = st.selectbox(
+                "一緒に勤務する人",
+                _mx_partner_names,
+                key="mx_add_training_higashi_partner",
+            )
+            _mx_higashi_from_day = int(st.number_input(
+                "開始日",
+                min_value=1,
+                max_value=monthrange(
+                    int(_mx_ym[:4]), int(_mx_ym[5:]),
+                )[1],
+                value=1,
+                key="mx_add_training_higashi_from",
+            ))
+            _mx_higashi_count = int(st.number_input(
+                "東口の回数",
+                min_value=1,
+                max_value=31,
+                value=1,
+                key="mx_add_training_higashi_count",
+            ))
+        st.caption(
+            "回数はすべて「ちょうど」の指定です。対象者の西口・東口勤務は、"
+            "ここで指定した組み合わせの日だけに限定されます。"
+        )
+        if st.button(
+            "この研修条件を追加・上書き",
+            key="mx_add_training",
+            type="primary",
+        ):
+            if not _mx_third_candidates:
+                st.error("赤羽を設定する場合は、3人目の候補を1人以上選んでください。")
+            else:
+                _new = dict(_mx_raw)
+                _new_training = {
+                    key: dict(value)
+                    for key, value in (
+                        _new.get("tanaka_training", {}) or {}
+                    ).items()
+                }
+                _new_training[_mx_ym] = {
+                    "employee": _mx_training_employee,
+                    "nishiguchi_partner": _mx_nishi_partner,
+                    "nishiguchi_count": _mx_nishi_count,
+                    "akabane_partner": _mx_akabane_partner,
+                    "akabane_third_candidates": list(_mx_third_candidates),
+                    "akabane_count": _mx_akabane_count,
+                    "higashiguchi_partner": _mx_higashi_partner,
+                    "higashiguchi_from_day": _mx_higashi_from_day,
+                    "higashiguchi_count": _mx_higashi_count,
+                }
+                _new["tanaka_training"] = _new_training
+                _mx_new_data = _new
+    elif _mx_type.startswith("🧓"):
+        _default_yamamoto_max = (
+            14 if int(_mx_ym[5:]) in (1, 2) else 15
+        )
+        _existing_yamamoto = _yamamoto_policy_map.get(_mx_ym, {})
+        st.caption(
+            "山本は通常スタッフの人数には含めず、赤羽で本当に必要な日にだけ"
+            "自動で○を付けます。ここで設定する日数は目標ではなく上限です。"
+            "給料とのバランス等による追加勤務は、完成後に手動で入れます。"
+        )
+        _yp1, _yp2 = st.columns(2)
+        with _yp1:
+            _yp_max_days = int(st.number_input(
+                "月間出勤上限",
+                min_value=0,
+                max_value=31,
+                value=int(
+                    _existing_yamamoto.get(
+                        "max_days", _default_yamamoto_max,
+                    )
+                ),
+                key="mx_yamamoto_max_days",
+            ))
+        with _yp2:
+            _yp_max_consecutive = int(st.number_input(
+                "連続勤務上限",
+                min_value=1,
+                max_value=7,
+                value=int(
+                    _existing_yamamoto.get("max_consecutive", 2)
+                ),
+                key="mx_yamamoto_max_consecutive",
+            ))
+        st.info(
+            f"{_ym_jp(_mx_ym)}は、赤羽で不足する日に限り自動投入し、"
+            f"月{_yp_max_days}日以内・{_yp_max_consecutive}連勤以内にします。"
+        )
+        if st.button(
+            "この補助勤務方針を追加・上書き",
+            key="mx_add_yamamoto_policy",
+            type="primary",
+        ):
+            _new = dict(_mx_raw)
+            _new_policy = {
+                key: dict(value)
+                for key, value in (
+                    _new.get("yamamoto_policy", {}) or {}
+                ).items()
+            }
+            _new_policy[_mx_ym] = {
+                "max_days": _yp_max_days,
+                "max_consecutive": _yp_max_consecutive,
+                "auto_only_if_needed": True,
+            }
+            _new["yamamoto_policy"] = _new_policy
             _mx_new_data = _new
     elif _mx_type.startswith("🔗"):
         _mc1, _mc2 = st.columns(2)
@@ -3987,7 +4633,14 @@ def render_monthly_exceptions_panel() -> None:
                 _mx_new_data = _new
 
     if _mx_new_data is not None:
-        _mx_save_and_push(_mx_new_data, actor="管理者")
+        _mx_save_and_push(
+            _mx_new_data,
+            actor=_mx_actor,
+            action=(
+                f"{_ym_jp(_mx_ym)}に"
+                f"{_mx_type.split('（', 1)[0].strip()}を追加・更新"
+            ),
+        )
 
     st.markdown("---")
     st.markdown("#### 🏪 営業モード（省人員・休業日の設定）")
@@ -4015,7 +4668,7 @@ def render_monthly_exceptions_panel() -> None:
                     if not _new_om[_om_ym]:
                         _new_om.pop(_om_ym)
                     _new["operation_modes"] = _new_om
-                    _mx_save_and_push(_new, actor="管理者")
+                    _mx_save_and_push(_new, actor=_mx_actor)
     else:
         st.caption("現在、省人員・休業の設定はありません（全日通常）。")
 
@@ -4051,7 +4704,38 @@ def render_monthly_exceptions_panel() -> None:
             for _om_d in _om_days_sel:
                 _new_om[_om_ym_sel][str(int(_om_d))] = _om_mode_sel
             _new["operation_modes"] = _new_om
-            _mx_save_and_push(_new, actor="管理者")
+            _mx_save_and_push(_new, actor=_mx_actor)
+
+    st.markdown("---")
+    with st.expander("🕘 月例外の変更履歴・元に戻す", expanded=False):
+        _history_entries = monthly_exceptions_history(limit=10)
+        if not _history_entries:
+            st.caption(
+                "履歴は、次に月例外を保存した時から自動で残ります。"
+                "GitHubバックアップにも含まれます。"
+            )
+        for _history in _history_entries:
+            _hc1, _hc2 = st.columns([4, 1])
+            _changed = "、".join(
+                _history.get("changed_sections") or ["月例外"]
+            )
+            _hc1.write(
+                f"{str(_history.get('saved_at', ''))[:19]} ／ "
+                f"{_history.get('actor', '管理者')} ／ "
+                f"{_history.get('action', '設定変更')} ／ {_changed}"
+            )
+            if _hc2.button(
+                "この変更前へ戻す",
+                key=f"mx_restore_{_history.get('id')}",
+            ):
+                _mx_save_and_push(
+                    dict(_history.get("snapshot") or {}),
+                    actor=_mx_actor,
+                    action=(
+                        f"{str(_history.get('saved_at', ''))[:19]}の"
+                        "変更前へ復元"
+                    ),
+                )
 
     st.markdown("---")
     st.caption(
@@ -4063,7 +4747,10 @@ def render_monthly_exceptions_panel() -> None:
 
 
 if mode == "📊 経営者ビュー":
-    st.title("📊 シフト管理ダッシュボード（経営者用）")
+    st.title(
+        "📊 シフト管理ダッシュボード"
+        + ("（シフト担当者用）" if is_shift_manager() else "（経営者用）")
+    )
 
     lock_mgr = ShiftLockManager()
     backup_mgr = ShiftBackup()
@@ -7679,7 +8366,11 @@ elif mode == "👤 従業員ビュー":
     st.title("👤 希望シフト")
 
     # マジックリンクでログインしている場合は、その従業員に固定
-    from auth import get_logged_in_employee, is_employee, is_manager
+    from auth import (
+        get_logged_in_employee,
+        is_employee,
+        can_manage_shifts,
+    )
     logged_in_emp = get_logged_in_employee()
 
     # employee_names は後でボタンキー生成に使うので、ここで必ず定義しておく
@@ -7700,10 +8391,10 @@ elif mode == "👤 従業員ビュー":
             f'</span></div>',
             unsafe_allow_html=True,
         )
-    elif is_manager():
+    elif can_manage_shifts():
         # 経営者がプレビューする場合: 従業員を選択可能
         st.info(
-            "💡 経営者として閲覧中です。実運用では従業員はマジックリンク経由で"
+            "💡 管理者として閲覧中です。実運用では従業員はマジックリンク経由で"
             "自動的に自分の画面が開きます。動作確認のため任意の従業員を選択できます。"
         )
         selected = st.selectbox(
