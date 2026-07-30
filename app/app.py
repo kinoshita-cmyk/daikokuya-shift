@@ -46,18 +46,36 @@ from datetime import date, datetime
 from calendar import monthrange
 from urllib.parse import quote, unquote
 
-_startup_log("import st_aggrid start")
-try:
-    from st_aggrid import AgGrid, JsCode
+# 編集グリッドは管理者のシフト調整画面でだけ必要。ログイン画面や従業員画面の
+# 起動を待たせないよう、実際に調整画面を開いた時点で読み込む。
+AgGrid = None
+JsCode = None
+GridUpdateMode = None
+HAS_AGGRID = None
+
+
+def _load_aggrid_components():
+    """st-aggrid の部品を必要になった時点で読み込む。"""
+    _startup_log("lazy import st_aggrid start")
     try:
-        from st_aggrid import GridUpdateMode
+        from st_aggrid import AgGrid as _AgGrid, JsCode as _JsCode
+        try:
+            from st_aggrid import GridUpdateMode as _GridUpdateMode
+        except Exception:
+            _GridUpdateMode = None
+        _startup_log("lazy import st_aggrid done")
+        return _AgGrid, _JsCode, _GridUpdateMode, True
     except Exception:
-        GridUpdateMode = None
-    HAS_AGGRID = True
-    _startup_log("import st_aggrid done")
-except Exception:
-    HAS_AGGRID = False
-    _startup_log("import st_aggrid unavailable")
+        _startup_log("lazy import st_aggrid unavailable")
+        return None, None, None, False
+
+
+def _ensure_aggrid() -> bool:
+    """st-aggrid を初回利用時だけ読み込み、画面用の参照へ設定する。"""
+    global AgGrid, JsCode, GridUpdateMode, HAS_AGGRID
+    if HAS_AGGRID is None:
+        AgGrid, JsCode, GridUpdateMode, HAS_AGGRID = _load_aggrid_components()
+    return bool(HAS_AGGRID)
 
 _startup_log("import prototype paths start")
 from prototype.paths import (
@@ -550,55 +568,6 @@ def add_admin_paid_leave_adjustment(
     })
     save_admin_paid_leave_data(data, actor=actor)
     push_admin_paid_leave_to_github()
-_startup_log("import prototype.models start")
-from prototype.models import Store, OperationMode, ShiftAssignment, MonthlyShift
-_startup_log("import prototype.models done")
-_startup_log("import prototype.employees start")
-from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
-_startup_log("import prototype.employees done")
-_startup_log("import prototype.generator start")
-from prototype.generator import generate_shift, determine_operation_modes
-_startup_log("import prototype.generator done")
-_startup_log("import prototype.validator start")
-from prototype.validator import validate
-_startup_log("import prototype.validator done")
-_startup_log("import prototype.backup/carryover start")
-from prototype.backup import ShiftBackup
-from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
-_startup_log("import prototype.backup/carryover done")
-_startup_log("import prototype.excel/pdf start")
-from prototype.excel_loader import load_shift_from_excel
-from prototype.excel_exporter import export_shift_to_excel, EXPORT_COLUMN_ORDER
-from prototype.pdf_exporter import export_shift_to_pdf
-_startup_log("import prototype.excel/pdf done")
-_startup_log("import prototype.chat/lock/rules start")
-from prototype.shift_chat import ShiftChatEngine, HAS_ANTHROPIC
-from prototype.shift_lock import ShiftLockManager
-from prototype.rule_config import RuleConfigManager, RuleConfig, CustomRule, DEFAULT_ENABLED_CHECKS, DEFAULT_PARAMETERS
-from prototype.rule_consistency import run_rule_consistency_checks
-_startup_log("import prototype.chat/lock/rules done")
-from prototype.employee_config import (
-    EmployeeConfigManager, get_active_employees, get_all_employees_including_retired,
-)
-from prototype.models import EmploymentStatus, Skill, Role, Store, StationType, Affinity, Employee
-from prototype.may_2026_data import (
-    OFF_REQUESTS, WORK_REQUESTS, PREVIOUS_MONTH_CARRYOVER, FLEXIBLE_OFF_REQUESTS,
-)
-from prototype.rules import (
-    MAY_2026_HOLIDAY_OVERRIDES,
-    STORE_KEYHOLDERS,
-    SUZURAN_KEY_SUPPORT_FROM_OMIYA,
-    get_monthly_work_target,
-    MONTH_EDGE_HOME_STORE_ASSIGNMENTS,
-    is_store_open_on_day,
-    monthly_carryover_consecutive_allowances,
-)
-try:
-    from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
-except Exception:
-    MONTH_EDGE_OMIYA_STAFF = ("下地", "春山", "黒澤")
-
-
 # ============================================================
 # ページ設定
 # ============================================================
@@ -615,6 +584,61 @@ st.set_page_config(
 # ============================================================
 if not require_auth():
     st.stop()
+
+
+# 認証前はログイン画面に不要な業務モジュールを読み込まない。ここより重い
+# ソルバー・出力・AI対話は、それぞれの実行ボタンを押した時点で読み込む。
+_startup_log("import authenticated domain modules start")
+from prototype.models import (
+    Affinity,
+    Employee,
+    EmploymentStatus,
+    MonthlyShift,
+    OperationMode,
+    Role,
+    ShiftAssignment,
+    Skill,
+    StationType,
+    Store,
+)
+from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
+from prototype.backup import ShiftBackup
+from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
+from prototype.export_config import EXPORT_COLUMN_ORDER
+from prototype.shift_lock import ShiftLockManager
+from prototype.rule_config import (
+    CustomRule,
+    DEFAULT_ENABLED_CHECKS,
+    DEFAULT_PARAMETERS,
+    RuleConfig,
+    RuleConfigManager,
+)
+from prototype.rule_consistency import run_rule_consistency_checks
+from prototype.employee_config import (
+    EmployeeConfigManager,
+    get_active_employees,
+    get_all_employees_including_retired,
+)
+from prototype.may_2026_data import (
+    FLEXIBLE_OFF_REQUESTS,
+    OFF_REQUESTS,
+    PREVIOUS_MONTH_CARRYOVER,
+    WORK_REQUESTS,
+)
+from prototype.rules import (
+    MAY_2026_HOLIDAY_OVERRIDES,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS,
+    STORE_KEYHOLDERS,
+    SUZURAN_KEY_SUPPORT_FROM_OMIYA,
+    get_monthly_work_target,
+    is_store_open_on_day,
+    monthly_carryover_consecutive_allowances,
+)
+try:
+    from prototype.rules import MONTH_END_START_OMIYA_STAFF as MONTH_EDGE_OMIYA_STAFF
+except Exception:
+    MONTH_EDGE_OMIYA_STAFF = ("下地", "春山", "黒澤")
+_startup_log("import authenticated domain modules done")
 
 
 # ============================================================
@@ -697,6 +721,7 @@ def _auto_export_paid_leave_csv(ym_key: str) -> str:
 st.session_state["paid_leave_auto_export_status"] = _auto_export_paid_leave_csv(
     date.today().strftime("%Y-%m")
 )
+
 
 # CSS カスタマイズ（高齢者にも見やすい大きさ）
 st.markdown("""
@@ -788,6 +813,7 @@ render_logout_button()
 if can_manage_shifts():
     try:
         from prototype.data_export import get_all_data_summary as _ds
+
         _data = _ds()
         if _data["submissions_total"] > 0:
             st.sidebar.markdown(
@@ -2175,6 +2201,8 @@ def render_part_time_paid_leave_suggestions(
 
 def run_shift_validation(**kwargs):
     """Cloud側で古い検証関数が混ざっても落ちないよう、受け取れる引数だけ渡す。"""
+    from prototype.validator import validate
+
     allowed = inspect.signature(validate).parameters
     safe_kwargs = {k: v for k, v in kwargs.items() if k in allowed}
     return validate(**safe_kwargs)
@@ -6364,6 +6392,11 @@ if mode == "📊 経営者ビュー":
                     progress_area.info(
                         f"⏳ ステップ 3/4: 営業モードを判定中..."
                     )
+                    from prototype.generator import (
+                        determine_operation_modes,
+                        generate_shift,
+                    )
+
                     modes = determine_operation_modes(_saved_target_year, _saved_target_month)
                     # 営業モードを必ず明示する（黙って条件を緩めない）
                     _mode_days: dict = {}
@@ -7232,7 +7265,7 @@ if mode == "📊 経営者ビュー":
                     disabled_columns = editor_columns
 
                 editor_key = f"inline_shift_editor_{edit_ym}_{st.session_state[inline_version_key]}"
-                if HAS_AGGRID:
+                if _ensure_aggrid():
                     st.markdown(
                         f'<div style="background:#0f172a; color:#ffffff; '
                         f'padding:10px 12px; border:1px solid #999; '
@@ -7278,7 +7311,7 @@ if mode == "📊 経営者ビュー":
                     edited_records = draft_rows
                 edited_records = refresh_editor_short_staff_column(shift, edited_records)
                 if (
-                    HAS_AGGRID
+                    _ensure_aggrid()
                     and lock_info is None
                     and editor_symbol_signature(edited_records)
                     != editor_symbol_signature(st.session_state.get(inline_draft_key, []))
@@ -7553,7 +7586,7 @@ if mode == "📊 経営者ビュー":
                             prefix = "❌" if issue.severity == "ERROR" else "⚠"
                             st.write(f"{prefix} {issue}")
 
-            if not HAS_AGGRID:
+            if not _ensure_aggrid():
                 st.markdown("##### 色付きプレビュー")
                 render_shift_table(
                     inline_display_shift,
@@ -7940,6 +7973,8 @@ if mode == "📊 経営者ビュー":
             with col_x:
                 st.write("**📁 Excel 形式（編集可）**")
                 if st.button("Excel を生成", key="gen_xlsx"):
+                    from prototype.excel_exporter import export_shift_to_excel
+
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.xlsx"
                     call_with_supported_kwargs(
                         export_shift_to_excel,
@@ -7965,6 +8000,8 @@ if mode == "📊 経営者ビュー":
             with col_p:
                 st.write("**📄 PDF 形式（印刷用・A4縦1枚）**")
                 if st.button("PDF を生成", key="gen_pdf"):
+                    from prototype.pdf_exporter import export_shift_to_pdf
+
                     file_path = output_dir / f"{shift.year}年{shift.month}月_AI生成シフト.pdf"
                     call_with_supported_kwargs(
                         export_shift_to_pdf,
@@ -8012,6 +8049,8 @@ if mode == "📊 経営者ビュー":
                     "`ANTHROPIC_API_KEY` を登録してください。"
                 )
             else:
+                from prototype.shift_chat import ShiftChatEngine
+
                 _chat_validation_inputs = st.session_state.get("last_validation_inputs", {})
                 _chat_validation_match = (
                     _chat_validation_inputs.get("ym")
@@ -9264,6 +9303,8 @@ elif mode == "📁 過去シフト閲覧":
         else:
             st.caption(f"📂 ソース: {excel_path}")
             try:
+                from prototype.excel_loader import load_shift_from_excel
+
                 _xl_shift, _xl_short_days = load_shift_from_excel(excel_path)
                 st.markdown(f"### {_xl_shift.year}年{_xl_shift.month}月（手動作成版）")
                 _xl_short_text = ", ".join(
