@@ -283,6 +283,146 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
     ]
 
 
+def build_effective_rule_visibility_rows(
+    year: int,
+    month: int,
+    parameters: dict,
+) -> tuple[list[dict], dict]:
+    """生成・検証が実際に参照する主要ルールを表示用にまとめる。"""
+    from prototype.rules import (
+        HARD_CONSTRAINTS,
+        fixed_suzuran_core_presence_rules,
+        load_monthly_exceptions_raw,
+        yamamoto_monthly_policy,
+    )
+
+    year = int(year)
+    month = int(month)
+    ym_key = f"{year:04d}-{month:02d}"
+    raw_monthly = load_monthly_exceptions_raw()
+    yamamoto_overrides = dict(
+        raw_monthly.get("yamamoto_policy", {}) or {}
+    )
+    yamamoto_policy = yamamoto_monthly_policy(year, month)
+    yamamoto_is_monthly_override = ym_key in yamamoto_overrides
+
+    general_hard_max = int(parameters.get("max_consec_work", 5))
+    configured_soft_max = int(parameters.get("soft_consec_threshold", 4))
+    actual_soft_max = int(
+        HARD_CONSTRAINTS.get(
+            "max_consecutive_work_days",
+            configured_soft_max,
+        )
+    )
+    if configured_soft_max == actual_soft_max:
+        general_work_detail = (
+            f"3連勤は許容。{actual_soft_max}連勤までは通常範囲、"
+            f"{actual_soft_max + 1}連勤からできるだけ回避し、"
+            f"{general_hard_max + 1}連勤以上はERROR。"
+        )
+    else:
+        general_work_detail = (
+            f"3連勤は許容。生成で使う推奨上限は{actual_soft_max}連勤、"
+            f"設定欄の保存値は{configured_soft_max}連勤。"
+            f"{general_hard_max + 1}連勤以上はERROR。"
+        )
+
+    fixed_pairs = fixed_suzuran_core_presence_rules()
+    fixed_pair_names = "、".join(
+        f"{first}・{second}" for first, second, _reason in fixed_pairs
+    ) or "対象者なし"
+
+    yamamoto_max_days = int(yamamoto_policy["max_days"])
+    yamamoto_max_consecutive = int(
+        yamamoto_policy["max_consecutive"]
+    )
+    yamamoto_source = (
+        f"{ym_key}の月別上書き"
+        if yamamoto_is_monthly_override
+        else "全月共通の標準値"
+    )
+
+    rows = [
+        {
+            "対象": fixed_pair_names,
+            "ルール": "すずらん主力の同時不在回避",
+            "適用範囲": "全月固定",
+            "強さ": "強い目標 / WARNING",
+            "現在有効な内容": (
+                "どちらもすずらんにいない日を可能な限り避ける。"
+                "本人の×休み希望が重なる日や、他店舗の必要人数を"
+                "崩す場合は許容する。"
+            ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "一般スタッフ",
+            "ルール": "連続勤務",
+            "適用範囲": "全月固定 + 数値設定",
+            "強さ": "上限は絶対条件",
+            "現在有効な内容": general_work_detail,
+            "変更場所": "設定 → ルール設定 → 数値パラメータ",
+        },
+        {
+            "対象": "全スタッフ",
+            "ルール": "3連休",
+            "適用範囲": "全月固定",
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                "システム都合で3連休を作らない。本人が×休み希望を"
+                "3日連続で提出した箇所だけ例外として許容する。"
+            ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "山本",
+            "ルール": "自動配置",
+            "適用範囲": "全月固定",
+            "強さ": "必要時だけ補助",
+            "現在有効な内容": (
+                "本人の×は必ず休み。通常スタッフを配置した後、"
+                "赤羽のチケット対応が不足する日にだけ自動で赤羽へ配置。"
+                "それ以外は空白とし、追加勤務は管理者が手動入力する。"
+            ),
+            "変更場所": "自動配置条件は固定",
+        },
+        {
+            "対象": "山本",
+            "ルール": "月間出勤上限",
+            "適用範囲": yamamoto_source,
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                f"{year}年{month}月は最大{yamamoto_max_days}日。"
+                "自動配置と手動追加の合計が上限を超えるとERROR。"
+                "上限まで自動的に勤務を埋める目標ではない。"
+            ),
+            "変更場所": "設定 → 月例外 → 山本の補助勤務方針",
+        },
+        {
+            "対象": "山本",
+            "ルール": "連続勤務上限",
+            "適用範囲": yamamoto_source,
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                f"{year}年{month}月は連続{yamamoto_max_consecutive}日まで。"
+                f"{yamamoto_max_consecutive + 1}連勤以上はERROR。"
+            ),
+            "変更場所": "設定 → 月例外 → 山本の補助勤務方針",
+        },
+    ]
+    status = {
+        "ym_key": ym_key,
+        "general_hard_max": general_hard_max,
+        "general_soft_max": actual_soft_max,
+        "configured_soft_max": configured_soft_max,
+        "yamamoto_max_days": yamamoto_max_days,
+        "yamamoto_max_consecutive": yamamoto_max_consecutive,
+        "yamamoto_is_monthly_override": yamamoto_is_monthly_override,
+        "raw_monthly": raw_monthly,
+    }
+    return rows, status
+
+
 def load_admin_paid_leave_data() -> dict:
     """管理者が後から付けた有給調整を読み込む。"""
     if not ADMIN_PAID_LEAVE_FILE.exists():
@@ -10011,6 +10151,173 @@ elif mode == "⚙️ 設定":
         else:
             st.info("現在の本設定: デフォルト設定")
 
+        st.markdown("#### 現在有効なルール")
+        st.caption(
+            "説明用の台帳ではなく、生成・検証が現在参照している値を"
+            "対象月ごとに表示します。月別上書きがない項目は全月共通の"
+            "標準値です。"
+        )
+        _rule_view_default_year = int(
+            st.session_state.get("target_year", now_jst().date().year)
+        )
+        _rule_view_default_month = int(
+            st.session_state.get("target_month", now_jst().date().month)
+        )
+        _rv_col1, _rv_col2 = st.columns(2)
+        with _rv_col1:
+            _rule_view_year = int(st.number_input(
+                "確認する年",
+                min_value=2024,
+                max_value=2099,
+                value=_rule_view_default_year,
+                step=1,
+                key="effective_rule_view_year",
+            ))
+        with _rv_col2:
+            _rule_view_month = int(st.selectbox(
+                "確認する月",
+                options=list(range(1, 13)),
+                index=max(0, min(11, _rule_view_default_month - 1)),
+                format_func=lambda value: f"{int(value)}月",
+                key="effective_rule_view_month",
+            ))
+
+        _effective_rule_rows, _effective_rule_status = (
+            build_effective_rule_visibility_rows(
+                _rule_view_year,
+                _rule_view_month,
+                cfg.parameters,
+            )
+        )
+        st.dataframe(
+            _effective_rule_rows,
+            width="stretch",
+            hide_index=True,
+            height=350,
+        )
+
+        _yamamoto_consecutive = int(
+            _effective_rule_status["yamamoto_max_consecutive"]
+        )
+        if _yamamoto_consecutive >= 3:
+            st.info(
+                f"{_rule_view_year}年{_rule_view_month}月は、山本の3連勤を"
+                f"月別例外で許容しています（上限{_yamamoto_consecutive}連勤）。"
+                "一般スタッフの3連勤も通常どおり許容範囲です。"
+            )
+        else:
+            st.warning(
+                f"{_rule_view_year}年{_rule_view_month}月は、一般スタッフの"
+                "3連勤は許容範囲ですが、山本は連続2日までです。"
+                "山本の3連勤を一時的に許容する場合は、"
+                "「設定 → 月例外 → 山本の補助勤務方針」で"
+                "対象月だけ連続勤務上限を3日にしてください。"
+            )
+
+        if (
+            int(_effective_rule_status["configured_soft_max"])
+            != int(_effective_rule_status["general_soft_max"])
+        ):
+            st.error(
+                "推奨連勤上限の画面保存値と、生成処理が参照する値が"
+                "一致していません。シフト生成前に確認してください。"
+            )
+
+        with st.expander(
+            f"{_rule_view_year}年{_rule_view_month}月の適用順序と月別条件",
+            expanded=False,
+        ):
+            st.markdown(
+                """
+                1. **本人の×休み希望**を最優先します。
+                2. **絶対条件**を守ります。違反すると生成不可または検証ERRORです。
+                3. **その月だけの例外**がある項目は、対象月に限り固定標準を上書きします。
+                4. **強い目標**はできる限り守りますが、本人希望や店舗運営を優先して
+                   WARNING付きで許容する場合があります。
+                """
+            )
+            try:
+                from prototype.rules import (
+                    active_code_managed_monthly_rules,
+                    monthly_avoid_same_off_rules,
+                    monthly_operation_mode_overrides,
+                )
+
+                _month_rule_rows = []
+                for _rule_text in active_code_managed_monthly_rules(
+                    _rule_view_year,
+                    _rule_view_month,
+                ):
+                    _month_rule_rows.append({
+                        "区分": "実行中の月別条件",
+                        "内容": _rule_text,
+                    })
+
+                for _first, _second, _reason in monthly_avoid_same_off_rules(
+                    _rule_view_year,
+                    _rule_view_month,
+                ):
+                    _month_rule_rows.append({
+                        "区分": "月別の強い目標",
+                        "内容": (
+                            f"{_first}・{_second}の同時休みをなるべく避ける"
+                            f"（{_reason or '理由未記入'}）"
+                        ),
+                    })
+
+                _boundary_allowances = monthly_carryover_consecutive_allowances(
+                    _rule_view_year,
+                    _rule_view_month,
+                )
+                for _employee_name, _extra_days in sorted(
+                    _boundary_allowances.items()
+                ):
+                    _month_rule_rows.append({
+                        "区分": "月境界だけの例外",
+                        "内容": (
+                            f"{_employee_name}: 前月末から続く連勤に限り"
+                            f"上限を{int(_extra_days)}日延長"
+                        ),
+                    })
+
+                for _day, _mode in sorted(
+                    monthly_operation_mode_overrides(
+                        _rule_view_year,
+                        _rule_view_month,
+                    ).items()
+                ):
+                    _month_rule_rows.append({
+                        "区分": "営業モード",
+                        "内容": f"{_rule_view_month}/{int(_day)}: {_mode.value}",
+                    })
+
+                for _custom_rule in active_monthly_custom_rules(
+                    cfg,
+                    _rule_view_year,
+                    _rule_view_month,
+                ):
+                    _month_rule_rows.append({
+                        "区分": "画面で追加した月別ルール",
+                        "内容": custom_monthly_rule_display_text(_custom_rule),
+                    })
+
+                if _month_rule_rows:
+                    st.dataframe(
+                        _month_rule_rows,
+                        width="stretch",
+                        hide_index=True,
+                    )
+                else:
+                    st.info(
+                        "この月だけの追加条件はありません。"
+                        "全月共通の固定ルールで動きます。"
+                    )
+            except Exception as exc:
+                st.error(
+                    "月別条件の表示に失敗しました。"
+                    f"設定データを確認してください（{type(exc).__name__}）。"
+                )
+
         st.markdown("#### ルール台帳 v1.0")
         st.caption(
             "現時点でこのフォルダ上にある固定ルールを、"
@@ -10241,11 +10548,11 @@ elif mode == "⚙️ 設定":
         ledger = load_rule_ledger_v1()
         rule_inventory = list(ledger.get("rules", []))
         employee_suitability_rows = list(ledger.get("employee_store_suitability", []))
-        numeric_ledger_rows = list(ledger.get("numeric_parameters", []))
+        numeric_ledger_rows = build_numeric_ledger_rows_from_parameters(
+            cfg.parameters
+        )
         if not employee_suitability_rows:
             employee_suitability_rows = build_employee_suitability_rows_from_master()
-        if not numeric_ledger_rows:
-            numeric_ledger_rows = build_numeric_ledger_rows_from_parameters(cfg.parameters)
 
         category_counts = {}
         for row in rule_inventory:
