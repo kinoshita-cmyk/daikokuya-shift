@@ -23,6 +23,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
@@ -191,7 +193,15 @@ def _push_file(
         try:
             check = requests.get(url, headers=headers, timeout=timeout)
             if check.status_code == 200:
-                existing_sha = check.json().get("sha")
+                existing_data = check.json()
+                existing_sha = existing_data.get("sha")
+                existing_encoded = str(existing_data.get("content", "")).replace("\n", "")
+                if existing_encoded:
+                    try:
+                        if base64.b64decode(existing_encoded) == content:
+                            return True, "変更なし（保存済み）"
+                    except Exception:
+                        pass
         except Exception as e:
             last_message = f"SHA取得失敗: {type(e).__name__}: {e}"
 
@@ -313,11 +323,14 @@ def sync_preferences_from_github(
         f"preferences/{sync_key}",
     ]
     headers = _github_headers()
+    started_at = time.perf_counter()
 
     try:
         restored = 0
         checked = []
         errors = []
+        download_items: list[dict] = []
+        seen_names: set[str] = set()
         for repo_dir in repo_dirs:
             url = f"https://api.github.com/repos/{repo}/contents/{repo_dir}"
             response = requests.get(url, headers=headers, timeout=timeout)
@@ -337,29 +350,88 @@ def sync_preferences_from_github(
                 name = str(item.get("name", ""))
                 if not (name.startswith("preferences_") and name.endswith(".json")):
                     continue
+                # 主保存と旧形式ミラーには同名ファイルがあるため、二重取得しない。
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
                 local_path = local_month_dir / name
                 if local_path.exists():
                     continue
-                file_url = item.get("url")
-                if not file_url:
-                    continue
-                file_response = requests.get(file_url, headers=headers, timeout=timeout)
-                if file_response.status_code != 200:
-                    continue
-                file_data = file_response.json()
-                encoded = str(file_data.get("content", "")).replace("\n", "")
-                if not encoded:
-                    continue
-                content = base64.b64decode(encoded)
-                with open(local_path, "wb") as f:
-                    f.write(content)
-                restored += 1
+                download_items.append(item)
 
-        _SYNCED_PREFERENCE_MONTHS.add(sync_key)
+        def _download(item: dict) -> tuple[str, bytes, str]:
+            name = str(item.get("name", ""))
+            last_msg = ""
+            # 一時的な通信失敗で提出を欠落させないよう、その場で1回だけ再試行する。
+            for _attempt in range(2):
+                ok, content, last_msg = _fetch_github_item_content(
+                    item,
+                    timeout=timeout,
+                )
+                if ok:
+                    return name, content, ""
+            return name, b"", last_msg or "取得失敗"
+
+        # 提出履歴は互換性のため全件復元する。ただし1件ずつ直列取得すると
+        # 起動が長時間止まるため、GitHubに負荷を掛けすぎない範囲で並列化する。
+        worker_count = min(6, len(download_items))
+        if worker_count:
+            with ThreadPoolExecutor(
+                max_workers=worker_count,
+                thread_name_prefix="github-preference-sync",
+            ) as executor:
+                futures = {
+                    executor.submit(_download, item): item
+                    for item in download_items
+                }
+                for future in as_completed(futures):
+                    item = futures[future]
+                    expected_name = str(item.get("name", ""))
+                    try:
+                        name, content, error = future.result()
+                    except Exception as exc:
+                        errors.append(
+                            f"{expected_name}: {type(exc).__name__}: {exc}"
+                        )
+                        continue
+                    if error:
+                        errors.append(f"{name}: {error}")
+                        continue
+                    local_path = local_month_dir / name
+                    temp_path = local_path.with_suffix(local_path.suffix + ".tmp")
+                    try:
+                        with open(temp_path, "wb") as f:
+                            f.write(content)
+                        temp_path.replace(local_path)
+                        restored += 1
+                    except Exception as exc:
+                        errors.append(
+                            f"{name}: 保存失敗 {type(exc).__name__}: {exc}"
+                        )
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+
+        # 取得失敗があった場合は次回表示時に未取得分だけ再試行する。
+        if not errors:
+            _SYNCED_PREFERENCE_MONTHS.add(sync_key)
+        _debug_log(
+            "sync_preferences_done",
+            year=year,
+            month=month,
+            remote_candidates=len(download_items),
+            restored=restored,
+            error_count=len(errors),
+            elapsed_seconds=round(time.perf_counter() - started_at, 3),
+        )
         if restored:
-            return restored, f"{restored}件復元（確認先: {', '.join(checked)}）"
+            suffix = f" / {len(errors)}件は次回再試行" if errors else ""
+            return restored, (
+                f"{restored}件復元（確認先: {', '.join(checked)}）{suffix}"
+            )
         if errors:
-            return 0, " / ".join(errors)
+            return 0, " / ".join(errors[:3])
         return 0, f"GitHub上に提出データなし（確認先: {', '.join(checked)}）"
     except requests.exceptions.Timeout:
         return 0, "タイムアウト"
@@ -916,6 +988,7 @@ def push_preference_to_github(
     employee_name: str,
     year: int,
     month: int,
+    repo_filename: Optional[str] = None,
 ) -> tuple[bool, str]:
     """
     従業員の希望提出データを GitHub にプッシュ。
@@ -928,17 +1001,23 @@ def push_preference_to_github(
         local_file_path = Path(local_file_path)
         if not local_file_path.exists():
             return False, "ローカルファイルが見つからない"
-        ts = now_jst().strftime("%Y%m%d-%H%M%S")
         # アプリは backups/YYYY-MM/preferences_*.json を読み込むため、
         # 再起動後もそのまま復元できるパスへ保存する。
         safe_name = "".join(c if c.isalnum() else "_" for c in employee_name)
+        safe_repo_filename = Path(str(repo_filename or "")).name
+        if not (
+            safe_repo_filename.startswith("preferences_")
+            and safe_repo_filename.endswith(".json")
+        ):
+            ts = now_jst().strftime("%Y%m%d-%H%M%S")
+            safe_repo_filename = f"preferences_{ts}_{safe_name}.json"
         primary_repo_path = (
             f"backups/{year:04d}-{month:02d}/"
-            f"preferences_{ts}_{safe_name}.json"
+            f"{safe_repo_filename}"
         )
         legacy_repo_path = (
             f"preferences/{year:04d}-{month:02d}/"
-            f"preferences_{ts}_{safe_name}.json"
+            f"{safe_repo_filename}"
         )
         content = local_file_path.read_bytes()
         commit_msg = f"Preference: {employee_name} for {year}-{month:02d}"
@@ -1014,7 +1093,11 @@ def push_all_preferences_to_github(
                     result["skipped_count"] += 1
                     continue
                 success, msg = push_preference_to_github(
-                    file_path, author, year, month,
+                    file_path,
+                    author,
+                    year,
+                    month,
+                    repo_filename=file_path.name,
                 )
                 if success:
                     result["success_count"] += 1

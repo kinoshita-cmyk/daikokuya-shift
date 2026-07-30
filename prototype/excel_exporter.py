@@ -26,16 +26,10 @@ from openpyxl.utils import get_column_letter
 from .models import MonthlyShift, Store, OperationMode
 from .paths import OUTPUT_DIR
 from .employees import ALL_EMPLOYEES
+from .export_config import EXPORT_COLUMN_ORDER
 from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity
 from .calendar_utils import is_weekend_or_japanese_holiday
 
-
-# 出力時の従業員列順（運用に慣れた順番、テンプレートと同じ）
-EXPORT_COLUMN_ORDER = [
-    "山本", "板倉", "今津", "鈴木", "田中", "岩野", "大塚", "南",
-    "黒澤", "牧野", "春山", "下地", "大類", "長尾", "野澤",
-    "楯", "土井", "顧問",
-]
 
 WEEKDAY_JP = ["月", "火", "水", "木", "金", "土", "日"]
 
