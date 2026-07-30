@@ -14,8 +14,10 @@ config/monthly_exceptions.json から読み込みます。コード内の値は
 """
 
 import json
+import os
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
+from calendar import monthrange
 from typing import Optional
 from .models import Store, Skill, OperationMode
 from .paths import CONFIG_DIR
@@ -274,6 +276,7 @@ OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
 
 MONTHLY_EXCEPTIONS_FILE = CONFIG_DIR / "monthly_exceptions.json"
 MONTHLY_EXCEPTIONS_STATUS = "未読み込み"
+MONTHLY_EXCEPTIONS_HISTORY_LIMIT = 20
 
 
 def _parse_ym(text: str) -> Optional[tuple]:
@@ -322,6 +325,180 @@ def _store_from_config(value) -> Optional[Store]:
         if text in (store.value, store.display_name):
             return store
     return None
+
+
+def _clean_monthly_exceptions_snapshot(data: dict) -> dict:
+    """履歴を再帰的に抱え込まない、月例外設定のスナップショットを返す。"""
+    return {
+        key: value
+        for key, value in dict(data or {}).items()
+        if key not in {"_history", "updated_at", "updated_by"}
+    }
+
+
+def validate_monthly_exceptions_data(data: dict) -> tuple[list[str], list[str]]:
+    """管理画面で保存する月例外設定の矛盾・入力漏れを確認する。"""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    for ym_text, employee_rules in dict(
+        data.get("employee_store_overrides", {}) or {}
+    ).items():
+        if _parse_ym(ym_text) is None:
+            errors.append(f"店舗区分の対象月「{ym_text}」が不正です。")
+            continue
+        if not isinstance(employee_rules, dict):
+            errors.append(f"{ym_text}・店舗区分の保存形式が不正です。")
+            continue
+        for employee_name, rule in dict(employee_rules or {}).items():
+            if not isinstance(rule, dict):
+                errors.append(
+                    f"{ym_text}・{employee_name}: 店舗区分の保存形式が不正です。"
+                )
+                continue
+            primary = str(rule.get("primary_store") or "")
+            removed = {
+                str(value) for value in (rule.get("remove_support_stores") or [])
+            }
+            if primary and primary in removed:
+                errors.append(
+                    f"{ym_text}・{employee_name}: 主担当店舗と応援除外店舗が重複しています。"
+                )
+
+    for ym_text, plans in dict(data.get("training_plans", {}) or {}).items():
+        ym = _parse_ym(ym_text)
+        if ym is None:
+            errors.append(f"研修計画の対象月「{ym_text}」が不正です。")
+            continue
+        if not isinstance(plans, list):
+            errors.append(f"{ym_text}・研修計画の保存形式が不正です。")
+            continue
+        max_day = monthrange(*ym)[1]
+        seen_trainees: set[str] = set()
+        for index, plan in enumerate(list(plans or []), start=1):
+            if not isinstance(plan, dict):
+                errors.append(
+                    f"{ym_text}・研修計画{index}: 保存形式が不正です。"
+                )
+                continue
+            trainee = str(plan.get("trainee") or "").strip()
+            label = str(plan.get("name") or f"研修計画{index}")
+            if not trainee:
+                errors.append(f"{ym_text}・{label}: 研修対象者が未設定です。")
+                continue
+            if trainee in seen_trainees:
+                warnings.append(
+                    f"{ym_text}・{trainee}: 複数の研修計画があります。内容の重複を確認してください。"
+                )
+            seen_trainees.add(trainee)
+            approved = {
+                str(name) for name in (plan.get("approved_mentors") or [])
+                if str(name).strip()
+            }
+            if trainee in approved:
+                errors.append(
+                    f"{ym_text}・{label}: 研修対象者自身を指導担当には指定できません。"
+                )
+            phases = list(plan.get("phases") or [])
+            if not phases:
+                errors.append(f"{ym_text}・{label}: 研修段階が1つもありません。")
+                continue
+            for phase_index, phase in enumerate(phases, start=1):
+                phase_label = str(
+                    phase.get("label") or f"第{phase_index}段階"
+                )
+                try:
+                    start_day = int(phase.get("start_day", 1))
+                    end_day = int(phase.get("end_day", max_day))
+                    target_count = int(phase.get("target_count", 0))
+                except (TypeError, ValueError):
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: 日付または回数が不正です。"
+                    )
+                    continue
+                if not (1 <= start_day <= end_day <= max_day):
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: "
+                        f"日付範囲は1日から{max_day}日の間で指定してください。"
+                    )
+                if target_count < 0 or target_count > max(0, end_day - start_day + 1):
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: "
+                        "研修回数が日付範囲の日数を超えています。"
+                    )
+                if _store_from_config(phase.get("store")) in (None, Store.OFF):
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: 店舗が未設定です。"
+                    )
+                mentors = {
+                    str(name) for name in (phase.get("mentors") or [])
+                    if str(name).strip()
+                }
+                if not mentors:
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: 指導担当を1人以上指定してください。"
+                    )
+                if trainee in mentors:
+                    errors.append(
+                        f"{ym_text}・{label}・{phase_label}: "
+                        "研修対象者自身を指導担当には指定できません。"
+                    )
+            if plan.get("require_mentor_on_workday") and not approved:
+                errors.append(
+                    f"{ym_text}・{label}: 全出勤日の指導担当確認を使う場合は、"
+                    "月全体の指導担当を1人以上指定してください。"
+                )
+
+    for ym_text, policy in dict(data.get("yamamoto_policy", {}) or {}).items():
+        if _parse_ym(ym_text) is None:
+            errors.append(f"山本補助勤務の対象月「{ym_text}」が不正です。")
+            continue
+        if not isinstance(policy, dict):
+            errors.append(f"{ym_text}・山本補助勤務の保存形式が不正です。")
+            continue
+        try:
+            max_days = int(policy.get("max_days"))
+            max_consecutive = int(policy.get("max_consecutive"))
+        except (TypeError, ValueError):
+            errors.append(f"{ym_text}・山本補助勤務: 日数設定が不正です。")
+            continue
+        if not 0 <= max_days <= 31:
+            errors.append(f"{ym_text}・山本補助勤務: 月間上限は0〜31日で指定してください。")
+        if not 1 <= max_consecutive <= 7:
+            errors.append(f"{ym_text}・山本補助勤務: 連続勤務上限は1〜7日で指定してください。")
+        if max_consecutive > max_days and max_days > 0:
+            warnings.append(
+                f"{ym_text}・山本補助勤務: 連続勤務上限が月間上限を超えています。"
+            )
+        if policy.get("auto_only_if_needed") is False:
+            errors.append(
+                f"{ym_text}・山本補助勤務: 自動生成は「赤羽で必要な日だけ」に固定されています。"
+            )
+
+    return errors, warnings
+
+
+def summarize_monthly_exceptions_change(before: dict, after: dict) -> list[str]:
+    """保存前画面に出す、変更箇所の日本語要約を返す。"""
+    labels = {
+        "omiya_anchor_relaxed_months": "大宮アンカー緩和",
+        "tanaka_training": "従来型の研修組み合わせ",
+        "training_plans": "段階別研修計画",
+        "employee_store_overrides": "月限定の店舗区分",
+        "carryover_consecutive_allowances": "境界連勤の延長",
+        "avoid_same_off": "同時休み回避",
+        "operation_modes": "営業モード",
+        "yamamoto_policy": "山本の補助勤務方針",
+    }
+    before_clean = _clean_monthly_exceptions_snapshot(before)
+    after_clean = _clean_monthly_exceptions_snapshot(after)
+    changed = [
+        labels.get(key, key)
+        for key in sorted(set(before_clean) | set(after_clean))
+        if before_clean.get(key) != after_clean.get(key)
+        and not str(key).startswith("_")
+    ]
+    return changed or ["更新者・説明などの管理情報"]
 
 
 # 2026年7月は大型連休の重なりが大きい超イレギュラー月。
@@ -407,14 +584,62 @@ TANAKA_PAIR_TRAINING_RULES: dict[tuple[int, int], dict] = {
 
 
 def tanaka_pair_training_rule(year: int, month: int) -> Optional[dict]:
-    """指定月の田中さん研修ペア条件を返す。対象外の月は None。"""
+    """指定月の研修ペア条件を返す。対象外の月は None。"""
     rule = TANAKA_PAIR_TRAINING_RULES.get((int(year), int(month)))
     return dict(rule) if rule else None
 
 
 def is_tanaka_pair_training_month(year: int, month: int) -> bool:
-    """田中さんの研修ペア勤務ルールを適用する月か。"""
+    """月限定の研修ペア勤務ルールを適用する月か。"""
     return tanaka_pair_training_rule(year, month) is not None
+
+
+# 将来の研修を「対象者・期間・店舗・指導担当・回数」で設定する汎用形式。
+# 8月の田中研修は確定済みシフトとの互換性を優先し、上の従来形式に残す。
+_DEFAULT_MONTHLY_TRAINING_PLANS: dict[tuple[int, int], tuple[dict, ...]] = {}
+MONTHLY_TRAINING_PLANS: dict[tuple[int, int], tuple[dict, ...]] = {}
+
+
+def monthly_training_plans(year: int, month: int) -> tuple[dict, ...]:
+    """指定月の段階別研修計画を返す。"""
+    plans = MONTHLY_TRAINING_PLANS.get((int(year), int(month)), ())
+    return tuple(
+        {
+            **dict(plan),
+            "approved_mentors": tuple(plan.get("approved_mentors", ())),
+            "phases": tuple(
+                {
+                    **dict(phase),
+                    "mentors": tuple(phase.get("mentors", ())),
+                }
+                for phase in plan.get("phases", ())
+            ),
+        }
+        for plan in plans
+    )
+
+
+def monthly_training_store_days(
+    year: int,
+    month: int,
+    employee_name: str,
+) -> dict[Store, set[int]]:
+    """研修対象者について、月例外で明示的に許可した店舗と日付を返す。"""
+    result: dict[Store, set[int]] = {}
+    max_day = monthrange(int(year), int(month))[1]
+    for plan in monthly_training_plans(year, month):
+        if str(plan.get("trainee")) != str(employee_name):
+            continue
+        for phase in plan.get("phases", ()):
+            store = phase.get("store")
+            if not isinstance(store, Store) or store == Store.OFF:
+                continue
+            start_day = max(1, int(phase.get("start_day", 1)))
+            end_day = min(max_day, int(phase.get("end_day", max_day)))
+            result.setdefault(store, set()).update(
+                range(start_day, end_day + 1)
+            )
+    return result
 
 
 # 月限定の従業員別店舗区分。
@@ -455,9 +680,37 @@ def monthly_employee_store_override(
     }
 
 
-def yamamoto_monthly_max_days(month: int) -> int:
+_DEFAULT_MONTHLY_YAMAMOTO_POLICIES: dict[tuple[int, int], dict] = {}
+MONTHLY_YAMAMOTO_POLICIES: dict[tuple[int, int], dict] = {}
+
+
+def yamamoto_monthly_policy(year: int, month: int) -> dict:
+    """山本さんの補助勤務方針を返す。上限は目標日数ではない。"""
+    default_max = 14 if int(month) in (1, 2) else 15
+    configured = MONTHLY_YAMAMOTO_POLICIES.get(
+        (int(year), int(month)), {}
+    )
+    return {
+        "max_days": int(configured.get("max_days", default_max)),
+        "max_consecutive": int(configured.get("max_consecutive", 2)),
+        "auto_only_if_needed": True,
+        "store": Store.AKABANE,
+        "manual_extra_allowed": True,
+    }
+
+
+def yamamoto_monthly_max_days(month: int, year: Optional[int] = None) -> int:
     """山本さんの手動調整後の上限（自動生成の目標日数ではない）。"""
-    return 14 if int(month) in (1, 2) else 15
+    if year is None:
+        return 14 if int(month) in (1, 2) else 15
+    return int(yamamoto_monthly_policy(int(year), int(month))["max_days"])
+
+
+def yamamoto_monthly_max_consecutive(year: int, month: int) -> int:
+    """山本さんの月別連続勤務上限を返す。"""
+    return int(
+        yamamoto_monthly_policy(int(year), int(month))["max_consecutive"]
+    )
 
 
 def active_code_managed_monthly_rules(year: int, month: int) -> list:
@@ -470,8 +723,9 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
         )
     tanaka_rule = tanaka_pair_training_rule(year, month)
     if tanaka_rule:
+        training_employee = str(tanaka_rule.get("employee") or "対象者")
         notes.append(
-            "田中さんの研修ペア勤務: "
+            f"{training_employee}さんの月限定研修ペア勤務: "
             f"西口({tanaka_rule['nishiguchi_partner']}さんと同日)"
             f"×{tanaka_rule['nishiguchi_count']}回・"
             f"赤羽({tanaka_rule['akabane_partner']}さん＋"
@@ -481,6 +735,26 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
             f"{tanaka_rule['higashiguchi_from_day']}日以降)"
             f"×{tanaka_rule['higashiguchi_count']}回。"
             "この組み合わせ以外の日は東口・西口に入らない"
+        )
+    for plan in monthly_training_plans(year, month):
+        phase_notes = []
+        for phase in plan.get("phases", ()):
+            comparison = (
+                "ちょうど"
+                if str(phase.get("comparison")) == "exact"
+                else "以上"
+            )
+            phase_notes.append(
+                f"{int(phase.get('start_day', 1))}〜"
+                f"{int(phase.get('end_day', monthrange(year, month)[1]))}日・"
+                f"{phase['store'].display_name}・"
+                f"{'/'.join(phase.get('mentors', ()))}と"
+                f"{int(phase.get('target_count', 0))}回{comparison}"
+            )
+        notes.append(
+            f"{plan.get('trainee')}さんの段階別研修"
+            f"（{'絶対条件' if plan.get('severity') == 'ERROR' else '強い目標'}）: "
+            + "、".join(phase_notes)
         )
     for employee_name, override in MONTHLY_EMPLOYEE_STORE_OVERRIDES.get(
         (int(year), int(month)), {}
@@ -500,6 +774,13 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
             f"{employee_name}さん: {'、'.join(parts)}"
             "（外した店舗も緊急時の手動配置は禁止しない）"
         )
+    policy = yamamoto_monthly_policy(year, month)
+    notes.append(
+        "山本さん: 赤羽で通常スタッフだけでは不足する日に限り自動投入。"
+        f"月間上限{policy['max_days']}日、"
+        f"連続{policy['max_consecutive']}日まで。"
+        "追加勤務は完成後に手動調整"
+    )
     return notes
 
 # 月内の最低巡回条件。
@@ -594,7 +875,9 @@ def reload_monthly_exceptions() -> str:
     global MONTHLY_CARRYOVER_CONSECUTIVE_ALLOWANCES
     global MONTHLY_OPERATION_MODES
     global TANAKA_PAIR_TRAINING_RULES
+    global MONTHLY_TRAINING_PLANS
     global MONTHLY_EMPLOYEE_STORE_OVERRIDES
+    global MONTHLY_YAMAMOTO_POLICIES
 
     data = _load_monthly_exceptions()
 
@@ -609,6 +892,10 @@ def reload_monthly_exceptions() -> str:
         ym: dict(rule)
         for ym, rule in _DEFAULT_TANAKA_PAIR_TRAINING_RULES.items()
     }
+    MONTHLY_TRAINING_PLANS = {
+        ym: tuple(dict(plan) for plan in plans)
+        for ym, plans in _DEFAULT_MONTHLY_TRAINING_PLANS.items()
+    }
     MONTHLY_EMPLOYEE_STORE_OVERRIDES = {
         ym: {
             name: {
@@ -620,6 +907,10 @@ def reload_monthly_exceptions() -> str:
             for name, rule in employees.items()
         }
         for ym, employees in _DEFAULT_MONTHLY_EMPLOYEE_STORE_OVERRIDES.items()
+    }
+    MONTHLY_YAMAMOTO_POLICIES = {
+        ym: dict(policy)
+        for ym, policy in _DEFAULT_MONTHLY_YAMAMOTO_POLICIES.items()
     }
     if not data:
         return MONTHLY_EXCEPTIONS_STATUS
@@ -698,6 +989,99 @@ def reload_monthly_exceptions() -> str:
                 training_parsed[ym] = parsed_rule
         TANAKA_PAIR_TRAINING_RULES = training_parsed
 
+    if "training_plans" in data:
+        plans_parsed: dict = {}
+        for ym_text, raw_plans in dict(data["training_plans"] or {}).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(raw_plans, list):
+                continue
+            max_day = monthrange(*ym)[1]
+            month_plans = []
+            for index, raw_plan in enumerate(raw_plans):
+                if not isinstance(raw_plan, dict):
+                    continue
+                trainee = str(raw_plan.get("trainee") or "").strip()
+                if not trainee:
+                    continue
+                phases = []
+                for raw_phase in list(raw_plan.get("phases") or []):
+                    if not isinstance(raw_phase, dict):
+                        continue
+                    store = _store_from_config(raw_phase.get("store"))
+                    mentors = tuple(
+                        str(name) for name in (raw_phase.get("mentors") or [])
+                        if str(name).strip() and str(name) != trainee
+                    )
+                    try:
+                        start_day = max(1, int(raw_phase.get("start_day", 1)))
+                        end_day = min(
+                            max_day, int(raw_phase.get("end_day", max_day))
+                        )
+                        target_count = max(
+                            0, int(raw_phase.get("target_count", 0))
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if (
+                        store in (None, Store.OFF)
+                        or not mentors
+                        or start_day > end_day
+                    ):
+                        continue
+                    phases.append({
+                        "label": str(
+                            raw_phase.get("label")
+                            or f"第{len(phases) + 1}段階"
+                        ),
+                        "start_day": start_day,
+                        "end_day": end_day,
+                        "store": store,
+                        "mentors": mentors,
+                        "target_count": min(
+                            target_count, end_day - start_day + 1
+                        ),
+                        "comparison": (
+                            "exact"
+                            if str(raw_phase.get("comparison")) == "exact"
+                            else "min"
+                        ),
+                        "severity": (
+                            "ERROR"
+                            if str(raw_phase.get("severity")).upper() == "ERROR"
+                            else "WARNING"
+                        ),
+                    })
+                if not phases:
+                    continue
+                approved_mentors = tuple(
+                    str(name)
+                    for name in (raw_plan.get("approved_mentors") or [])
+                    if str(name).strip() and str(name) != trainee
+                )
+                month_plans.append({
+                    "id": str(
+                        raw_plan.get("id")
+                        or f"{ym_text}-{trainee}-{index + 1}"
+                    ),
+                    "name": str(
+                        raw_plan.get("name") or f"{trainee}研修"
+                    ),
+                    "trainee": trainee,
+                    "severity": (
+                        "ERROR"
+                        if str(raw_plan.get("severity")).upper() == "ERROR"
+                        else "WARNING"
+                    ),
+                    "require_mentor_on_workday": bool(
+                        raw_plan.get("require_mentor_on_workday", False)
+                    ),
+                    "approved_mentors": approved_mentors,
+                    "phases": tuple(phases),
+                })
+            if month_plans:
+                plans_parsed[ym] = tuple(month_plans)
+        MONTHLY_TRAINING_PLANS = plans_parsed
+
     if "employee_store_overrides" in data:
         overrides_parsed: dict = {}
         for ym_text, employee_rules in dict(
@@ -730,6 +1114,29 @@ def reload_monthly_exceptions() -> str:
             if parsed_employees:
                 overrides_parsed[ym] = parsed_employees
         MONTHLY_EMPLOYEE_STORE_OVERRIDES = overrides_parsed
+
+    if "yamamoto_policy" in data:
+        yamamoto_parsed: dict = {}
+        for ym_text, raw_policy in dict(
+            data["yamamoto_policy"] or {}
+        ).items():
+            ym = _parse_ym(ym_text)
+            if ym is None or not isinstance(raw_policy, dict):
+                continue
+            try:
+                max_days = int(raw_policy.get("max_days"))
+                max_consecutive = int(
+                    raw_policy.get("max_consecutive", 2)
+                )
+            except (TypeError, ValueError):
+                continue
+            if 0 <= max_days <= monthrange(*ym)[1] and 1 <= max_consecutive <= 7:
+                yamamoto_parsed[ym] = {
+                    "max_days": max_days,
+                    "max_consecutive": max_consecutive,
+                    "auto_only_if_needed": True,
+                }
+        MONTHLY_YAMAMOTO_POLICIES = yamamoto_parsed
 
     if "avoid_same_off" in data:
         avoid_parsed: dict = {}
@@ -790,6 +1197,34 @@ def load_monthly_exceptions_raw() -> dict:
             }
             for (y, m), rule in TANAKA_PAIR_TRAINING_RULES.items()
         },
+        "training_plans": {
+            f"{y:04d}-{m:02d}": [
+                {
+                    **{
+                        key: value
+                        for key, value in dict(plan).items()
+                        if key not in {"phases", "approved_mentors"}
+                    },
+                    "approved_mentors": list(
+                        plan.get("approved_mentors", ())
+                    ),
+                    "phases": [
+                        {
+                            **{
+                                key: value
+                                for key, value in dict(phase).items()
+                                if key not in {"store", "mentors"}
+                            },
+                            "store": phase["store"].name,
+                            "mentors": list(phase.get("mentors", ())),
+                        }
+                        for phase in plan.get("phases", ())
+                    ],
+                }
+                for plan in plans
+            ]
+            for (y, m), plans in MONTHLY_TRAINING_PLANS.items()
+        },
         "employee_store_overrides": {
             f"{y:04d}-{m:02d}": {
                 name: {
@@ -818,32 +1253,97 @@ def load_monthly_exceptions_raw() -> dict:
             ]
             for (y, m), rules_t in MONTHLY_AVOID_SAME_OFF_RULES.items()
         },
+        "yamamoto_policy": {
+            f"{y:04d}-{m:02d}": dict(policy)
+            for (y, m), policy in MONTHLY_YAMAMOTO_POLICIES.items()
+        },
     }
 
 
-def save_monthly_exceptions(data: dict, actor: str = "管理者") -> tuple:
+def save_monthly_exceptions(
+    data: dict,
+    actor: str = "管理者",
+    action: str = "設定変更",
+) -> tuple:
     """月例外設定を保存し、実行中のシステムへ即時反映する。
 
     Returns:
         (成功したか: bool, 状態メッセージ: str)
     """
-    payload = dict(data)
+    errors, _warnings = validate_monthly_exceptions_data(data)
+    if errors:
+        return False, " / ".join(errors)
+
+    before = _load_monthly_exceptions() or {}
+    before_snapshot = _clean_monthly_exceptions_snapshot(before)
+    payload = _clean_monthly_exceptions_snapshot(data)
     payload["_説明"] = (
         "月限定の例外ルール。画面（⚙️ 設定 → 📅 月例外）から編集できます。"
         "書式は『YYYY-MM』。このファイルにキーがある場合、"
         "コード内のデフォルト値よりこちらが優先されます。"
     )
-    from datetime import datetime as _dt
-    payload["updated_at"] = _dt.now().isoformat(timespec="seconds")
+    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
     payload["updated_by"] = str(actor or "管理者")
+    local_history = list(before.get("_history", []) or [])
+    incoming_history = list(dict(data or {}).get("_history", []) or [])
+    # Streamlit再起動時にGitHub最新版を復元する場合は、リモート側の履歴も引き継ぐ。
+    prior_history = (
+        incoming_history
+        if len(incoming_history) >= len(local_history)
+        else local_history
+    )
+    if before_snapshot != _clean_monthly_exceptions_snapshot(payload):
+        prior_history.append({
+            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "saved_at": payload["updated_at"],
+            "actor": str(actor or "管理者"),
+            "action": str(action or "設定変更"),
+            "changed_sections": summarize_monthly_exceptions_change(
+                before_snapshot, payload,
+            ),
+            "snapshot": before_snapshot,
+        })
+    payload["_history"] = prior_history[-MONTHLY_EXCEPTIONS_HISTORY_LIMIT:]
     try:
         MONTHLY_EXCEPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(MONTHLY_EXCEPTIONS_FILE, "w", encoding="utf-8") as f:
+        temp_path = MONTHLY_EXCEPTIONS_FILE.with_suffix(".json.tmp")
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temp_path, MONTHLY_EXCEPTIONS_FILE)
     except Exception as exc:
         return False, f"保存失敗（{type(exc).__name__}: {exc}）"
     status = reload_monthly_exceptions()
     return True, status
+
+
+def monthly_exceptions_history(limit: int = 10) -> list[dict]:
+    """月例外設定に埋め込まれた直近の変更履歴を新しい順で返す。"""
+    data = _load_monthly_exceptions() or {}
+    entries = [
+        dict(entry)
+        for entry in list(data.get("_history", []) or [])
+        if isinstance(entry, dict) and isinstance(entry.get("snapshot"), dict)
+    ]
+    entries.reverse()
+    return entries[:max(1, int(limit))]
+
+
+def restore_monthly_exceptions_history(
+    history_id: str,
+    actor: str = "管理者",
+) -> tuple[bool, str]:
+    """指定した変更履歴の直前状態へ戻す。復元操作自体も履歴に残す。"""
+    for entry in monthly_exceptions_history(MONTHLY_EXCEPTIONS_HISTORY_LIMIT):
+        if str(entry.get("id")) != str(history_id):
+            continue
+        return save_monthly_exceptions(
+            dict(entry["snapshot"]),
+            actor=actor,
+            action=f"履歴から復元（{entry.get('saved_at', '')}の変更前）",
+        )
+    return False, "指定した履歴が見つかりません。"
 
 
 def monthly_carryover_consecutive_allowances(

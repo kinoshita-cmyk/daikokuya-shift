@@ -48,8 +48,10 @@ from .rules import (
     WORK_TARGET_ERROR_DIFF_DAYS,
     is_omiya_two_person_allowed_month,
     tanaka_pair_training_rule,
+    monthly_training_plans,
+    monthly_training_store_days,
     monthly_employee_store_override,
-    yamamoto_monthly_max_days,
+    yamamoto_monthly_policy,
 )
 
 
@@ -360,7 +362,10 @@ def validate(
     # 21. 月限定の特別条件チェック（配置禁止・田中さん研修ペア回数）
     _check_monthly_special_rules(shift, result, days_in_month)
 
-    # 21. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
+    # 22. 汎用の段階別研修計画
+    _check_monthly_training_plans(shift, result, days_in_month)
+
+    # 23. 店舗鍵担当チェック（警告表示のみ。生成の制約にはしない）
     _check_store_keyholders(shift, result, days_in_month)
 
     # 22. 主担当なし・通常対応可複数店舗の偏りチェック
@@ -376,7 +381,7 @@ def validate(
         exact_holiday_days,
     )
 
-    # 24. 山本さんの手動調整後の月間上限
+    # 26. 山本さんの手動調整後の月間・連続勤務上限
     _check_yamamoto_monthly_max(shift, result)
 
     # 25. 統計情報の集計
@@ -1048,6 +1053,12 @@ def _check_absolute_forbidden_assignments(
         str(tanaka_training.get("employee"))
         if tanaka_training else ""
     )
+    generic_training_days = {
+        emp.name: monthly_training_store_days(
+            shift.year, shift.month, emp.name,
+        )
+        for emp in _validation_employees()
+    }
     for day in range(1, days + 1):
         for assignment in shift.get_day_assignments(day):
             if assignment.store == Store.OFF:
@@ -1085,6 +1096,15 @@ def _check_absolute_forbidden_assignments(
             )
             if is_tanaka_training_exception:
                 # 日付・相手・回数は月限定研修ルール側で厳密に検証する。
+                continue
+            is_generic_training_exception = (
+                day
+                in generic_training_days.get(emp.name, {}).get(
+                    assignment.store, set(),
+                )
+            )
+            if is_generic_training_exception:
+                # 日付・指導担当・回数は段階別研修計画側で検証する。
                 continue
 
             if emp.affinities.get(assignment.store) == Affinity.NONE:
@@ -1419,6 +1439,105 @@ def _check_monthly_special_rules(
                 message=(
                     f"東口勤務は{higashi_from_day}日以降で"
                     f"{higashi_partner}さんと同日の指定です。"
+                ),
+            ))
+
+
+def _check_monthly_training_plans(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """管理画面で設定した段階別研修の回数・同店舗指導を検証する。"""
+    plans = monthly_training_plans(shift.year, shift.month)
+    if not plans:
+        return
+
+    def _at(name: str, day: int, store: Store) -> bool:
+        assignment = shift.get_assignment(name, day)
+        return assignment is not None and assignment.store == store
+
+    for plan in plans:
+        trainee = str(plan.get("trainee") or "")
+        plan_name = str(plan.get("name") or f"{trainee}研修")
+        plan_severity = str(plan.get("severity") or "WARNING").upper()
+        for phase in plan.get("phases", ()):
+            store = phase.get("store")
+            if not isinstance(store, Store):
+                continue
+            mentors = tuple(str(name) for name in phase.get("mentors", ()))
+            start_day = max(1, int(phase.get("start_day", 1)))
+            end_day = min(days, int(phase.get("end_day", days)))
+            target = max(0, int(phase.get("target_count", 0)))
+            comparison = str(phase.get("comparison") or "min")
+            severity = str(
+                phase.get("severity") or plan_severity
+            ).upper()
+            paired_days = []
+            uncovered_days = []
+            for day in range(start_day, end_day + 1):
+                if not _at(trainee, day, store):
+                    continue
+                if any(_at(mentor, day, store) for mentor in mentors):
+                    paired_days.append(day)
+                else:
+                    uncovered_days.append(day)
+            actual = len(paired_days)
+            mismatch = (
+                actual != target
+                if comparison == "exact"
+                else actual < target
+            )
+            if mismatch:
+                comparison_label = "ちょうど" if comparison == "exact" else "以上"
+                result.issues.append(Issue(
+                    severity=severity,
+                    category="段階別研修",
+                    day=None,
+                    employee=trainee,
+                    message=(
+                        f"{plan_name}「{phase.get('label', '研修')}」は"
+                        f"{store.display_name}で指導担当と{target}回{comparison_label}"
+                        f"の設定ですが、現在{actual}回です。"
+                    ),
+                ))
+            for day in uncovered_days:
+                result.issues.append(Issue(
+                    severity=severity,
+                    category="研修担当不在",
+                    day=day,
+                    employee=trainee,
+                    message=(
+                        f"{plan_name}: {store.display_name}勤務ですが、"
+                        f"指導担当（{'・'.join(mentors)}）が同店舗にいません。"
+                    ),
+                ))
+
+        if not plan.get("require_mentor_on_workday"):
+            continue
+        approved = tuple(
+            str(name) for name in plan.get("approved_mentors", ())
+        )
+        for day in range(1, days + 1):
+            trainee_assignment = shift.get_assignment(trainee, day)
+            if (
+                trainee_assignment is None
+                or trainee_assignment.store == Store.OFF
+            ):
+                continue
+            if any(
+                _at(mentor, day, trainee_assignment.store)
+                for mentor in approved
+            ):
+                continue
+            result.issues.append(Issue(
+                severity=plan_severity,
+                category="研修担当不在",
+                day=day,
+                employee=trainee,
+                message=(
+                    f"{plan_name}: 出勤日は指導担当"
+                    f"（{'・'.join(approved)}）の誰かと同店舗にする設定です。"
                 ),
             ))
 
@@ -1903,20 +2022,50 @@ def _check_yamamoto_monthly_max(
         if assignment.employee == YamamotoLogic.EMPLOYEE_NAME
         and assignment.store != Store.OFF
     }
-    maximum = int(yamamoto_monthly_max_days(shift.month))
-    if len(worked_days) <= maximum:
-        return
-    result.issues.append(Issue(
-        severity="ERROR",
-        category="山本月間出勤上限",
-        day=None,
-        employee=YamamotoLogic.EMPLOYEE_NAME,
-        message=(
-            f"山本は{len(worked_days)}日出勤です。"
-            f"{int(shift.month)}月の手動調整上限は{maximum}日です。"
-            "赤羽の不足日以外に追加した勤務を見直してください。"
-        ),
-    ))
+    policy = yamamoto_monthly_policy(shift.year, shift.month)
+    maximum = int(policy["max_days"])
+    if len(worked_days) > maximum:
+        result.issues.append(Issue(
+            severity="ERROR",
+            category="山本月間出勤上限",
+            day=None,
+            employee=YamamotoLogic.EMPLOYEE_NAME,
+            message=(
+                f"山本は{len(worked_days)}日出勤です。"
+                f"{int(shift.month)}月の手動調整上限は{maximum}日です。"
+                "赤羽の不足日以外に追加した勤務を見直してください。"
+            ),
+        ))
+
+    max_consecutive = int(policy["max_consecutive"])
+    run: list[int] = []
+    for day in range(1, monthrange(shift.year, shift.month)[1] + 1):
+        if day in worked_days:
+            run.append(day)
+            continue
+        if len(run) > max_consecutive:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="山本連続勤務上限",
+                day=run[0],
+                employee=YamamotoLogic.EMPLOYEE_NAME,
+                message=(
+                    f"山本が{run[0]}日〜{run[-1]}日の"
+                    f"{len(run)}連勤です。上限は{max_consecutive}連勤です。"
+                ),
+            ))
+        run = []
+    if len(run) > max_consecutive:
+        result.issues.append(Issue(
+            severity="ERROR",
+            category="山本連続勤務上限",
+            day=run[0],
+            employee=YamamotoLogic.EMPLOYEE_NAME,
+            message=(
+                f"山本が{run[0]}日〜{run[-1]}日の"
+                f"{len(run)}連勤です。上限は{max_consecutive}連勤です。"
+            ),
+        ))
 
 
 def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> None:

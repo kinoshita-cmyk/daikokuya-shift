@@ -53,8 +53,10 @@ from .rules import (
     month_edge_forced_assignments, compute_prev_consecutive_run,
     is_omiya_two_person_allowed_month,
     tanaka_pair_training_rule,
+    monthly_training_plans,
+    monthly_training_store_days,
     monthly_employee_store_override,
-    yamamoto_monthly_max_days,
+    yamamoto_monthly_policy,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
     WORK_TARGET_ERROR_DIFF_DAYS,
     WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS,
@@ -529,6 +531,11 @@ def generate_shift(
         tanaka_training is not None
         and all(n in main_employee_names for n in tanaka_required_members)
     )
+    generic_training_plans = monthly_training_plans(year, month)
+    generic_training_allowed_days = {
+        e.name: monthly_training_store_days(year, month, e.name)
+        for e in main_employees
+    }
     for e in main_employees:
         for s in main_stores:
             affinity_none = e.affinities.get(s) == Affinity.NONE
@@ -544,20 +551,28 @@ def generate_shift(
                 and e.name == tanaka_employee
                 and s in (Store.NISHIGUCHI, Store.HIGASHIGUCHI)
             )
-            hard_forbidden = (
-                fixed_allowed is not None and s not in fixed_allowed
-            ) or (
-                getattr(e, "only_on_request_days", False) and affinity_none
-            ) or (
-                affinity_none
-                and not makino_nishi_exception
-                and not tanaka_pair_exception
-            )
-            if hard_forbidden:
-                for d in days:
+            training_days = generic_training_allowed_days.get(
+                e.name, {}
+            ).get(s, set())
+            for d in days:
+                generic_training_exception = d in training_days
+                hard_forbidden = (
+                    fixed_allowed is not None
+                    and s not in fixed_allowed
+                ) or (
+                    getattr(e, "only_on_request_days", False)
+                    and affinity_none
+                    and not generic_training_exception
+                ) or (
+                    affinity_none
+                    and not makino_nishi_exception
+                    and not tanaka_pair_exception
+                    and not generic_training_exception
+                )
+                if hard_forbidden:
                     model.Add(x[e.name][d][s] == 0)
-            elif affinity_none:
-                affinity_none_assignments.extend(x[e.name][d][s] for d in days)
+                elif affinity_none and not generic_training_exception:
+                    affinity_none_assignments.append(x[e.name][d][s])
 
     # 牧野さんは赤羽東口店・大宮西口店NG。
     # 大宮西口店は月別ルールで研修を明示した月だけ、
@@ -625,6 +640,132 @@ def generate_shift(
         model.Add(
             sum(tanaka_trio_days) == int(tanaka_training["akabane_count"])
         )
+
+    # 汎用の段階別研修。通常は「強い目標」とし、提出状況により
+    # 完全一致できない月でもシフト全体を生成できるようにする。
+    generic_training_reward_terms = []
+    generic_training_penalty_terms = []
+    for plan_index, plan in enumerate(generic_training_plans):
+        trainee = str(plan.get("trainee") or "")
+        if trainee not in main_employee_names:
+            continue
+        plan_severity = str(plan.get("severity") or "WARNING").upper()
+        approved_mentors = [
+            str(name) for name in plan.get("approved_mentors", ())
+            if str(name) in main_employee_names and str(name) != trainee
+        ]
+        for phase_index, phase in enumerate(plan.get("phases", ())):
+            store = phase.get("store")
+            if store not in main_stores:
+                continue
+            mentors = [
+                str(name) for name in phase.get("mentors", ())
+                if str(name) in main_employee_names and str(name) != trainee
+            ]
+            if not mentors:
+                continue
+            start_day = max(1, int(phase.get("start_day", 1)))
+            end_day = min(days_in_month, int(phase.get("end_day", days_in_month)))
+            target_count = max(0, int(phase.get("target_count", 0)))
+            comparison = str(phase.get("comparison") or "min")
+            severity = str(
+                phase.get("severity") or plan_severity
+            ).upper()
+            paired_days = []
+            for d in range(start_day, end_day + 1):
+                mentor_here = model.NewBoolVar(
+                    f"training_mentor_{plan_index}_{phase_index}_{d}"
+                )
+                model.AddMaxEquality(
+                    mentor_here,
+                    [x[name][d][store] for name in mentors],
+                )
+                paired = model.NewBoolVar(
+                    f"training_pair_{plan_index}_{phase_index}_{d}"
+                )
+                model.AddMinEquality(
+                    paired,
+                    [x[trainee][d][store], mentor_here],
+                )
+                paired_days.append(paired)
+                # 研修店舗へ入る日は、必ずその段階の指導担当と同店舗にする。
+                if severity == "ERROR":
+                    model.AddImplication(x[trainee][d][store], mentor_here)
+                else:
+                    uncovered = model.NewBoolVar(
+                        f"training_uncovered_{plan_index}_{phase_index}_{d}"
+                    )
+                    model.Add(
+                        uncovered >= x[trainee][d][store] - mentor_here
+                    )
+                    generic_training_penalty_terms.append(uncovered)
+            actual_count = sum(paired_days)
+            if target_count <= 0:
+                continue
+            if severity == "ERROR":
+                if comparison == "exact":
+                    model.Add(actual_count == target_count)
+                else:
+                    model.Add(actual_count >= target_count)
+            elif comparison == "exact":
+                diff = model.NewIntVar(
+                    -days_in_month,
+                    days_in_month,
+                    f"training_diff_{plan_index}_{phase_index}",
+                )
+                abs_diff = model.NewIntVar(
+                    0,
+                    days_in_month,
+                    f"training_abs_{plan_index}_{phase_index}",
+                )
+                model.Add(diff == actual_count - target_count)
+                model.AddAbsEquality(abs_diff, diff)
+                generic_training_penalty_terms.append(abs_diff)
+            else:
+                capped = model.NewIntVar(
+                    0,
+                    target_count,
+                    f"training_count_{plan_index}_{phase_index}",
+                )
+                model.AddMinEquality(
+                    capped,
+                    [actual_count, model.NewConstant(target_count)],
+                )
+                generic_training_reward_terms.append(capped)
+
+        if plan.get("require_mentor_on_workday") and approved_mentors:
+            for d in days:
+                covered_same_store = []
+                for store in main_stores:
+                    mentor_here = model.NewBoolVar(
+                        f"training_any_mentor_{plan_index}_{d}_{store.name}"
+                    )
+                    model.AddMaxEquality(
+                        mentor_here,
+                        [x[name][d][store] for name in approved_mentors],
+                    )
+                    covered = model.NewBoolVar(
+                        f"training_covered_{plan_index}_{d}_{store.name}"
+                    )
+                    model.AddMinEquality(
+                        covered,
+                        [x[trainee][d][store], mentor_here],
+                    )
+                    covered_same_store.append(covered)
+                covered_workday = model.NewBoolVar(
+                    f"training_covered_workday_{plan_index}_{d}"
+                )
+                model.AddMaxEquality(covered_workday, covered_same_store)
+                if plan_severity == "ERROR":
+                    model.Add(covered_workday >= 1 - off[trainee][d])
+                else:
+                    uncovered = model.NewBoolVar(
+                        f"training_workday_uncovered_{plan_index}_{d}"
+                    )
+                    model.Add(
+                        uncovered >= (1 - off[trainee][d]) - covered_workday
+                    )
+                    generic_training_penalty_terms.append(uncovered)
 
     # エコメンバーの同店舗同勤務NG。
     # 指定グループ内のメンバー同士は同じ日に同じ店舗へ配置しない。
@@ -850,6 +991,7 @@ def generate_shift(
     # 自動投入数も手動調整後と同じ月上限内に収める。ただし通常スタッフの
     # 月間目標や事前供給人数には含めない。
     if yamamoto is not None:
+        yamamoto_policy = yamamoto_monthly_policy(year, month)
         yamamoto_auto_days = [
             akabane_short[d]
             for d in days
@@ -862,8 +1004,28 @@ def generate_shift(
         if yamamoto_auto_days:
             model.Add(
                 sum(yamamoto_auto_days)
-                <= int(yamamoto_monthly_max_days(month))
+                <= int(yamamoto_policy["max_days"])
             )
+        max_yamamoto_consecutive = int(
+            yamamoto_policy["max_consecutive"]
+        )
+        for start_day in range(
+            1, days_in_month - max_yamamoto_consecutive + 1
+        ):
+            window = [
+                akabane_short[d]
+                for d in range(
+                    start_day,
+                    start_day + max_yamamoto_consecutive + 1,
+                )
+                if (
+                    operation_modes.get(d, OperationMode.NORMAL)
+                    == OperationMode.NORMAL
+                    and d not in yamamoto_off_days
+                )
+            ]
+            if len(window) == max_yamamoto_consecutive + 1:
+                model.Add(sum(window) <= max_yamamoto_consecutive)
 
     # ============================================================
     # 制約 7: 大宮駅前店アンカー（春山 or 下地が必ずいる）
@@ -1455,6 +1617,14 @@ def generate_shift(
         obj = obj + MONTHLY_RULE_REWARD * sum(monthly_rule_terms)
     if monthly_rule_penalty_terms:
         obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
+    if generic_training_reward_terms:
+        obj = obj + MONTHLY_RULE_REWARD * sum(generic_training_reward_terms)
+    if generic_training_penalty_terms:
+        obj = (
+            obj
+            - MONTHLY_RULE_PENALTY
+            * sum(generic_training_penalty_terms)
+        )
     if monthly_avoid_same_off_terms:
         obj = (
             obj
