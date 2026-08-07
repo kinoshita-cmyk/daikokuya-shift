@@ -88,6 +88,12 @@ def main() -> int:
     if not data_root.is_dir():
         print(f"エラー: バックアップrepoが見つかりません: {data_root}")
         return 1
+    if not (data_root / "backups").is_dir():
+        print(
+            "エラー: バックアップrepo内に backups/ がありません。"
+            "誤った全員0日のCSVを保存しないため処理を中止します。"
+        )
+        return 2
 
     _overlay_backup_data(data_root)
 
