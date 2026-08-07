@@ -144,12 +144,14 @@
 
 ## 7. 出勤簿システム連携（社労士への有給データ受け渡し）
 
-**完全自動**で動く（誰もアプリを開かなくてよい）:
+設置・手動テスト完了後は**完全自動**で動く（誰もアプリを開かなくてよい）:
 
 1. GitHub Actions（バックアップrepoに設置した
-   `.github/workflows/paid_leave_export.yml`）が**毎日 0:05（日本時間）**に
+   `.github/workflows/paid_leave_export.yml`）が**毎日 1:23 と 2:23（日本時間）**に
    当月・前月の確定有給日数CSV（本人申告＋管理者調整）を
    バックアップrepoの `exports/paid_leave/` に自動生成・更新する
+   （2回目はGitHub Hosted Runnerを確保できなかった場合の予備。変更が
+   なければcommitは増えない）
 2. GAS（`gas/paid_leave_to_drive.gs` を script.google.com に設置）が
    毎日1回チェックし、指定の Google ドライブフォルダへ配置する
 
@@ -162,6 +164,8 @@
 
 設置ファイル: ワークフローは `github_actions/paid_leave_export.yml` の
 中身をバックアップrepoの `.github/workflows/` に配置（手順はファイル冒頭）。
+`The job was not acquired by Runner` はCSV処理前のGitHub側Runner確保失敗。
+Actions画面から再実行し、繰り返す場合はGitHub Statusを確認する。
 
 ---
 
