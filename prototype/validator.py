@@ -233,6 +233,7 @@ def validate(
     prev_month: Optional[list[PreviousMonthCarryover]] = None,
     holiday_overrides: Optional[dict[str, int]] = None,
     exact_holiday_days: Optional[dict[str, int]] = None,
+    paid_leave_days: Optional[dict[str, int]] = None,
     employee_max_consecutive_work: Optional[dict[str, int]] = None,
     employee_max_consecutive_off: Optional[dict[str, int]] = None,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
@@ -254,6 +255,7 @@ def validate(
         off_requests: {name: [day, ...]} 休み希望
         prev_month: 前月持ち越しデータ
         holiday_overrides: その月の個別休日日数指定
+        paid_leave_days: 従業員別の有給使用日数（基準勤務日数への算入用）
         default_holidays: 基本休日日数
     """
     result = ValidationResult()
@@ -264,6 +266,7 @@ def validate(
     prev_month = prev_month or []
     holiday_overrides = holiday_overrides or {}
     exact_holiday_days = exact_holiday_days or {}
+    paid_leave_days = paid_leave_days or {}
     employee_max_consecutive_work = employee_max_consecutive_work or {}
     employee_max_consecutive_off = employee_max_consecutive_off or {}
     monthly_store_count_rules = monthly_store_count_rules or []
@@ -380,6 +383,7 @@ def validate(
         off_requests,
         holiday_overrides,
         exact_holiday_days,
+        paid_leave_days,
     )
 
     # 26. 山本さんの手動調整後の月間・連続勤務上限
@@ -1949,8 +1953,9 @@ def _check_monthly_workday_balance(
     off_requests: dict[str, list[int]],
     holiday_overrides: dict[str, int],
     exact_holiday_days: dict[str, int],
+    paid_leave_days: dict[str, int],
 ) -> None:
-    """月間基準勤務日数から大きく外れていないか確認する。"""
+    """実出勤と有給の合計が月間基準日数から大きく外れていないか確認する。"""
     shortfall_warning_diff = int(WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS)
     overage_warning_diff = int(WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS)
     error_diff = int(WORK_TARGET_ERROR_DIFF_DAYS)
@@ -1976,7 +1981,20 @@ def _check_monthly_workday_balance(
                 and assignment.store != Store.OFF
             )
         )
-        diff = actual - target
+        try:
+            paid_leave = max(0, int(paid_leave_days.get(emp.name, 0) or 0))
+        except (TypeError, ValueError):
+            paid_leave = 0
+        credited = actual + paid_leave
+        diff = credited - target
+
+        if paid_leave > 0:
+            attendance_text = (
+                f"実出勤{actual}日＋有給{paid_leave}日＝"
+                f"基準算入{credited}日 / 基準{target}日"
+            )
+        else:
+            attendance_text = f"出勤{actual}日 / 基準{target}日"
         if diff <= -shortfall_warning_diff:
             severity = "ERROR" if abs(diff) >= error_diff else "WARNING"
             note = ""
@@ -1990,7 +2008,7 @@ def _check_monthly_workday_balance(
                 day=None,
                 employee=emp.name,
                 message=(
-                    f"出勤{actual}日 / 基準{target}日（{abs(diff)}日不足）。"
+                    f"{attendance_text}（{abs(diff)}日不足）。"
                     "月別例外がなければ、出勤日数を増やしてください。"
                     f"{note}"
                 ),
@@ -2008,7 +2026,7 @@ def _check_monthly_workday_balance(
                 day=None,
                 employee=emp.name,
                 message=(
-                    f"出勤{actual}日 / 基準{target}日（{diff}日超過）。"
+                    f"{attendance_text}（{diff}日超過）。"
                     "人数が余る月でなければ、休みに寄せてください。"
                     f"{note}"
                 ),

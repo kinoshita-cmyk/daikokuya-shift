@@ -246,6 +246,8 @@ class ShiftChatEngine:
             off_requests=self.validation_inputs.get("off_requests", {}),
             prev_month=self.validation_inputs.get("prev_month", []),
             holiday_overrides=self.validation_inputs.get("holiday_overrides", {}),
+            exact_holiday_days=self.validation_inputs.get("exact_holiday_days", {}),
+            paid_leave_days=self.validation_inputs.get("paid_leave_days", {}),
             max_consec=self.max_consec,
         )
 
