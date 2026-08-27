@@ -55,6 +55,7 @@ from .rules import (
     tanaka_pair_training_rule,
     monthly_training_plans,
     monthly_training_store_days,
+    effective_employee_store_affinities,
     monthly_employee_store_override,
     yamamoto_monthly_policy,
     WORK_TARGET_IDEAL_TOLERANCE_DAYS,
@@ -1424,30 +1425,34 @@ def generate_shift(
         removed_support_stores = set(
             monthly_store_override.get("remove_support_stores", ())
         )
+        effective_affinities = effective_employee_store_affinities(
+            e, year, month,
+        )
         for s in main_stores:
-            aff = e.affinities.get(s, Affinity.NONE)
-            if s == monthly_primary_store:
-                weight = AFFINITY_WEIGHT[Affinity.STRONG]
-            elif s in removed_support_stores:
+            effective_affinity = effective_affinities.get(s)
+            if s in removed_support_stores:
                 # 絶対配置不可ではない。自動生成の通常候補から外すだけ。
                 weight = 0
                 for d in days:
                     removed_support_assignment_terms.append(x[e.name][d][s])
             else:
-                weight = AFFINITY_WEIGHT[aff]
+                weight = (
+                    AFFINITY_WEIGHT[effective_affinity]
+                    if effective_affinity in AFFINITY_WEIGHT
+                    else 0
+                )
             if weight > 0:
                 # その店舗の出勤回数 × 重み を加算
                 for d in days:
                     objective_terms.append(weight * x[e.name][d][s])
             extra_weight = STORE_ASSIGNMENT_EXTRA_WEIGHTS.get((e.name, s), 0)
-            if extra_weight > 0:
+            if extra_weight > 0 and effective_affinity is not None:
                 # 個別に「少し寄せたい」店舗の追加スコア。
                 for d in days:
                     objective_terms.append(extra_weight * x[e.name][d][s])
         normal_stores = [
             s for s in main_stores
-            if e.affinities.get(s) == Affinity.MEDIUM
-            and s not in removed_support_stores
+            if effective_affinities.get(s) == Affinity.MEDIUM
         ]
         if (
             e.home_store is None

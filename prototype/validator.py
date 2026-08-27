@@ -50,6 +50,7 @@ from .rules import (
     tanaka_pair_training_rule,
     monthly_training_plans,
     monthly_training_store_days,
+    effective_employee_store_affinities,
     monthly_employee_store_override,
     yamamoto_monthly_policy,
 )
@@ -1660,8 +1661,11 @@ def _check_balanced_normal_store_assignments(
         removed_support_stores = set(
             monthly_override.get("remove_support_stores", ())
         )
+        effective_affinities = effective_employee_store_affinities(
+            emp, shift.year, shift.month,
+        )
         normal_stores = [
-            store for store, affinity in (getattr(emp, "affinities", {}) or {}).items()
+            store for store, affinity in effective_affinities.items()
             if affinity == Affinity.MEDIUM
             and store not in removed_support_stores
         ]

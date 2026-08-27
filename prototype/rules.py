@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from calendar import monthrange
 from typing import Optional
-from .models import Store, Skill, OperationMode
+from .models import Affinity, Store, Skill, OperationMode
 from .paths import CONFIG_DIR
 
 # ============================================================
@@ -356,14 +356,45 @@ def validate_monthly_exceptions_data(data: dict) -> tuple[list[str], list[str]]:
                     f"{ym_text}・{employee_name}: 店舗区分の保存形式が不正です。"
                 )
                 continue
-            primary = str(rule.get("primary_store") or "")
-            removed = {
-                str(value) for value in (rule.get("remove_support_stores") or [])
+            category_values = {
+                "主担当": [rule.get("primary_store")]
+                if rule.get("primary_store") else [],
+                "通常担当": list(rule.get("normal_stores") or []),
+                "応援・巡回担当": list(rule.get("support_stores") or []),
+                "応援・巡回から外す店舗": list(
+                    rule.get("remove_support_stores") or []
+                ),
             }
-            if primary and primary in removed:
-                errors.append(
-                    f"{ym_text}・{employee_name}: 主担当店舗と応援除外店舗が重複しています。"
-                )
+            normalized_categories: dict[str, set[Store]] = {}
+            for label, values in category_values.items():
+                parsed_values: set[Store] = set()
+                for value in values:
+                    store = _store_from_config(value)
+                    if store is None or store == Store.OFF:
+                        errors.append(
+                            f"{ym_text}・{employee_name}: {label}の店舗「{value}」が不正です。"
+                        )
+                        continue
+                    parsed_values.add(store)
+                normalized_categories[label] = parsed_values
+
+            category_labels = list(normalized_categories)
+            for index, first_label in enumerate(category_labels):
+                for second_label in category_labels[index + 1:]:
+                    overlap = (
+                        normalized_categories[first_label]
+                        & normalized_categories[second_label]
+                    )
+                    if overlap:
+                        overlap_text = "・".join(
+                            store.display_name for store in sorted(
+                                overlap, key=lambda item: item.name,
+                            )
+                        )
+                        errors.append(
+                            f"{ym_text}・{employee_name}: {overlap_text}が"
+                            f"「{first_label}」と「{second_label}」で重複しています。"
+                        )
 
     for ym_text, plans in dict(data.get("training_plans", {}) or {}).items():
         ym = _parse_ym(ym_text)
@@ -643,6 +674,8 @@ def monthly_training_store_days(
 
 
 # 月限定の従業員別店舗区分。
+# normal_stores / support_stores が None の古い設定は、基本区分を維持する。
+# リスト（空リストを含む）が保存された新設定は、その月の区分を表す。
 # remove_support_stores は絶対配置不可ではなく、通常候補から外す指定です。
 # 人員不足時の緊急配置までは禁止しません。
 _DEFAULT_MONTHLY_EMPLOYEE_STORE_OVERRIDES: dict[tuple[int, int], dict] = {
@@ -657,6 +690,8 @@ MONTHLY_EMPLOYEE_STORE_OVERRIDES: dict[tuple[int, int], dict] = {
     ym: {
         name: {
             "primary_store": rule.get("primary_store"),
+            "normal_stores": rule.get("normal_stores"),
+            "support_stores": rule.get("support_stores"),
             "remove_support_stores": tuple(rule.get("remove_support_stores", ())),
         }
         for name, rule in employees.items()
@@ -670,14 +705,75 @@ def monthly_employee_store_override(
     month: int,
     employee_name: str,
 ) -> dict:
-    """月限定の主担当・応援除外指定を返す。"""
+    """月限定の主担当・通常・応援巡回・応援除外指定を返す。"""
     rule = MONTHLY_EMPLOYEE_STORE_OVERRIDES.get(
         (int(year), int(month)), {}
     ).get(str(employee_name), {})
     return {
         "primary_store": rule.get("primary_store"),
+        "normal_stores": (
+            tuple(rule.get("normal_stores", ()))
+            if rule.get("normal_stores") is not None
+            else None
+        ),
+        "support_stores": (
+            tuple(rule.get("support_stores", ()))
+            if rule.get("support_stores") is not None
+            else None
+        ),
         "remove_support_stores": tuple(rule.get("remove_support_stores", ())),
     }
+
+
+def effective_employee_store_affinities(
+    employee,
+    year: int,
+    month: int,
+) -> dict[Store, Optional[Affinity]]:
+    """基本設定へ月限定区分を重ねた、その月の店舗適性を返す。
+
+    Affinity.NONE（絶対配置不可）は月限定設定で解除しない。新形式の月限定
+    区分でどこにも含めなかった店舗は、禁止ではなく緊急時だけ候補に残すため
+    None を返す。
+    """
+    base_affinities = dict(getattr(employee, "affinities", {}) or {})
+    override = monthly_employee_store_override(
+        year, month, getattr(employee, "name", ""),
+    )
+    primary_store = override.get("primary_store")
+    normal_stores = override.get("normal_stores")
+    support_stores = override.get("support_stores")
+    removed_stores = set(override.get("remove_support_stores", ()))
+    full_monthly_categories = (
+        normal_stores is not None or support_stores is not None
+    )
+    normal_set = set(normal_stores or ())
+    support_set = set(support_stores or ())
+
+    effective: dict[Store, Optional[Affinity]] = {}
+    for store in Store:
+        if store == Store.OFF:
+            continue
+        base_affinity = base_affinities.get(store, Affinity.NONE)
+        if base_affinity == Affinity.NONE:
+            effective[store] = Affinity.NONE
+        elif store in removed_stores:
+            effective[store] = None
+        elif full_monthly_categories:
+            if store == primary_store:
+                effective[store] = Affinity.STRONG
+            elif store in normal_set:
+                effective[store] = Affinity.MEDIUM
+            elif store in support_set:
+                effective[store] = Affinity.WEAK
+            else:
+                effective[store] = None
+        elif store == primary_store:
+            # 旧形式（主担当と応援除外のみ）の既存データとの互換。
+            effective[store] = Affinity.STRONG
+        else:
+            effective[store] = base_affinity
+    return effective
 
 
 _DEFAULT_MONTHLY_YAMAMOTO_POLICIES: dict[tuple[int, int], dict] = {}
@@ -760,16 +856,38 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
         (int(year), int(month)), {}
     ).items():
         primary_store = override.get("primary_store")
+        normal_stores = override.get("normal_stores")
+        support_stores = override.get("support_stores")
         removed = tuple(override.get("remove_support_stores", ()))
         parts = []
         if primary_store is not None:
             parts.append(f"{primary_store.display_name}を主担当")
+        elif normal_stores is not None or support_stores is not None:
+            parts.append("主担当なし")
+        if normal_stores is not None:
+            parts.append(
+                "通常担当 "
+                + (
+                    "・".join(store.display_name for store in normal_stores)
+                    or "なし"
+                )
+            )
+        if support_stores is not None:
+            parts.append(
+                "応援・巡回担当 "
+                + (
+                    "・".join(store.display_name for store in support_stores)
+                    or "なし"
+                )
+            )
         if removed:
             parts.append(
                 "応援・巡回先から"
                 + "・".join(store.display_name for store in removed)
                 + "を外す"
             )
+        elif normal_stores is not None or support_stores is not None:
+            parts.append("応援・巡回から外す店舗なし")
         notes.append(
             f"{employee_name}さん: {'、'.join(parts)}"
             "（外した店舗も緊急時の手動配置は禁止しない）"
@@ -1097,6 +1215,28 @@ def reload_monthly_exceptions() -> str:
                 primary_store = _store_from_config(
                     raw_rule.get("primary_store")
                 )
+                normal_stores = (
+                    tuple(
+                        store for store in (
+                            _store_from_config(value)
+                            for value in (raw_rule.get("normal_stores") or [])
+                        )
+                        if store is not None and store != Store.OFF
+                    )
+                    if "normal_stores" in raw_rule
+                    else None
+                )
+                support_stores = (
+                    tuple(
+                        store for store in (
+                            _store_from_config(value)
+                            for value in (raw_rule.get("support_stores") or [])
+                        )
+                        if store is not None and store != Store.OFF
+                    )
+                    if "support_stores" in raw_rule
+                    else None
+                )
                 removed_stores = tuple(
                     store for store in (
                         _store_from_config(value)
@@ -1106,9 +1246,16 @@ def reload_monthly_exceptions() -> str:
                     )
                     if store is not None and store != Store.OFF
                 )
-                if primary_store is not None or removed_stores:
+                if (
+                    primary_store is not None
+                    or normal_stores is not None
+                    or support_stores is not None
+                    or removed_stores
+                ):
                     parsed_employees[str(employee_name)] = {
                         "primary_store": primary_store,
+                        "normal_stores": normal_stores,
+                        "support_stores": support_stores,
                         "remove_support_stores": removed_stores,
                     }
             if parsed_employees:
@@ -1232,6 +1379,26 @@ def load_monthly_exceptions_raw() -> dict:
                         rule["primary_store"].name
                         if rule.get("primary_store") is not None
                         else None
+                    ),
+                    **(
+                        {
+                            "normal_stores": [
+                                store.name
+                                for store in rule.get("normal_stores", ())
+                            ]
+                        }
+                        if rule.get("normal_stores") is not None
+                        else {}
+                    ),
+                    **(
+                        {
+                            "support_stores": [
+                                store.name
+                                for store in rule.get("support_stores", ())
+                            ]
+                        }
+                        if rule.get("support_stores") is not None
+                        else {}
                     ),
                     "remove_support_stores": [
                         store.name
