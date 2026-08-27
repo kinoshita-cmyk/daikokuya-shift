@@ -4179,7 +4179,30 @@ def render_monthly_exceptions_panel() -> None:
         st.markdown("**👤 月限定の店舗区分**")
         for _ym, _employees in sorted(_employee_override_map.items()):
             for _employee, _rule in sorted(dict(_employees or {}).items()):
-                _primary = _store_jp(_rule.get("primary_store"))
+                _has_full_categories = (
+                    "normal_stores" in _rule or "support_stores" in _rule
+                )
+                _primary = (
+                    _store_jp(_rule.get("primary_store"))
+                    if _rule.get("primary_store")
+                    else ("なし" if _has_full_categories else "基本設定のまま")
+                )
+                _normal = (
+                    "、".join(
+                        _store_jp(store)
+                        for store in (_rule.get("normal_stores") or [])
+                    ) or "なし"
+                    if "normal_stores" in _rule
+                    else "基本設定のまま"
+                )
+                _support = (
+                    "、".join(
+                        _store_jp(store)
+                        for store in (_rule.get("support_stores") or [])
+                    ) or "なし"
+                    if "support_stores" in _rule
+                    else "基本設定のまま"
+                )
                 _removed = "、".join(
                     _store_jp(store)
                     for store in (_rule.get("remove_support_stores") or [])
@@ -4187,7 +4210,9 @@ def render_monthly_exceptions_panel() -> None:
                 _c1, _c2 = st.columns([4, 1])
                 _c1.write(
                     f"　- {_ym_jp(_ym)} ／ {_employee}: "
-                    f"主担当 {_primary}、応援・巡回から外す {_removed}"
+                    f"主担当 {_primary}、通常担当 {_normal}、"
+                    f"応援・巡回担当 {_support}、"
+                    f"応援・巡回から外す {_removed}"
                 )
                 if _c2.button(
                     "🗑 削除",
@@ -4283,7 +4308,7 @@ def render_monthly_exceptions_panel() -> None:
         "どんな例外を追加しますか？",
         [
             "🏬 大宮アンカー緩和（大宮の春山・下地必須ルールをその月だけ外す）",
-            "👤 月限定の店舗区分（主担当変更・応援先から外す）",
+            "👤 月限定の店舗区分（主担当・通常担当・応援巡回担当）",
             "🧑‍🏫 段階別研修計画（期間・店舗・指導担当・回数）",
             "🎓 従来型の研修組み合わせ（西口・赤羽・東口の回数指定）",
             "🧓 山本の補助勤務方針（月上限・連続勤務上限）",
@@ -4337,46 +4362,177 @@ def render_monthly_exceptions_panel() -> None:
             _new["omiya_anchor_relaxed_months"] = sorted(_lst)
             _mx_new_data = _new
     elif _mx_type.startswith("👤"):
+        st.caption(
+            "従業員マスタの現在区分を初期値として表示します。ここで保存した"
+            "区分は対象月だけに適用され、翌月は基本設定へ戻ります。"
+            "基本設定の絶対配置不可は変更されません。3区分に含めなかった"
+            "配置可能店舗も禁止にはせず、人員不足時の緊急候補として残します。"
+        )
+        _mx_override_employee = st.selectbox(
+            "対象の従業員",
+            _mx_emp_names,
+            key="mx_add_override_employee",
+        )
+        _mx_override_emp = get_employee(_mx_override_employee)
+        _mx_existing_rule = dict(
+            (_employee_override_map.get(_mx_ym, {}) or {}).get(
+                _mx_override_employee, {}
+            ) or {}
+        )
+
+        def _mx_store_name(raw_value) -> str:
+            raw_text = str(raw_value or "").strip()
+            for store in Store:
+                if store == Store.OFF:
+                    continue
+                if raw_text in (store.name, store.value, store.display_name):
+                    return store.name
+            return ""
+
+        _mx_allowed_store_options = [
+            store.name for store in Store
+            if store != Store.OFF
+            and _mx_override_emp.affinities.get(store, Affinity.NONE)
+            != Affinity.NONE
+        ]
+        _mx_base_primary = next((
+            store.name for store in Store
+            if store != Store.OFF
+            and _mx_override_emp.affinities.get(store) == Affinity.STRONG
+        ), "")
+        _mx_base_normal = [
+            store.name for store in Store
+            if store != Store.OFF
+            and _mx_override_emp.affinities.get(store) == Affinity.MEDIUM
+        ]
+        _mx_base_support = [
+            store.name for store in Store
+            if store != Store.OFF
+            and _mx_override_emp.affinities.get(store) == Affinity.WEAK
+        ]
+        _mx_existing_full = (
+            "normal_stores" in _mx_existing_rule
+            or "support_stores" in _mx_existing_rule
+        )
+        _mx_default_primary = (
+            _mx_store_name(_mx_existing_rule.get("primary_store"))
+            if _mx_existing_full or _mx_existing_rule.get("primary_store")
+            else _mx_base_primary
+        )
+        _mx_default_removed = [
+            name for name in (
+                _mx_store_name(value)
+                for value in (
+                    _mx_existing_rule.get("remove_support_stores") or []
+                )
+            )
+            if name in _mx_allowed_store_options
+        ]
+        _mx_default_normal = (
+            [
+                name for name in (
+                    _mx_store_name(value)
+                    for value in (_mx_existing_rule.get("normal_stores") or [])
+                )
+                if name in _mx_allowed_store_options
+            ]
+            if "normal_stores" in _mx_existing_rule
+            else list(_mx_base_normal)
+        )
+        _mx_default_support = (
+            [
+                name for name in (
+                    _mx_store_name(value)
+                    for value in (_mx_existing_rule.get("support_stores") or [])
+                )
+                if name in _mx_allowed_store_options
+            ]
+            if "support_stores" in _mx_existing_rule
+            else list(_mx_base_support)
+        )
+        _mx_default_normal = [
+            value for value in _mx_default_normal
+            if value != _mx_default_primary and value not in _mx_default_removed
+        ]
+        _mx_default_support = [
+            value for value in _mx_default_support
+            if value != _mx_default_primary
+            and value not in _mx_default_normal
+            and value not in _mx_default_removed
+        ]
+
         _mso1, _mso2 = st.columns(2)
         with _mso1:
-            _mx_override_employee = st.selectbox(
-                "対象の従業員",
-                _mx_emp_names,
-                key="mx_add_override_employee",
-            )
             _mx_primary_store = st.selectbox(
                 "この月の主担当",
-                options=[""] + _mx_store_options,
+                options=[""] + _mx_allowed_store_options,
+                index=(
+                    ([""] + _mx_allowed_store_options).index(_mx_default_primary)
+                    if _mx_default_primary in _mx_allowed_store_options
+                    else 0
+                ),
                 format_func=lambda value: (
-                    "変更しない"
+                    "主担当なし"
                     if not value
                     else _mx_store_labels.get(value, value)
                 ),
-                key="mx_add_override_primary",
-                help="基本ルールの主担当を、この月だけ上書きします。",
+                key=f"mx_add_override_primary_{_mx_ym}_{_mx_override_employee}",
+            )
+            _mx_normal_stores = st.multiselect(
+                "この月の通常担当",
+                options=_mx_allowed_store_options,
+                default=_mx_default_normal,
+                format_func=lambda value: _mx_store_labels.get(value, value),
+                key=f"mx_add_override_normal_{_mx_ym}_{_mx_override_employee}",
             )
         with _mso2:
-            _mx_removed_support = st.multiselect(
-                "この月だけ応援・巡回先から外す店舗",
-                options=_mx_store_options,
+            _mx_support_stores = st.multiselect(
+                "この月の応援・巡回担当",
+                options=_mx_allowed_store_options,
+                default=_mx_default_support,
                 format_func=lambda value: _mx_store_labels.get(value, value),
-                key="mx_add_override_removed",
+                key=f"mx_add_override_support_{_mx_ym}_{_mx_override_employee}",
+            )
+            _mx_removed_support = st.multiselect(
+                "この月だけ応援・巡回先から外す店舗（任意）",
+                options=_mx_allowed_store_options,
+                default=_mx_default_removed,
+                format_func=lambda value: _mx_store_labels.get(value, value),
+                key=f"mx_add_override_removed_{_mx_ym}_{_mx_override_employee}",
                 help=(
-                    "絶対配置不可にはしません。通常の自動配置候補から外し、"
-                    "人員不足時の緊急配置だけは許容します。"
+                    "特になければ空欄のままで大丈夫です。絶対配置不可にはせず、"
+                    "通常の自動配置候補から外します。人員不足時の緊急配置は許容します。"
                 ),
             )
         _override_parts = []
         if _mx_primary_store:
             _override_parts.append(
-                f"主担当を{_mx_store_labels[_mx_primary_store]}に変更"
+                f"主担当 {_mx_store_labels[_mx_primary_store]}"
             )
+        else:
+            _override_parts.append("主担当なし")
+        _override_parts.append(
+            "通常担当 "
+            + (
+                "・".join(_mx_store_labels[s] for s in _mx_normal_stores)
+                or "なし"
+            )
+        )
+        _override_parts.append(
+            "応援・巡回担当 "
+            + (
+                "・".join(_mx_store_labels[s] for s in _mx_support_stores)
+                or "なし"
+            )
+        )
         if _mx_removed_support:
             _override_parts.append(
                 "応援・巡回先から"
                 + "・".join(_mx_store_labels[s] for s in _mx_removed_support)
                 + "を外す"
             )
+        else:
+            _override_parts.append("応援・巡回から外す店舗なし")
         st.caption(
             f"{_ym_jp(_mx_ym)}の{_mx_override_employee}さん: "
             + ("、".join(_override_parts) if _override_parts else "変更内容を選択してください。")
@@ -4386,13 +4542,36 @@ def render_monthly_exceptions_panel() -> None:
             key="mx_add_employee_override",
             type="primary",
         ):
-            if not _mx_primary_store and not _mx_removed_support:
-                st.error("主担当または、応援・巡回先から外す店舗を選んでください。")
-            elif (
-                _mx_primary_store
-                and _mx_primary_store in _mx_removed_support
+            _category_sets = {
+                "主担当": {_mx_primary_store} if _mx_primary_store else set(),
+                "通常担当": set(_mx_normal_stores),
+                "応援・巡回担当": set(_mx_support_stores),
+                "応援・巡回から外す店舗": set(_mx_removed_support),
+            }
+            _overlap_messages = []
+            _category_labels = list(_category_sets)
+            for _idx, _first_label in enumerate(_category_labels):
+                for _second_label in _category_labels[_idx + 1:]:
+                    _overlap = (
+                        _category_sets[_first_label]
+                        & _category_sets[_second_label]
+                    )
+                    if _overlap:
+                        _overlap_messages.append(
+                            "・".join(_mx_store_labels[s] for s in sorted(_overlap))
+                            + f"が「{_first_label}」と「{_second_label}」で重複"
+                        )
+            if (
+                not _mx_primary_store
+                and not _mx_normal_stores
+                and not _mx_support_stores
             ):
-                st.error("主担当店舗を、応援・巡回先から外す店舗には指定できません。")
+                st.error(
+                    "主担当・通常担当・応援巡回担当のいずれかを、"
+                    "少なくとも1店舗設定してください。"
+                )
+            elif _overlap_messages:
+                st.error("店舗区分が重複しています: " + " / ".join(_overlap_messages))
             else:
                 _new = dict(_mx_raw)
                 _new_overrides = {
@@ -4408,6 +4587,8 @@ def render_monthly_exceptions_panel() -> None:
                     _mx_override_employee
                 ] = {
                     "primary_store": _mx_primary_store or None,
+                    "normal_stores": list(_mx_normal_stores),
+                    "support_stores": list(_mx_support_stores),
                     "remove_support_stores": list(_mx_removed_support),
                 }
                 _new["employee_store_overrides"] = _new_overrides
