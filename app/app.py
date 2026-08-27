@@ -42,7 +42,7 @@ _startup_log("import streamlit/pandas start")
 import streamlit as st
 import pandas as pd
 _startup_log("import streamlit/pandas done")
-from datetime import date, datetime
+from datetime import date
 from calendar import monthrange
 from urllib.parse import quote, unquote
 
@@ -447,7 +447,7 @@ def save_admin_paid_leave_data(data: dict, actor: str = "管理者") -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": now_jst().isoformat(timespec="seconds"),
         "updated_by": actor,
         "adjustments": data.get("adjustments", []),
     }
@@ -500,7 +500,7 @@ def save_note_adjustment_data(data: dict, actor: str = "管理者") -> Path:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     payload = {
         "version": 1,
-        "updated_at": datetime.now().isoformat(),
+        "updated_at": now_jst().isoformat(timespec="seconds"),
         "updated_by": actor,
         "adjustments": data.get("adjustments", []),
     }
@@ -539,8 +539,11 @@ def latest_note_adjustments_by_employee(year: int, month: int) -> dict[str, dict
             continue
         if (
             employee not in latest
-            or str(adj.get("updated_at") or adj.get("created_at") or "")
-            >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
+            or timestamp_sort_key(adj.get("updated_at") or adj.get("created_at"))
+            >= timestamp_sort_key(
+                latest[employee].get("updated_at")
+                or latest[employee].get("created_at")
+            )
         ):
             latest[employee] = adj
     return {
@@ -562,7 +565,7 @@ def upsert_note_adjustment(
     """自由記載補正を従業員・月単位で追加/更新する。"""
     data = load_note_adjustment_data()
     adjustments = data.setdefault("adjustments", [])
-    now = datetime.now().isoformat()
+    now = now_jst().isoformat(timespec="seconds")
     target = None
     for adj in adjustments:
         if (
@@ -575,7 +578,7 @@ def upsert_note_adjustment(
             break
     if target is None:
         target = {
-            "id": f"note_adjust_{int(year)}{int(month):02d}_{employee}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+            "id": f"note_adjust_{int(year)}{int(month):02d}_{employee}_{now_jst().strftime('%Y%m%d%H%M%S')}",
             "year": int(year),
             "month": int(month),
             "employee": str(employee),
@@ -602,11 +605,11 @@ def delete_note_adjustment(
     """自由記載の管理者補正を削除扱いにする。元の提出データは残す。"""
     data = load_note_adjustment_data()
     adjustments = data.setdefault("adjustments", [])
-    now = datetime.now().isoformat()
+    now = now_jst().isoformat(timespec="seconds")
     adjustments.append({
         "id": (
             f"note_adjust_delete_{int(year)}{int(month):02d}_"
-            f"{employee}_{datetime.now().strftime('%Y%m%d%H%M%S')}"
+            f"{employee}_{now_jst().strftime('%Y%m%d%H%M%S')}"
         ),
         "year": int(year),
         "month": int(month),
@@ -703,7 +706,7 @@ def add_admin_paid_leave_adjustment(
         "days": int(days),
         "dates": sorted(set(int(d) for d in (dates or []) if int(d) > 0)),
         "reason": reason,
-        "created_at": datetime.now().isoformat(),
+        "created_at": now_jst().isoformat(timespec="seconds"),
         "created_by": actor,
     })
     save_admin_paid_leave_data(data, actor=actor)
@@ -797,13 +800,16 @@ def _restore_monthly_exceptions_on_boot() -> str:
             return f"復元スキップ（{msg}）"
         remote_at = str(remote_data.get("updated_at", ""))
         local_at = str(_rules_mod.load_monthly_exceptions_raw().get("updated_at", ""))
-        if remote_at and remote_at > local_at:
+        if remote_at and timestamp_sort_key(remote_at) > timestamp_sort_key(local_at):
             ok, status = _rules_mod.save_monthly_exceptions(
                 remote_data,
                 actor=str(remote_data.get("updated_by", "バックアップ復元")),
             )
             if ok:
-                return f"バックアップから復元しました（{remote_at[:19]} 時点）"
+                return (
+                    "バックアップから復元しました"
+                    f"（{format_timestamp_jst(remote_at)} 時点）"
+                )
             return f"復元失敗（{status}）"
         return "ローカルの設定が最新（復元不要）"
     except Exception as exc:
@@ -859,7 +865,7 @@ def _auto_export_paid_leave_csv(ym_key: str) -> str:
 
 
 st.session_state["paid_leave_auto_export_status"] = _auto_export_paid_leave_csv(
-    date.today().strftime("%Y-%m")
+    now_jst().date().strftime("%Y-%m")
 )
 
 
@@ -1023,7 +1029,7 @@ def detect_short_staff_by_store(shift: MonthlyShift) -> dict[int, set[Store]]:
                 continue
             if emp.is_auxiliary:
                 continue
-            if emp.skill == Skill.ECO:
+            if emp.skill in (Skill.ECO, Skill.ECO_SUPPORT):
                 store_eco[a.store] = store_eco.get(a.store, 0) + 1
             else:
                 store_ticket[a.store] = store_ticket.get(a.store, 0) + 1
@@ -2707,7 +2713,7 @@ def parsed_note_summary_to_labels(summary: dict) -> list[str]:
 
 
 def render_scrollable_request_table(rows: list[dict]) -> None:
-    """本人提出希望を横スクロール可能な表で表示する。"""
+    """本人提出希望を標準ツールバー付きの表で表示する。"""
     if not rows:
         st.caption("表示する提出データがありません")
         return
@@ -2715,49 +2721,29 @@ def render_scrollable_request_table(rows: list[dict]) -> None:
         "氏名", "状態", "× 休み希望（絶対）", "△ できれば休み",
         "出勤希望", "有給", "自由記載から反映", "自由記載確認", "備考",
     ]
-    widths = {
-        "氏名": 110,
-        "状態": 110,
-        "× 休み希望（絶対）": 260,
-        "△ できれば休み": 220,
-        "出勤希望": 180,
-        "有給": 90,
-        "自由記載から反映": 300,
-        "自由記載確認": 260,
-        "備考": 560,
-    }
-    min_width = sum(widths.get(col, 140) for col in columns)
-    html_parts = [
-        '<div style="overflow:auto; max-height:430px; border:1px solid #e5e7eb; '
-        'border-radius:6px; background:white;">',
-        f'<table style="border-collapse:collapse; min-width:{min_width}px; width:max-content; '
-        f'font-size:14px;">',
-        '<thead><tr>',
+    table_rows = [
+        {column: str(row.get(column, "") or "") for column in columns}
+        for row in rows
     ]
-    for col in columns:
-        html_parts.append(
-            f'<th style="position:sticky; top:0; z-index:1; background:#f8fafc; '
-            f'border:1px solid #e5e7eb; padding:8px; text-align:left; '
-            f'min-width:{widths[col]}px;">{escape(col)}</th>'
-        )
-    html_parts.append('</tr></thead><tbody>')
-    for row in rows:
-        html_parts.append('<tr>')
-        for col in columns:
-            value = escape(str(row.get(col, ""))).replace("\n", "<br>")
-            white_space = (
-                "pre-wrap"
-                if col in {"自由記載から反映", "自由記載確認", "備考"}
-                else "nowrap"
-            )
-            html_parts.append(
-                f'<td style="border:1px solid #e5e7eb; padding:8px; '
-                f'vertical-align:top; min-width:{widths[col]}px; '
-                f'white-space:{white_space};">{value}</td>'
-            )
-        html_parts.append('</tr>')
-    html_parts.append('</tbody></table></div>')
-    st.markdown("".join(html_parts), unsafe_allow_html=True)
+    st.dataframe(
+        table_rows,
+        width="stretch",
+        height=min(650, max(180, 38 + len(table_rows) * 64)),
+        row_height=56,
+        hide_index=True,
+        column_order=columns,
+        column_config={
+            "氏名": st.column_config.TextColumn(width="small"),
+            "状態": st.column_config.TextColumn(width="small"),
+            "× 休み希望（絶対）": st.column_config.TextColumn(width="large"),
+            "△ できれば休み": st.column_config.TextColumn(width="large"),
+            "出勤希望": st.column_config.TextColumn(width="medium"),
+            "有給": st.column_config.TextColumn(width="small"),
+            "自由記載から反映": st.column_config.TextColumn(width="large"),
+            "自由記載確認": st.column_config.TextColumn(width="large"),
+            "備考": st.column_config.TextColumn(width="large"),
+        },
+    )
 
 
 def render_scrollable_review_table(rows: list[dict]) -> None:
@@ -3193,7 +3179,7 @@ def build_generation_metadata(message: str, input_summary: dict) -> dict:
     """保存済みシフトに、生成時に使った入力条件を残す。"""
     return {
         "schema": "generation_metadata_v1",
-        "saved_at": datetime.now().isoformat(),
+        "saved_at": now_jst().isoformat(timespec="seconds"),
         "ym": (
             f"{int(input_summary.get('year')):04d}-{int(input_summary.get('month')):02d}"
             if input_summary.get("year") and input_summary.get("month")
@@ -3446,7 +3432,7 @@ def record_edit_history_with_github(
         log_path = (
             backup_mgr.backup_dir
             / f"{int(year):04d}-{int(month):02d}"
-            / f"edits_{datetime.now().strftime('%Y-%m-%d')}.jsonl"
+            / f"edits_{now_jst().strftime('%Y-%m-%d')}.jsonl"
         )
         if log_path.exists():
             push_edit_log_to_github(log_path, int(year), int(month))
@@ -3897,7 +3883,7 @@ def render_monthly_exceptions_panel() -> None:
 
     _mx_raw = load_monthly_exceptions_raw()
     _mx_updated_by = _mx_raw.get("updated_by", "")
-    _mx_updated_at = str(_mx_raw.get("updated_at", ""))[:19]
+    _mx_updated_at = format_timestamp_jst(_mx_raw.get("updated_at", ""))
     _status_line = f"設定の状態: {_mx_status_now}"
     if _mx_updated_by:
         _status_line += f" ／ 最終更新: {_mx_updated_by}（{_mx_updated_at}）"
@@ -4329,7 +4315,7 @@ def render_monthly_exceptions_panel() -> None:
 
     # 対象月の選択肢（今月から14ヶ月先まで）
     _mx_month_options = []
-    _my, _mm = date.today().year, date.today().month
+    _my, _mm = now_jst().date().year, now_jst().date().month
     for _ in range(14):
         _mx_month_options.append(f"{_my:04d}-{_mm:02d}")
         _mm += 1
@@ -4744,7 +4730,7 @@ def render_monthly_exceptions_panel() -> None:
             _new_plans.setdefault(_mx_ym, []).append({
                 "id": (
                     f"{_mx_ym}-{_gp_trainee}-"
-                    f"{datetime.now().strftime('%H%M%S%f')}"
+                    f"{now_jst().strftime('%H%M%S%f')}"
                 ),
                 "name": _gp_name.strip() or f"{_gp_trainee}研修",
                 "trainee": _gp_trainee,
@@ -5072,7 +5058,7 @@ def render_monthly_exceptions_panel() -> None:
                 _history.get("changed_sections") or ["月例外"]
             )
             _hc1.write(
-                f"{str(_history.get('saved_at', ''))[:19]} ／ "
+                f"{format_timestamp_jst(_history.get('saved_at', ''))} ／ "
                 f"{_history.get('actor', '管理者')} ／ "
                 f"{_history.get('action', '設定変更')} ／ {_changed}"
             )
@@ -5084,7 +5070,7 @@ def render_monthly_exceptions_panel() -> None:
                     dict(_history.get("snapshot") or {}),
                     actor=_mx_actor,
                     action=(
-                        f"{str(_history.get('saved_at', ''))[:19]}の"
+                        f"{format_timestamp_jst(_history.get('saved_at', ''))}の"
                         "変更前へ復元"
                     ),
                 )
@@ -5331,7 +5317,7 @@ if mode == "📊 経営者ビュー":
             f'border-left:4px solid #2563eb;">'
             f'🔒 <strong>{lock_info.year}年{lock_info.month}月は確定版でロック中</strong>　'
             f'<span style="font-size:13px; color:#475569;">'
-            f'{lock_info.locked_at[:19]} ・ {lock_info.locked_by} ・ {lock_info.note}'
+            f'{format_timestamp_jst(lock_info.locked_at)} ・ {lock_info.locked_by} ・ {lock_info.note}'
             f'</span>'
             f'</div>',
             unsafe_allow_html=True,
@@ -5365,7 +5351,7 @@ if mode == "📊 経営者ビュー":
     if _last_gen:
         _gen_status = _last_gen.get("status", "")
         _gen_ym = _last_gen.get("ym", "")
-        _gen_finished = _last_gen.get("finished_at", "")[:19]
+        _gen_finished = format_timestamp_jst(_last_gen.get("finished_at", ""))
         with st.container():
             cols = st.columns([5, 1])
             with cols[0]:
@@ -5393,7 +5379,7 @@ if mode == "📊 経営者ビュー":
                 elif _gen_status == "running":
                     st.warning(
                         f"⏳ **{_gen_ym} の生成を実行中だった可能性があります** "
-                        f"(開始 {_last_gen.get('started_at', '')[:19]}). "
+                        f"(開始 {format_timestamp_jst(_last_gen.get('started_at', ''))}). "
                         "完了まで時間がかかった場合、サーバーが処理を打ち切った可能性があります。"
                     )
             with cols[1]:
@@ -6318,12 +6304,12 @@ if mode == "📊 経営者ビュー":
                             f"{format_monthly_rule_condition({'count': quick_count, 'comparison': quick_comparison})}配置する。"
                         )
                     new_rule = CustomRule(
-                        id=f"monthly_{datetime.now().strftime('%Y%m%d%H%M%S')}",
+                        id=f"monthly_{now_jst().strftime('%Y%m%d%H%M%S')}",
                         name=quick_rule_name,
                         description=quick_rule_desc or auto_desc,
                         enabled=True,
                         severity=quick_severity,
-                        created_at=datetime.now().isoformat(),
+                        created_at=now_jst().isoformat(timespec="seconds"),
                         created_by="管理者",
                         target_year=int(target_year),
                         target_month=int(target_month),
@@ -6468,7 +6454,7 @@ if mode == "📊 経営者ビュー":
             st.session_state[_gen_result_key] = {
                 "status": "running",
                 "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
-                "started_at": datetime.now().isoformat(),
+                "started_at": now_jst().isoformat(timespec="seconds"),
             }
             # 前回の解なし診断結果は新しい生成のたびにクリアする
             st.session_state.pop("last_infeasibility_findings", None)
@@ -7121,7 +7107,7 @@ if mode == "📊 経営者ビュー":
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "message": data_source_msg,
                         "input_summary": _input_summary,
-                        "finished_at": datetime.now().isoformat(),
+                        "finished_at": now_jst().isoformat(timespec="seconds"),
                     }
                 else:
                     # ソルバーが解を見つけられなかった場合
@@ -7171,7 +7157,7 @@ if mode == "📊 経営者ビュー":
                         "ym": f"{_saved_target_year:04d}-{_saved_target_month:02d}",
                         "message": "\n".join(diag_lines),
                         "input_summary": _input_summary,
-                        "finished_at": datetime.now().isoformat(),
+                        "finished_at": now_jst().isoformat(timespec="seconds"),
                     }
             except Exception as _gen_err:
                 # 想定外の例外（KeyError など）も画面に表示
@@ -7196,7 +7182,7 @@ if mode == "📊 経営者ビュー":
                     "error_type": type(_gen_err).__name__,
                     "error_msg": str(_gen_err),
                     "error_detail": error_detail,
-                    "finished_at": datetime.now().isoformat(),
+                    "finished_at": now_jst().isoformat(timespec="seconds"),
                 }
             finally:
                 # 例外が発生してもターゲット月をリセットしない
@@ -7276,7 +7262,7 @@ if mode == "📊 経営者ビュー":
                 for lk in all_locks:
                     st.markdown(
                         f"🔒 **{lk.year}年{lk.month}月**　"
-                        f"_{lk.locked_at[:10]}_　"
+                        f"_{format_timestamp_jst(lk.locked_at)[:10]}_　"
                         f"by {lk.locked_by}"
                     )
                     if lk.note:
@@ -9618,7 +9604,7 @@ elif mode == "📁 過去シフト閲覧":
             if _hist_lock:
                 st.success(
                     f"🔒 {_hist_y}年{_hist_m}月の確定版（ロック済み）を表示中　"
-                    f"確定日時: {str(_hist_lock.locked_at)[:19]} ／ "
+                    f"確定日時: {format_timestamp_jst(_hist_lock.locked_at)} ／ "
                     f"確定者: {_hist_lock.locked_by}"
                 )
             else:
@@ -9707,7 +9693,7 @@ elif mode == "⚙️ 設定":
             _csv_col1, _csv_col2 = st.columns([1, 2])
             with _csv_col1:
                 _csv_ym_options = []
-                _cy, _cm = date.today().year, date.today().month
+                _cy, _cm = now_jst().date().year, now_jst().date().month
                 for _ in range(13):
                     _csv_ym_options.append(f"{_cy:04d}-{_cm:02d}")
                     _cm -= 1
@@ -10338,7 +10324,7 @@ elif mode == "⚙️ 設定":
             )
         if cfg.updated_at:
             st.info(
-                f"現在の本設定: {cfg.updated_at[:16].replace('T', ' ')} 更新"
+                f"現在の本設定: {format_timestamp_jst(cfg.updated_at)} 更新"
                 f" / 更新者: {cfg.updated_by or '不明'}"
             )
         else:
@@ -11155,7 +11141,7 @@ elif mode == "⚙️ 設定":
                 else:
                     desc = f"{ch.category}: {ch.target}"
                 history_data.append({
-                    "日時": ch.timestamp[:19].replace("T", " "),
+                    "日時": format_timestamp_jst(ch.timestamp),
                     "実行者": ch.actor,
                     "変更内容": desc,
                     "メモ": ch.note,
@@ -11289,6 +11275,11 @@ elif mode == "⚙️ 設定":
                             "スキル",
                             options=[s.value for s in Skill],
                             index=[s.value for s in Skill].index(target.skill.value),
+                            help=(
+                                "エコサポートは研修終了直後の区分です。"
+                                "シフトでは必ず同じ店舗に独り立ち済みのエコ担当を置き、"
+                                "単独のエコ担当にはしません。"
+                            ),
                         )
                         new_status = st.selectbox(
                             "雇用形態",
@@ -11417,7 +11408,11 @@ elif mode == "⚙️ 設定":
                         "スキル",
                         options=[s.value for s in Skill],
                         index=[s.value for s in Skill].index(Skill.TICKET.value),
-                        help="新入社員はまずチケット担当から開始するのが慣例",
+                        help=(
+                            "新入社員はまずチケット担当から開始するのが慣例です。"
+                            "エコサポートは研修終了直後の区分で、"
+                            "独り立ち済みのエコ担当との同店舗勤務が必須です。"
+                        ),
                     )
                 with a_col2:
                     new_emp_status = st.selectbox(
@@ -11530,7 +11525,7 @@ elif mode == "⚙️ 設定":
                     elif h["action"] == "remove":
                         desc = "完全削除"
                     hist_data.append({
-                        "日時": h["timestamp"][:19].replace("T", " "),
+                        "日時": format_timestamp_jst(h["timestamp"]),
                         "操作": action_label,
                         "対象": h["target"],
                         "変更内容": desc,
@@ -11881,7 +11876,7 @@ elif mode == "⚙️ 設定":
                     debug_rows = []
                     for event in debug_events[-80:]:
                         debug_rows.append({
-                            "時刻": event.get("timestamp", ""),
+                            "時刻": format_timestamp_jst(event.get("timestamp", "")),
                             "処理": event.get("event", ""),
                             "詳細": json.dumps(
                                 event.get("details", {}),
@@ -11978,7 +11973,10 @@ elif mode == "⚙️ 設定":
                         )
                         if result.metadata:
                             exported_at = result.metadata.get("exported_at", "")
-                            st.caption(f"バックアップ作成日時: {exported_at[:19]}")
+                            st.caption(
+                                "バックアップ作成日時: "
+                                f"{format_timestamp_jst(exported_at)}"
+                            )
                         if getattr(result, "github_synced_files", 0):
                             st.caption(
                                 f"GitHubバックアップへ再同期: "
@@ -12012,7 +12010,7 @@ elif mode == "⚙️ 設定":
             for lk in all_locks:
                 st.markdown(
                     f"🔒 **{lk.year}年{lk.month}月**　"
-                    f"_{lk.locked_at[:19]}_　"
+                    f"_{format_timestamp_jst(lk.locked_at)}_　"
                     f"by {lk.locked_by}　- {lk.note}"
                 )
         else:
