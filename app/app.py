@@ -2105,6 +2105,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
             "prev_month": [],
             "holiday_overrides": {},
             "exact_holiday_days": {},
+            "paid_leave_days": {},
             "employee_max_consecutive_work": {},
             "employee_max_consecutive_off": {},
             "monthly_store_count_rules": [],
@@ -2118,6 +2119,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         "prev_month": inputs.get("prev_month", []),
         "holiday_overrides": inputs.get("holiday_overrides", {}),
         "exact_holiday_days": inputs.get("exact_holiday_days", {}),
+        "paid_leave_days": inputs.get("paid_leave_days", {}),
         "employee_max_consecutive_work": inputs.get("employee_max_consecutive_work", {}),
         "employee_max_consecutive_off": inputs.get("employee_max_consecutive_off", {}),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
@@ -2241,6 +2243,7 @@ def restore_validation_context_for_month(
         "prev_month": list(carryover_result.carryover),
         "holiday_overrides": holiday_overrides,
         "exact_holiday_days": exact_holiday_days,
+        "paid_leave_days": dict(effective_paid_leave_days),
         "employee_max_consecutive_work": dict(
             getattr(sub_data, "max_consecutive_work_days", {})
         ),
@@ -6841,6 +6844,7 @@ if mode == "📊 経営者ビュー":
                             prev_month=use_prev_month,
                             holiday_overrides=use_holiday_overrides,
                             exact_holiday_days=use_exact_holiday_days,
+                            paid_leave_days=effective_paid_leave_days,
                             employee_max_consecutive_work=use_employee_max_consecutive_work,
                             employee_max_consecutive_off=use_employee_max_consecutive_off,
                             default_holidays=rule_cfg.parameters.get("default_holiday_days", 8),
@@ -7097,6 +7101,7 @@ if mode == "📊 経営者ビュー":
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
                         "exact_holiday_days": dict(use_exact_holiday_days),
+                        "paid_leave_days": dict(effective_paid_leave_days),
                         "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
                         "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
@@ -7670,6 +7675,7 @@ if mode == "📊 経営者ビュー":
                     prev_month=_table_validation_context.get("prev_month", []),
                     holiday_overrides=_table_validation_context.get("holiday_overrides", {}),
                     exact_holiday_days=_table_validation_context.get("exact_holiday_days", {}),
+                    paid_leave_days=_table_validation_context.get("paid_leave_days", {}),
                     employee_max_consecutive_work=_table_validation_context.get("employee_max_consecutive_work", {}),
                     employee_max_consecutive_off=_table_validation_context.get("employee_max_consecutive_off", {}),
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
@@ -8016,6 +8022,7 @@ if mode == "📊 経営者ビュー":
                 prev_month=validation_context.get("prev_month", []),
                 holiday_overrides=validation_context.get("holiday_overrides", {}),
                 exact_holiday_days=validation_context.get("exact_holiday_days", {}),
+                paid_leave_days=validation_context.get("paid_leave_days", {}),
                 employee_max_consecutive_work=validation_context.get("employee_max_consecutive_work", {}),
                 employee_max_consecutive_off=validation_context.get("employee_max_consecutive_off", {}),
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
@@ -8208,6 +8215,7 @@ if mode == "📊 経営者ビュー":
             _v_prev = _validation_context.get("prev_month", [])
             _v_holiday = _validation_context.get("holiday_overrides", {})
             _v_exact_holiday = _validation_context.get("exact_holiday_days", {})
+            _v_paid_leave = _validation_context.get("paid_leave_days", {})
             _v_max_work = _validation_context.get("employee_max_consecutive_work", {})
             _v_max_off = _validation_context.get("employee_max_consecutive_off", {})
             result = run_shift_validation(
@@ -8217,6 +8225,7 @@ if mode == "📊 経営者ビュー":
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
                 exact_holiday_days=_v_exact_holiday,
+                paid_leave_days=_v_paid_leave,
                 employee_max_consecutive_work=_v_max_work,
                 employee_max_consecutive_off=_v_max_off,
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
@@ -8533,6 +8542,7 @@ if mode == "📊 経営者ビュー":
                     _cv_prev = _cv_inputs.get("prev_month", [])
                     _cv_holiday = _cv_inputs.get("holiday_overrides", {})
                     _cv_exact_holiday = _cv_inputs.get("exact_holiday_days", {})
+                    _cv_paid_leave = _cv_inputs.get("paid_leave_days", {})
                     _cv_max_work = _cv_inputs.get("employee_max_consecutive_work", {})
                     _cv_max_off = _cv_inputs.get("employee_max_consecutive_off", {})
                     _cv_monthly_rules = _cv_inputs.get("monthly_store_count_rules", [])
@@ -8545,6 +8555,7 @@ if mode == "📊 経営者ビュー":
                     _cv_prev = []
                     _cv_holiday = {}
                     _cv_exact_holiday = {}
+                    _cv_paid_leave = {}
                     _cv_max_work = {}
                     _cv_max_off = {}
                     _cv_monthly_rules = []
@@ -8556,6 +8567,7 @@ if mode == "📊 経営者ビュー":
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
                     exact_holiday_days=_cv_exact_holiday,
+                    paid_leave_days=_cv_paid_leave,
                     employee_max_consecutive_work=_cv_max_work,
                     employee_max_consecutive_off=_cv_max_off,
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
