@@ -105,8 +105,12 @@ def _load_latest_note_adjustments(year: int, month: int) -> dict[str, dict]:
             continue
         if (
             employee not in latest
-            or str(adj.get("updated_at") or adj.get("created_at") or "")
-            >= str(latest[employee].get("updated_at") or latest[employee].get("created_at") or "")
+            or timestamp_sort_key(
+                adj.get("updated_at") or adj.get("created_at")
+            ) >= timestamp_sort_key(
+                latest[employee].get("updated_at")
+                or latest[employee].get("created_at")
+            )
         ):
             latest[employee] = adj
     return {

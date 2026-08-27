@@ -183,6 +183,27 @@ ONLY_ON_REQUEST_TARGET_DAYS = 8
 ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
 
 
+def _add_eco_support_pairing_constraints(
+    model,
+    x: dict,
+    days: list[int],
+    stores: list[Store],
+    independent_eco_employees: list,
+    eco_support_employees: list,
+) -> None:
+    """エコサポートに同店舗の独り立ち済みエコを必須とする。"""
+    for support in eco_support_employees:
+        for day in days:
+            for store in stores:
+                independent_eco_here = sum(
+                    x[employee.name][day][store]
+                    for employee in independent_eco_employees
+                )
+                model.Add(
+                    x[support.name][day][store] <= independent_eco_here
+                )
+
+
 def generate_shift(
     year: int,
     month: int,
@@ -832,13 +853,28 @@ def generate_shift(
         OperationMode.MINIMUM: MINIMUM_CAPACITY,
         OperationMode.CLOSED: {},
     }
-    # 店頭の必須エコ要員はSkill.ECOのみ。
-    # ECO_SUPPORT は店頭直接応対しないためチケット枠に含める。
-    eco_employees = [e for e in main_employees if e.skill == Skill.ECO]
-    ticket_employees = [
-        e for e in main_employees
-        if e.skill in (Skill.TICKET, Skill.ECO_SUPPORT)
+    # ECO_SUPPORT は研修終了直後のエコ要員として人数に含めるが、
+    # 必ず同店舗に独り立ち済みの Skill.ECO が必要。チケット枠には含めない。
+    independent_eco_employees = [
+        e for e in main_employees if e.skill == Skill.ECO
     ]
+    eco_support_employees = [
+        e for e in main_employees if e.skill == Skill.ECO_SUPPORT
+    ]
+    eco_employees = independent_eco_employees + eco_support_employees
+    ticket_employees = [
+        e for e in main_employees if e.skill == Skill.TICKET
+    ]
+
+    # エコサポート単独でのエコ担当を絶対に作らない。
+    _add_eco_support_pairing_constraints(
+        model,
+        x,
+        days,
+        main_stores,
+        independent_eco_employees,
+        eco_support_employees,
+    )
 
     # 大宮の「エコ対応1名以上・合計2名」の需給調整体制を表す変数。
     # 全月で許容し、目的関数で通常の合計3名体制を優先する。
@@ -1770,16 +1806,16 @@ def generate_shift(
                 continue
 
             # その日の赤羽の構成を確認
-            # ECO_SUPPORT はチケット枠としてカウント（店頭応対しないため）
             akabane_workers = [
                 a for a in shift.get_day_assignments(d) if a.store == Store.AKABANE
             ]
             akabane_eco = sum(
-                1 for a in akabane_workers if get_employee(a.employee).skill == Skill.ECO
+                1 for a in akabane_workers
+                if get_employee(a.employee).skill in (Skill.ECO, Skill.ECO_SUPPORT)
             )
             akabane_ticket = sum(
                 1 for a in akabane_workers
-                if get_employee(a.employee).skill in (Skill.TICKET, Skill.ECO_SUPPORT)
+                if get_employee(a.employee).skill == Skill.TICKET
             )
             if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
                 shift.assignments.append(ShiftAssignment(

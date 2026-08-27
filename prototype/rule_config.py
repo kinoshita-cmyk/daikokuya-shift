@@ -18,11 +18,11 @@
 from __future__ import annotations
 import json
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
 
 from .paths import CONFIG_DIR
+from .submission_window import now_jst
 
 CONFIG_FILE = CONFIG_DIR / "rule_config.json"
 HISTORY_FILE = CONFIG_DIR / "rule_history.jsonl"
@@ -192,7 +192,7 @@ class RuleConfigManager:
                 for ch in changes:
                     f.write(json.dumps(asdict(ch), ensure_ascii=False) + "\n")
         # 設定を更新
-        new_config.updated_at = datetime.now().isoformat()
+        new_config.updated_at = now_jst().isoformat(timespec="seconds")
         new_config.updated_by = actor
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(new_config.to_dict(), f, ensure_ascii=False, indent=2)
@@ -208,7 +208,7 @@ class RuleConfigManager:
         self, old: RuleConfig, new: RuleConfig, actor: str, note: str
     ) -> list[ChangeLog]:
         """新旧設定の差分を計算"""
-        ts = datetime.now().isoformat()
+        ts = now_jst().isoformat(timespec="seconds")
         changes = []
         # ON/OFF切替
         for key in set(old.enabled_checks) | set(new.enabled_checks):
@@ -317,7 +317,7 @@ if __name__ == "__main__":
         description="楯さんは家族の事情で日曜は休み優先で組む",
         enabled=True,
         severity="WARNING",
-        created_at=datetime.now().isoformat(),
+        created_at=now_jst().isoformat(timespec="seconds"),
         created_by="代表取締役",
     ))
     mgr.save(cfg2, actor="代表取締役", note="日曜休み希望ルール追加")

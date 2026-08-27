@@ -22,13 +22,13 @@ employees.py のハードコード値を「初期値」として、JSON でオ�
 from __future__ import annotations
 import json
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Any
 
 from .models import Employee, Skill, Role, Store, StationType, Affinity, EmploymentStatus
 from . import employees as _default_employees
 from .paths import CONFIG_DIR
+from .submission_window import now_jst
 
 EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
@@ -238,7 +238,7 @@ class EmployeeConfigManager:
         """全従業員リストを保存（内部）"""
         data = {
             "version": 1,
-            "updated_at": datetime.now().isoformat(),
+            "updated_at": now_jst().isoformat(timespec="seconds"),
             "updated_by": actor,
             "employees": [employee_to_dict(e) for e in employees],
         }
@@ -254,8 +254,8 @@ class EmployeeConfigManager:
         # 同名チェック
         if any(e.name == new_emp.name for e in all_emps):
             return False
-        new_emp.hired_at = new_emp.hired_at or datetime.now().date().isoformat()
-        new_emp.status_changed_at = datetime.now().isoformat()
+        new_emp.hired_at = new_emp.hired_at or now_jst().date().isoformat()
+        new_emp.status_changed_at = now_jst().isoformat(timespec="seconds")
         all_emps.append(new_emp)
         self._save_all(all_emps, actor, note)
         self._log_change(
@@ -281,9 +281,9 @@ class EmployeeConfigManager:
                     v = _employment_status_from_value(v)
                 # 退職処理の場合は退職日を記録
                 if v == EmploymentStatus.RETIRED and not all_emps[idx].retired_at:
-                    all_emps[idx].retired_at = datetime.now().date().isoformat()
+                    all_emps[idx].retired_at = now_jst().date().isoformat()
                 # 状態変更時刻を更新
-                all_emps[idx].status_changed_at = datetime.now().isoformat()
+                all_emps[idx].status_changed_at = now_jst().isoformat(timespec="seconds")
             elif k == "role" and isinstance(v, str):
                 v = Role(v)
             elif k == "skill" and isinstance(v, str):
@@ -319,7 +319,7 @@ class EmployeeConfigManager:
             name=name,
             updates={
                 "employment_status": EmploymentStatus.RETIRED,
-                "retired_at": retired_date or datetime.now().date().isoformat(),
+                "retired_at": retired_date or now_jst().date().isoformat(),
             },
             actor=actor,
             note=note or f"退職処理（{retired_date or '本日付'}）",
@@ -364,7 +364,7 @@ class EmployeeConfigManager:
     ) -> None:
         """変更履歴を1件記録"""
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_jst().isoformat(timespec="seconds"),
             "actor": actor,
             "action": action,  # "add" / "update" / "remove"
             "target": target,

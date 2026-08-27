@@ -287,6 +287,9 @@ def validate(
     # 3. エコ配置チェック（東口・西口必須）
     _check_eco_placement(shift, result, days_in_month)
 
+    # 3-2. エコサポートは同店舗に独り立ち済みエコが必須
+    _check_eco_support_pairing(shift, result, days_in_month)
+
     # 4. 連勤チェック
     _check_consecutive_work(
         shift, result, days_in_month, prev_month,
@@ -481,14 +484,13 @@ def _check_store_capacity(
                     get_employee(a.employee), shift.year, shift.month, day,
                 )
             ]
-            # ECO_SUPPORT は店頭直接応対しないためチケット枠としてカウント
             eco_count = sum(
                 1 for a in store_workers
-                if get_employee(a.employee).skill == Skill.ECO
+                if get_employee(a.employee).skill in (Skill.ECO, Skill.ECO_SUPPORT)
             )
             ticket_count = sum(
                 1 for a in store_workers
-                if get_employee(a.employee).skill in (Skill.TICKET, Skill.ECO_SUPPORT)
+                if get_employee(a.employee).skill == Skill.TICKET
             )
             total = eco_count + ticket_count
 
@@ -735,7 +737,7 @@ def _check_store_capacity(
 
 
 def _check_eco_placement(shift: MonthlyShift, result: ValidationResult, days: int) -> None:
-    """東口・西口に必ずエコ1名以上いるか"""
+    """東口・西口に独り立ち済みエコが1名以上いるか。"""
     for day in range(1, days + 1):
         for store in (Store.HIGASHIGUCHI, Store.NISHIGUCHI):
             day_assignments = shift.get_day_assignments(day)
@@ -763,6 +765,47 @@ def _check_eco_placement(shift: MonthlyShift, result: ValidationResult, days: in
                     day=day, employee=None,
                     message=f"{store.display_name} エコ要員未配置",
                 ))
+
+
+def _check_eco_support_pairing(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """エコサポートが独り立ち済みエコと同じ店舗にいるか確認する。"""
+    for day in range(1, days + 1):
+        day_assignments = shift.get_day_assignments(day)
+        independent_eco_stores = {
+            a.store
+            for a in day_assignments
+            if a.store != Store.OFF
+            and get_employee(a.employee).skill == Skill.ECO
+            and not is_probationary_employee(
+                get_employee(a.employee), shift.year, shift.month, day,
+            )
+        }
+        for assignment in day_assignments:
+            if assignment.store == Store.OFF:
+                continue
+            employee = get_employee(assignment.employee)
+            if employee.skill != Skill.ECO_SUPPORT:
+                continue
+            if is_probationary_employee(
+                employee, shift.year, shift.month, day,
+            ):
+                continue
+            if assignment.store in independent_eco_stores:
+                continue
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="エコサポート単独",
+                day=day,
+                employee=assignment.employee,
+                message=(
+                    f"{assignment.store.display_name}のエコサポート勤務には、"
+                    "同じ店舗に独り立ち済みのエコ担当が必要です"
+                ),
+            ))
 
 
 def _check_consecutive_work(

@@ -16,11 +16,12 @@ config/monthly_exceptions.json から読み込みます。コード内の値は
 import json
 import os
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from calendar import monthrange
 from typing import Optional
 from .models import Affinity, Store, Skill, OperationMode
 from .paths import CONFIG_DIR
+from .submission_window import now_jst
 
 # ============================================================
 # 店舗別の必要人数（営業モードごと）
@@ -1449,7 +1450,7 @@ def save_monthly_exceptions(
         "書式は『YYYY-MM』。このファイルにキーがある場合、"
         "コード内のデフォルト値よりこちらが優先されます。"
     )
-    payload["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    payload["updated_at"] = now_jst().isoformat(timespec="seconds")
     payload["updated_by"] = str(actor or "管理者")
     local_history = list(before.get("_history", []) or [])
     incoming_history = list(dict(data or {}).get("_history", []) or [])
@@ -1461,7 +1462,7 @@ def save_monthly_exceptions(
     )
     if before_snapshot != _clean_monthly_exceptions_snapshot(payload):
         prior_history.append({
-            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+            "id": now_jst().strftime("%Y%m%d%H%M%S%f"),
             "saved_at": payload["updated_at"],
             "actor": str(actor or "管理者"),
             "action": str(action or "設定変更"),

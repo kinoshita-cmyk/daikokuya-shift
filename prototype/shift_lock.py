@@ -17,11 +17,11 @@
 from __future__ import annotations
 import json
 from dataclasses import dataclass, asdict
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .paths import LOCK_DIR as DEFAULT_LOCK_DIR
+from .submission_window import now_jst
 
 
 @dataclass
@@ -59,7 +59,7 @@ class ShiftLockManager:
         """シフトをロックする"""
         info = LockInfo(
             year=year, month=month,
-            locked_at=datetime.now().isoformat(),
+            locked_at=now_jst().isoformat(timespec="seconds"),
             locked_by=locked_by,
             note=note,
             snapshot_file=snapshot_file,
@@ -77,7 +77,7 @@ class ShiftLockManager:
         # 削除前に履歴アーカイブとして残す
         archive_dir = self.lock_dir / "archive"
         archive_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        ts = now_jst().strftime("%Y-%m-%d_%H%M%S")
         archive_path = archive_dir / f"{year}-{month:02d}_unlocked_{ts}.json"
         path.rename(archive_path)
         return True

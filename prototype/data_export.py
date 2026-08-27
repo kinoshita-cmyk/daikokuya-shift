@@ -38,11 +38,11 @@ import re
 import shutil
 import zipfile
 from dataclasses import dataclass, field
-from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from .paths import PROJECT_ROOT, BACKUP_DIR, CONFIG_DIR, LOCK_DIR, OUTPUT_DIR
+from .submission_window import now_jst
 
 
 # バックアップに含めるディレクトリ
@@ -115,7 +115,7 @@ def create_backup_zip(include_output: bool = False) -> tuple[bytes, BackupSummar
 
         # メタデータ
         metadata = {
-            "exported_at": datetime.now().isoformat(),
+            "exported_at": now_jst().isoformat(timespec="seconds"),
             "summary": {
                 "total_files": summary.total_files,
                 "submission_files": summary.submission_files,
@@ -134,7 +134,7 @@ def create_backup_zip(include_output: bool = False) -> tuple[bytes, BackupSummar
 
 def get_backup_filename() -> str:
     """ダウンロード用のファイル名を生成"""
-    return f"daikokuya-shift-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+    return f"daikokuya-shift-backup-{now_jst().strftime('%Y%m%d-%H%M%S')}.zip"
 
 
 # ============================================================

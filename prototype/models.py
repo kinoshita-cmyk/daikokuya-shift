@@ -44,7 +44,7 @@ class Store(str, Enum):
 class Skill(str, Enum):
     """対応可能な業務スキル"""
     ECO = "エコ"               # エコ・チケット両方対応可（店頭で買取応対できる）
-    ECO_SUPPORT = "エコサポート"  # エコ業務の補助は可能だが、店頭直接応対はしない
+    ECO_SUPPORT = "エコサポート"  # 研修終了直後。独り立ち済みエコの同伴時だけエコ担当可
     TICKET = "チケット"          # チケットのみ対応
 
     @property
@@ -54,9 +54,10 @@ class Skill(str, Enum):
 
     @property
     def can_be_eco_at_storefront(self) -> bool:
-        """店頭でエコ要員として配置可能か（必須エコ要員に数えるか）"""
-        # ECO_SUPPORT は店頭直接応対しないため、必須エコにはカウントしない
-        return self == Skill.ECO
+        """店頭でエコ要員として配置可能か。"""
+        # ECO_SUPPORT は同店舗に独り立ち済みエコがいる場合だけ配置できる。
+        # 同伴条件そのものは生成・検証側で保証する。
+        return self in (Skill.ECO, Skill.ECO_SUPPORT)
 
 
 class Role(str, Enum):
