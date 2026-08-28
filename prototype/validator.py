@@ -310,6 +310,9 @@ def validate(
         employee_max_consecutive_off=employee_max_consecutive_off,
     )
 
+    # 6-2. 飛び石勤務はソフト条件。残った場合は管理者確認用に表示する。
+    _check_tobishi_work_patterns(shift, result, days_in_month)
+
     # 7. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
 
@@ -1058,6 +1061,69 @@ def _check_consecutive_off(
                 day=None, employee=emp.name,
                 message=f"2連休{two_off_count}回（最大{max_2off}回）",
             ))
+
+
+def _check_tobishi_work_patterns(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """休・出・休、出・休・出の飛び石パターンをまとめて確認する。"""
+    for emp in _validation_employees():
+        if not emp.is_shift_eligible or getattr(emp, "is_auxiliary", False):
+            continue
+        if getattr(emp, "only_on_request_days", False):
+            continue
+        if is_probationary_employee(emp, shift.year, shift.month):
+            continue
+
+        working = {}
+        for day in range(1, days + 1):
+            assignment = shift.get_assignment(emp.name, day)
+            working[day] = bool(
+                assignment is not None and assignment.store != Store.OFF
+            )
+
+        isolated_work_days = [
+            day for day in range(2, days)
+            if not working[day - 1]
+            and working[day]
+            and not working[day + 1]
+        ]
+        isolated_off_days = [
+            day for day in range(2, days)
+            if working[day - 1]
+            and not working[day]
+            and working[day + 1]
+        ]
+        # 管理者向け警告は「休・出・休」の単独出勤がある場合だけ出す。
+        # 単独休日だけの場合も生成時には軽く避けるが、通常の休日配置でも
+        # 起こり得るため警告を増やさない。
+        if not isolated_work_days:
+            continue
+
+        details = []
+        if isolated_work_days:
+            details.append(
+                "休みに挟まれた単独出勤: "
+                + "、".join(f"{day}日" for day in isolated_work_days)
+            )
+        if isolated_off_days:
+            details.append(
+                "周辺の単独休日: "
+                + "、".join(f"{day}日" for day in isolated_off_days)
+            )
+        result.issues.append(Issue(
+            severity="WARNING",
+            category="飛び石勤務",
+            day=None,
+            employee=emp.name,
+            message=(
+                " / ".join(details)
+                + "。本人希望・店舗体制を優先した結果として残っているため、"
+                "可能なら前後日との入れ替えを確認してください"
+            ),
+        ))
 
 
 def _check_off_requests(

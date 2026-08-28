@@ -182,6 +182,11 @@ AKABANE_SHORTAGE_PENALTY = 60
 ONLY_ON_REQUEST_TARGET_DAYS = 8
 ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
 
+# 飛び石勤務の回避。店舗の必要体制（例: 大宮3名優先=400）は崩さず、
+# 店舗配分の単純な均等化や5連勤回避よりは強く優先する。
+TOBISHI_ISOLATED_WORK_PENALTY = 240  # 休・出・休
+TOBISHI_ISOLATED_OFF_PENALTY = 70    # 出・休・出
+
 
 def _add_eco_support_pairing_constraints(
     model,
@@ -202,6 +207,46 @@ def _add_eco_support_pairing_constraints(
                 model.Add(
                     x[support.name][day][store] <= independent_eco_here
                 )
+
+
+def _add_tobishi_pattern_indicators(
+    model,
+    employee_name: str,
+    off_by_day: dict[int, object],
+    days_in_month: int,
+) -> tuple[list, list]:
+    """休・出・休と出・休・出の発生を表す変数を返す。"""
+    isolated_work_terms = []
+    isolated_off_terms = []
+    for day in range(2, int(days_in_month)):
+        isolated_work = model.NewBoolVar(
+            f"tobishi_work_{employee_name}_{day}"
+        )
+        work_literals = [
+            off_by_day[day - 1],
+            off_by_day[day].Not(),
+            off_by_day[day + 1],
+        ]
+        model.AddBoolAnd(work_literals).OnlyEnforceIf(isolated_work)
+        model.AddBoolOr(
+            [literal.Not() for literal in work_literals]
+        ).OnlyEnforceIf(isolated_work.Not())
+        isolated_work_terms.append(isolated_work)
+
+        isolated_off = model.NewBoolVar(
+            f"tobishi_off_{employee_name}_{day}"
+        )
+        off_literals = [
+            off_by_day[day - 1].Not(),
+            off_by_day[day],
+            off_by_day[day + 1].Not(),
+        ]
+        model.AddBoolAnd(off_literals).OnlyEnforceIf(isolated_off)
+        model.AddBoolOr(
+            [literal.Not() for literal in off_literals]
+        ).OnlyEnforceIf(isolated_off.Not())
+        isolated_off_terms.append(isolated_off)
+    return isolated_work_terms, isolated_off_terms
 
 
 def generate_shift(
@@ -1103,6 +1148,8 @@ def generate_shift(
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
     two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
     two_off_over_terms = []  # 2連休が多すぎる場合のソフトペナルティ
+    tobishi_isolated_work_terms = []  # 休・出・休
+    tobishi_isolated_off_terms = []   # 出・休・出
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
@@ -1212,6 +1259,18 @@ def generate_shift(
                 model.Add(over_two_off >= two_off_count - max_two_off)
                 model.Add(over_two_off >= 0)
                 two_off_over_terms.append(over_two_off)
+
+        # 飛び石勤務は本人希望・店舗運営を優先したうえで可能な限り避ける。
+        # 出勤希望日のみ稼働するパートは、勤務可能日が元から飛び飛びになるため対象外。
+        if not getattr(e, "only_on_request_days", False):
+            isolated_work, isolated_off = _add_tobishi_pattern_indicators(
+                model,
+                e.name,
+                off[e.name],
+                days_in_month,
+            )
+            tobishi_isolated_work_terms.extend(isolated_work)
+            tobishi_isolated_off_terms.extend(isolated_off)
 
     # ============================================================
     # 制約 11: 3連休回避（ハード）
@@ -1649,6 +1708,20 @@ def generate_shift(
     if two_off_over_terms:
         # 2連休が多すぎる状態も、可能な限り避ける。
         obj = obj - 520 * sum(two_off_over_terms)
+    if tobishi_isolated_work_terms:
+        # 休みに挟まれた1日出勤は従業員負荷が高いため、飛び石の中でも強く避ける。
+        obj = (
+            obj
+            - TOBISHI_ISOLATED_WORK_PENALTY
+            * sum(tobishi_isolated_work_terms)
+        )
+    if tobishi_isolated_off_terms:
+        # 出勤に挟まれた単独休日も、既存の2連休回数との両立範囲で避ける。
+        obj = (
+            obj
+            - TOBISHI_ISOLATED_OFF_PENALTY
+            * sum(tobishi_isolated_off_terms)
+        )
     if preferred_consecutive_off_indicators:
         # 自由記載で明示された連休希望は優先するが、3連休禁止のハード条件は別途維持する。
         obj = obj + 180 * sum(preferred_consecutive_off_indicators)
@@ -1760,6 +1833,16 @@ def generate_shift(
                 if operation_modes.get(d, OperationMode.NORMAL)
                 == OperationMode.NORMAL
             )
+            status_out["tobishi_patterns"] = {
+                "isolated_work_days": sum(
+                    solver.Value(term)
+                    for term in tobishi_isolated_work_terms
+                ),
+                "isolated_off_days": sum(
+                    solver.Value(term)
+                    for term in tobishi_isolated_off_terms
+                ),
+            }
 
     if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         if verbose:
