@@ -9136,8 +9136,14 @@ if mode == "📊 経営者ビュー":
                                 st.session_state["chat_discard_confirm"] = False
                                 st.rerun()
 
-                    can_undo = bool(chat_engine.undo_stack)
-                    can_redo = bool(chat_engine.redo_stack)
+                    can_undo = bool(
+                        chat_engine.undo_stack
+                        or chat_engine.redo_preview_active
+                    )
+                    can_redo = bool(
+                        chat_engine.redo_stack
+                        and not chat_engine.redo_preview_active
+                    )
                     btn_undo, btn_redo, btn_clear = st.columns([1, 1, 3])
                     with btn_undo:
                         if st.button(
@@ -9148,12 +9154,18 @@ if mode == "📊 経営者ビュー":
                             help=(
                                 "確定版のロックを解除してから変更履歴を操作してください"
                                 if shift_readjustment_locked
-                                else "直前に反映した変更を元に戻します"
+                                else (
+                                    "反映済み → 青枠プレビュー → 修正前の順に戻ります"
+                                )
                             ),
                         ):
+                            was_history_preview = bool(
+                                chat_engine.redo_preview_active
+                            )
                             msg = chat_engine.undo_last_apply()
-                            _undo_quality_guard()
-                            _save_chat_shift_snapshot(msg)
+                            if not was_history_preview:
+                                _undo_quality_guard()
+                                _save_chat_shift_snapshot(msg)
                             st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                             st.session_state["chat_apply_confirm"] = False
                             st.session_state["chat_discard_confirm"] = False
@@ -9167,7 +9179,7 @@ if mode == "📊 経営者ビュー":
                             help=(
                                 "確定版のロックを解除してから変更履歴を操作してください"
                                 if shift_readjustment_locked
-                                else "元に戻した変更をもう一度反映します"
+                                else "元に戻した変更を青枠プレビューとして復元します"
                             ),
                         ):
                             msg = chat_engine.redo_last_apply()
