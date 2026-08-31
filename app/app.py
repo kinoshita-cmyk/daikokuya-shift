@@ -2111,6 +2111,8 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
             "employee_max_consecutive_off": {},
             "monthly_store_count_rules": [],
             "required_assignments": [],
+            "default_holidays": 8,
+            "allow_omiya_short": None,
         }
     return {
         "work_requests": inputs.get("work_requests", []),
@@ -2125,6 +2127,8 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         "employee_max_consecutive_off": inputs.get("employee_max_consecutive_off", {}),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
         "required_assignments": inputs.get("required_assignments", []),
+        "default_holidays": inputs.get("default_holidays", 8),
+        "allow_omiya_short": inputs.get("allow_omiya_short"),
     }
 
 
@@ -2257,6 +2261,8 @@ def restore_validation_context_for_month(
         "required_assignments": active_monthly_required_assignment_rules(
             rule_cfg, int(year), int(month),
         ),
+        "default_holidays": rule_cfg.parameters.get("default_holiday_days", 8),
+        "allow_omiya_short": None,
     }
     save_validation_context(context)
     return context
@@ -7206,6 +7212,10 @@ if mode == "📊 経営者ビュー":
                         "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
                         "required_assignments": list(use_required_assignments),
+                        "default_holidays": rule_cfg.parameters.get(
+                            "default_holiday_days", 8
+                        ),
+                        "allow_omiya_short": None,
                     })
                     progress_area.empty()
                     if incomplete_manual_draft_used:
@@ -9024,6 +9034,10 @@ if mode == "📊 経営者ビュー":
                         st.session_state["chat_quality_guard"] = next_guard
 
                 pending_count = chat_engine.get_pending_change_count()
+                pending_safety_report = (
+                    chat_engine.inspect_pending_changes()
+                    if pending_count else None
+                )
                 if pending_count:
                     st.warning(
                         f"プレビュー中の変更が **{pending_count}件** あります。"
@@ -9031,6 +9045,34 @@ if mode == "📊 経営者ビュー":
                     )
                     for line in chat_engine.get_pending_change_summary():
                         st.caption(line)
+                    if pending_safety_report.structural_errors:
+                        st.error(
+                            "入力内容に問題があります: "
+                            + " / ".join(
+                                pending_safety_report.structural_errors
+                            )
+                        )
+                    if pending_safety_report.off_request_errors:
+                        st.error(
+                            "本人の絶対休み希望と衝突しています: "
+                            + " / ".join(
+                                pending_safety_report.off_request_errors
+                            )
+                        )
+                    if pending_safety_report.new_errors:
+                        st.error(
+                            "この案は変更前になかったエラーを発生させるため、"
+                            "本シフトへ反映できません。"
+                        )
+                        for issue in pending_safety_report.new_errors[:5]:
+                            st.caption(str(issue))
+                    elif pending_safety_report.new_warnings:
+                        st.warning(
+                            "この案には変更前になかった重要な警告があります。"
+                            "内容を確認した場合だけ反映できます。"
+                        )
+                        for issue in pending_safety_report.new_warnings[:5]:
+                            st.caption(str(issue))
                 elif chat_engine.last_status_message:
                     st.success(chat_engine.last_status_message)
                 else:
@@ -9042,6 +9084,31 @@ if mode == "📊 経営者ビュー":
                     st.markdown("##### 操作")
                     if action_pending_count and st.session_state.get("chat_apply_confirm"):
                         has_quality_regression = bool(quality_regressions)
+                        has_new_errors = bool(
+                            pending_safety_report
+                            and (
+                                pending_safety_report.structural_errors
+                                or pending_safety_report.off_request_errors
+                                or pending_safety_report.new_errors
+                            )
+                        )
+                        has_new_warnings = bool(
+                            pending_safety_report
+                            and pending_safety_report.new_warnings
+                        )
+                        if has_new_errors:
+                            st.error(
+                                "変更前になかったエラーまたは絶対条件違反があるため、"
+                                "この案は反映できません。プレビューを破棄して"
+                                "別の案を作成してください。"
+                            )
+                        if has_new_warnings:
+                            warning_ack = st.checkbox(
+                                "変更前になかった重要な警告を確認しました",
+                                key="chat_new_warning_ack",
+                            )
+                        else:
+                            warning_ack = True
                         if has_quality_regression:
                             st.error(
                                 f"この案は、先に反映した優先調整のうち "
@@ -9071,6 +9138,8 @@ if mode == "📊 経営者ビュー":
                                 width="stretch",
                                 disabled=(
                                     shift_readjustment_locked
+                                    or has_new_errors
+                                    or not warning_ack
                                     or not quality_regression_ack
                                 ),
                                 help=(
@@ -9082,7 +9151,9 @@ if mode == "📊 経営者ビュー":
                                 was_redo_preview = bool(
                                     chat_engine.redo_preview_active
                                 )
-                                msg = chat_engine.apply_pending_changes()
+                                msg = chat_engine.apply_pending_changes(
+                                    allow_new_warnings=has_new_warnings,
+                                )
                                 if was_redo_preview:
                                     _redo_quality_guard()
                                 else:
@@ -9120,6 +9191,9 @@ if mode == "📊 経営者ビュー":
                                 st.session_state["chat_discard_confirm"] = False
                                 st.session_state[
                                     "chat_quality_regression_ack"
+                                ] = False
+                                st.session_state[
+                                    "chat_new_warning_ack"
                                 ] = False
                                 st.rerun()
                         with btn_discard:
