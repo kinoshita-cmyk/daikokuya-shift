@@ -8724,6 +8724,8 @@ if mode == "📊 経営者ビュー":
                 readjustment_goal_prompts = {
                     "飛び石勤務を減らす": (
                         "休み・出勤・休みとなる1日だけの単独出勤を減らしてください。"
+                        "両隣とも本人の×休みの場合は、本人希望による許容として"
+                        "改善対象から除外してください。"
                         "対象の指定がなければ、エコ主力を最優先し、その後ほかの"
                         "通常スタッフも可能な範囲で減らしてください。"
                     ),
@@ -8857,10 +8859,20 @@ if mode == "📊 経営者ビュー":
                         after_work = option.after_metrics.get(
                             "休みに挟まれた単独出勤", 0
                         )
+                        before_requested_exception = option.before_metrics.get(
+                            "本人希望による許容", 0
+                        )
+                        after_requested_exception = option.after_metrics.get(
+                            "本人希望による許容", 0
+                        )
                         option_rows.append({
                             "案": option.title.replace("飛び石勤務の再最適化（", "").rstrip("）"),
                             "勤務交換": f"{len(option.changes) // 4}組",
-                            "飛び石勤務（休・出・休）": f"{before_work} → {after_work}",
+                            "改善対象（休・出・休）": f"{before_work} → {after_work}",
+                            "本人希望による許容": (
+                                f"{before_requested_exception} → "
+                                f"{after_requested_exception}"
+                            ),
                             "変更セル": len(option.changes),
                         })
                     st.dataframe(
@@ -9067,10 +9079,16 @@ if mode == "📊 経営者ビュー":
                                     else "確認したプレビュー変更を本シフトに反映します"
                                 ),
                             ):
-                                msg = chat_engine.apply_pending_changes()
-                                _record_quality_guard_after_apply(
-                                    current_quality_snapshot
+                                was_redo_preview = bool(
+                                    chat_engine.redo_preview_active
                                 )
+                                msg = chat_engine.apply_pending_changes()
+                                if was_redo_preview:
+                                    _redo_quality_guard()
+                                else:
+                                    _record_quality_guard_after_apply(
+                                        current_quality_snapshot
+                                    )
                                 _save_chat_shift_snapshot(msg)
                                 st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                                 st.session_state["chat_apply_confirm"] = False
@@ -9153,8 +9171,6 @@ if mode == "📊 経営者ビュー":
                             ),
                         ):
                             msg = chat_engine.redo_last_apply()
-                            _redo_quality_guard()
-                            _save_chat_shift_snapshot(msg)
                             st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                             st.session_state["chat_apply_confirm"] = False
                             st.session_state["chat_discard_confirm"] = False
@@ -9219,6 +9235,7 @@ if mode == "📊 経営者ビュー":
                     display_shift,
                     chat_result,
                     short_staff_by_store_chat,
+                    off_requests=_cv_off,
                 )
                 quality_regressions = []
                 protected_priorities = []
