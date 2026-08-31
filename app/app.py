@@ -8523,6 +8523,7 @@ if mode == "📊 経営者ビュー":
                     st.session_state.chat_shift_id = id(shift)
                     st.session_state.chat_engine_key = provider_engine_key
                     st.session_state.chat_messages = []
+                    st.session_state.tobishi_reopt_options = []
 
                 chat_engine = st.session_state.chat_engine
                 chat_engine.set_validation_context(
@@ -8591,13 +8592,29 @@ if mode == "📊 経営者ビュー":
                     width="stretch",
                 ):
                     detail = quick_readjustment_detail.strip()
+                    st.session_state.tobishi_reopt_options = []
                     with st.spinner("現在のシフトとルールを確認中..."):
                         try:
-                            if (
-                                selected_readjustment_goal == "飛び石勤務を減らす"
-                                and not detail
-                            ):
-                                msg = chat_engine.propose_tobishi_adjustment()
+                            if selected_readjustment_goal == "飛び石勤務を減らす":
+                                requested_names = [
+                                    employee.name for employee in ALL_EMPLOYEES
+                                    if employee.name in detail
+                                ]
+                                options = chat_engine.find_tobishi_adjustment_options(
+                                    employees=requested_names or None,
+                                    max_swaps=6,
+                                )
+                                st.session_state.tobishi_reopt_options = options
+                                changed_options = [
+                                    option for option in options if option.has_changes
+                                ]
+                                if changed_options:
+                                    msg = (
+                                        f"安全な再最適化候補を{len(changed_options)}案作成しました。"
+                                        "比較表から案を選んでプレビューしてください。"
+                                    )
+                                else:
+                                    msg = options[0].summary
                             elif (
                                 selected_readjustment_goal == "山本の出勤を見直す"
                                 and not detail
@@ -8630,6 +8647,69 @@ if mode == "📊 経営者ビュー":
                         "role": "assistant", "content": msg,
                     })
                     st.rerun()
+
+                tobishi_options = st.session_state.get(
+                    "tobishi_reopt_options", []
+                )
+                changed_tobishi_options = [
+                    option for option in tobishi_options if option.has_changes
+                ]
+                if changed_tobishi_options:
+                    st.markdown("##### 再最適化候補の比較")
+                    option_rows = []
+                    for option in changed_tobishi_options:
+                        before_work = option.before_metrics.get(
+                            "休みに挟まれた単独出勤", 0
+                        )
+                        after_work = option.after_metrics.get(
+                            "休みに挟まれた単独出勤", 0
+                        )
+                        before_off = option.before_metrics.get(
+                            "出勤に挟まれた単独休日", 0
+                        )
+                        after_off = option.after_metrics.get(
+                            "出勤に挟まれた単独休日", 0
+                        )
+                        option_rows.append({
+                            "案": option.title.replace("飛び石勤務の再最適化（", "").rstrip("）"),
+                            "勤務交換": f"{len(option.changes) // 4}組",
+                            "単独出勤": f"{before_work} → {after_work}",
+                            "単独休日": f"{before_off} → {after_off}",
+                            "変更セル": len(option.changes),
+                        })
+                    st.dataframe(
+                        pd.DataFrame(option_rows),
+                        hide_index=True,
+                        width="stretch",
+                    )
+                    selected_option_index = st.radio(
+                        "プレビューする案",
+                        range(len(changed_tobishi_options)),
+                        format_func=lambda index: option_rows[index]["案"],
+                        horizontal=True,
+                        key="selected_tobishi_reopt_option",
+                    )
+                    selected_option = changed_tobishi_options[
+                        selected_option_index
+                    ]
+                    with st.expander("選択中の案の詳細", expanded=False):
+                        st.write(selected_option.summary)
+                        for note_line in selected_option.notes:
+                            st.write(f"- {note_line}")
+                    if st.button(
+                        "選択した案をプレビュー",
+                        key="preview_selected_tobishi_option",
+                        type="primary",
+                        width="stretch",
+                    ):
+                        msg = chat_engine.preview_adjustment_proposal(
+                            selected_option
+                        )
+                        st.session_state.chat_messages.append({
+                            "role": "assistant", "content": msg,
+                        })
+                        st.session_state.tobishi_reopt_options = []
+                        st.rerun()
 
                 st.markdown("##### 📋 現在のシフト表")
                 st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
