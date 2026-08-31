@@ -291,6 +291,9 @@ def build_effective_rule_visibility_rows(
     """生成・検証が実際に参照する主要ルールを表示用にまとめる。"""
     from prototype.rules import (
         HARD_CONSTRAINTS,
+        MONTH_EDGE_FIXED_EMPLOYEES,
+        MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
+        OMIYA_TWO_PERSON_EXCLUDED_STAFF,
         fixed_suzuran_core_presence_rules,
         load_monthly_exceptions_raw,
         yamamoto_monthly_policy,
@@ -344,17 +347,39 @@ def build_effective_rule_visibility_rows(
 
     rows = [
         {
-            "対象": "一般スタッフ",
+            "対象": "・".join(OMIYA_TWO_PERSON_EXCLUDED_STAFF),
+            "ルール": "大宮駅前2名体制の構成員",
+            "適用範囲": "全月固定",
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                "大宮駅前が終日2名体制になる日は、大塚・南を構成員に"
+                "しない。大塚・南を大宮へ配置する場合は合計3名以上にする。"
+            ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "・".join(MONTH_EDGE_FIXED_EMPLOYEES),
+            "ルール": "月初固定勤務者の月末連勤",
+            "適用範囲": "全月固定",
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                "翌月1日の固定勤務とつながって6連勤にならないよう、"
+                f"月末時点は最大{MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF}連勤にする。"
+            ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "エコ主力（従業員マスタで指定）",
             "ルール": "飛び石勤務の回避",
             "適用範囲": "全月固定",
             "強さ": "強い目標 / WARNING",
             "現在有効な内容": (
-                "休・出・休となる単独出勤を強く避け、"
+                "エコ主力について、休・出・休となる単独出勤を強く避け、"
                 "出・休・出となる単独休日も可能な範囲で減らす。"
                 "本人の×休み希望、必要人数、月別配置を優先するため、"
                 "避けられない場合はWARNINGで確認する。"
             ),
-            "変更場所": "固定ルール",
+            "変更場所": "従業員マスタ > エコ主力",
         },
         {
             "対象": fixed_pair_names,
@@ -8218,6 +8243,114 @@ if mode == "📊 経営者ビュー":
                 help="オフにすると、従来に近い白黒のExcel・PDFとして出力します。",
             )
 
+            st.markdown("#### 📝 調整用ドラフト")
+            st.caption(
+                "本人が提出した「絶対休み希望」のセルを赤枠で表示した"
+                "ExcelとPDFを同時に作成します。社内調整用であり、確定版には赤枠を付けません。"
+            )
+            draft_context = get_validation_context_for_shift(shift)
+            draft_off_request_cells = build_off_request_cells(
+                draft_context.get("off_requests", {}),
+            )
+            if not draft_off_request_cells:
+                draft_restore_key = (
+                    f"draft_context_restored_{int(shift.year):04d}_{int(shift.month):02d}"
+                )
+                if not st.session_state.get(draft_restore_key):
+                    try:
+                        draft_context = restore_validation_context_for_month(
+                            int(shift.year), int(shift.month), rule_cfg,
+                        )
+                        draft_off_request_cells = build_off_request_cells(
+                            draft_context.get("off_requests", {}),
+                        )
+                    except Exception as exc:
+                        _startup_log(
+                            "draft export preference restore failed: "
+                            f"{int(shift.year):04d}-{int(shift.month):02d} "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    st.session_state[draft_restore_key] = True
+
+            if st.button(
+                "📝 調整用ドラフトを出力",
+                key=f"gen_adjustment_draft_{int(shift.year)}_{int(shift.month)}",
+                type="primary",
+            ):
+                from prototype.excel_exporter import (
+                    DEFAULT_FOOTER_NOTES,
+                    export_shift_to_excel,
+                )
+                from prototype.pdf_exporter import export_shift_to_pdf
+
+                draft_title = (
+                    f"{shift.year}年{shift.month}月の目標とシフト表  調整用ドラフト"
+                )
+                draft_footer_notes = [
+                    "※赤枠は、本人が提出した「絶対休み希望」です。",
+                    *(footer_notes if footer_notes else DEFAULT_FOOTER_NOTES),
+                ]
+                draft_xlsx_path = output_dir / (
+                    f"{shift.year}年{shift.month}月_調整用ドラフト.xlsx"
+                )
+                draft_pdf_path = output_dir / (
+                    f"{shift.year}年{shift.month}月_調整用ドラフト.pdf"
+                )
+                call_with_supported_kwargs(
+                    export_shift_to_excel,
+                    shift, draft_xlsx_path,
+                    title=draft_title,
+                    header_comments=header_comments,
+                    footer_notes=draft_footer_notes,
+                    short_staff_days=short_staff_for_export,
+                    key_warnings_by_store=key_warnings_for_export,
+                    color_output=color_output,
+                    off_request_cells=draft_off_request_cells,
+                )
+                call_with_supported_kwargs(
+                    export_shift_to_pdf,
+                    shift, draft_pdf_path,
+                    title=draft_title,
+                    header_notes=header_comments,
+                    footer_notes=draft_footer_notes,
+                    short_staff_days=short_staff_for_export,
+                    key_warnings_by_store=key_warnings_for_export,
+                    color_output=color_output,
+                    off_request_cells=draft_off_request_cells,
+                )
+                st.success(
+                    f"✅ 調整用ドラフトを作成しました（赤枠 {len(draft_off_request_cells)}セル）"
+                )
+
+            draft_xlsx_path = output_dir / (
+                f"{shift.year}年{shift.month}月_調整用ドラフト.xlsx"
+            )
+            draft_pdf_path = output_dir / (
+                f"{shift.year}年{shift.month}月_調整用ドラフト.pdf"
+            )
+            draft_download_col1, draft_download_col2 = st.columns(2)
+            if draft_xlsx_path.exists():
+                with open(draft_xlsx_path, "rb") as f:
+                    draft_download_col1.download_button(
+                        "⬇ 調整用Excelをダウンロード",
+                        data=f.read(),
+                        file_name=draft_xlsx_path.name,
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"dl_adjustment_xlsx_{int(shift.year)}_{int(shift.month)}",
+                    )
+            if draft_pdf_path.exists():
+                with open(draft_pdf_path, "rb") as f:
+                    draft_download_col2.download_button(
+                        "⬇ 調整用PDFをダウンロード",
+                        data=f.read(),
+                        file_name=draft_pdf_path.name,
+                        mime="application/pdf",
+                        key=f"dl_adjustment_pdf_{int(shift.year)}_{int(shift.month)}",
+                    )
+
+            st.markdown("---")
+            st.markdown("#### 確定版・通常出力")
+
             col_x, col_p = st.columns(2)
             with col_x:
                 st.write("**📁 Excel 形式（編集可）**")
@@ -10474,7 +10607,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "店舗・人数", "大宮駅前店の基本体制",
-                "通常はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。不足時だけ2名体制を警告扱い。",
+                "通常はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。不足時だけ2名体制を警告扱い。2名体制には大塚さん・南さんを含めない。",
                 "反映中", "反映中", "人員少表示・Excel/PDFに反映",
                 "コード固定", "反映中",
                 "春山さん・下地さんのどちらか必須。",
@@ -10578,7 +10711,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "スタッフ別", "月末月初の固定配置",
-                "下地さん・春山さん・黒澤さんは大宮駅前、各店店長（今津さん=赤羽、土井さん=東口、下地さん=大宮、長尾さん=すずらん、楯さん=西口）は自店舗。本人の×休み希望日と店舗休業日は固定対象外。",
+                "下地さん・春山さん・黒澤さんは大宮駅前、各店店長（今津さん=赤羽、土井さん=東口、下地さん=大宮、長尾さん=すずらん、楯さん=西口）は自店舗。本人の×休み希望日と店舗休業日は固定対象外。対象7名は月末最大4連勤。",
                 "反映中", "反映中", "検証結果に表示",
                 "コード固定", "反映中",
             ),
@@ -11158,6 +11291,7 @@ elif mode == "⚙️ 設定":
                     "フルネーム": e.full_name or "-",
                     "役職": e.role.value,
                     "スキル": e.skill.value,
+                    "勤務区分": "エコ主力" if getattr(e, "is_eco_core", False) else "-",
                     "雇用形態": e.employment_status.value,
                     "ホーム店舗": e.home_store.display_name if e.home_store else "-",
                     "年間目標日数": e.annual_target_days if e.annual_target_days else "-",
@@ -11237,6 +11371,14 @@ elif mode == "⚙️ 設定":
                         new_notes = st.text_area(
                             "備考", value=target.notes, height=100,
                         )
+                        new_is_eco_core = st.checkbox(
+                            "エコ主力（飛び石勤務回避の対象）",
+                            value=bool(getattr(target, "is_eco_core", False)),
+                            help=(
+                                "店長・副店長など、勤務をできるだけまとめたい"
+                                "独り立ち済みのエコ担当に設定します。"
+                            ),
+                        )
                     edit_actor = st.text_input(
                         "実行者", value="代表取締役", key="edit_actor",
                     )
@@ -11247,6 +11389,9 @@ elif mode == "⚙️ 設定":
 
                     submit = st.form_submit_button("💾 変更を保存", type="primary")
                     if submit:
+                        if new_is_eco_core and Skill(new_skill) != Skill.ECO:
+                            st.error("❌ エコ主力は、スキルが「エコ」の従業員だけに設定できます")
+                            st.stop()
                         updates = {
                             "full_name": new_full_name or None,
                             "role": new_role,
@@ -11258,6 +11403,7 @@ elif mode == "⚙️ 設定":
                             ),
                             "annual_target_days": new_target_days if new_target_days > 0 else None,
                             "notes": new_notes,
+                            "is_eco_core": bool(new_is_eco_core),
                         }
                         success = emp_mgr.update_employee(
                             name=target_name, updates=updates,
@@ -11370,6 +11516,11 @@ elif mode == "⚙️ 設定":
                         value=265,  # 新入社員の標準値
                         help="一般正社員の標準は265日",
                     )
+                    new_emp_is_eco_core = st.checkbox(
+                        "エコ主力（飛び石勤務回避の対象）",
+                        value=False,
+                        help="店長・副店長などの独り立ち済みエコ担当だけに設定します。",
+                    )
 
                 new_emp_notes = st.text_area(
                     "備考",
@@ -11382,6 +11533,8 @@ elif mode == "⚙️ 設定":
                 if submit_add:
                     if not new_name:
                         st.error("❌ 表示名は必須です")
+                    elif new_emp_is_eco_core and Skill(new_emp_skill) != Skill.ECO:
+                        st.error("❌ エコ主力は、スキルが「エコ」の従業員だけに設定できます")
                     else:
                         new_emp = Employee(
                             name=new_name.strip(),
@@ -11401,6 +11554,7 @@ elif mode == "⚙️ 設定":
                             annual_target_days=new_target if new_target > 0 else None,
                             hired_at=new_hired_date.isoformat(),
                             notes=new_emp_notes,
+                            is_eco_core=bool(new_emp_is_eco_core),
                         )
                         success = emp_mgr.add_employee(
                             new_emp, actor=add_actor,
