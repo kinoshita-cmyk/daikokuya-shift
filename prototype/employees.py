@@ -380,16 +380,54 @@ EXECUTIVES: list[Employee] = [
 ALL_EMPLOYEES: list[Employee] = ECO_STAFF + TICKET_STAFF + EXECUTIVES
 
 
+_DYNAMIC_EMPLOYEE_CACHE: dict[str, Employee] = {}
+_DYNAMIC_EMPLOYEE_CACHE_SIGNATURE: tuple[int, int] | None = None
+
+
+def _dynamic_employee_map() -> dict[str, Employee]:
+    """Load the runtime employee master once per local config revision.
+
+    Validation calls ``get_employee`` hundreds of times.  Re-reading the JSON
+    and checking the remote backup on every cell made one validation take
+    seconds.  The file mtime/size pair invalidates this cache immediately after
+    a settings save or restored config update.
+    """
+    global _DYNAMIC_EMPLOYEE_CACHE, _DYNAMIC_EMPLOYEE_CACHE_SIGNATURE
+
+    from .employee_config import get_manager
+
+    manager = get_manager()
+    try:
+        stat = manager.config_file.stat()
+        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        signature = (-1, -1)
+    if (
+        _DYNAMIC_EMPLOYEE_CACHE
+        and _DYNAMIC_EMPLOYEE_CACHE_SIGNATURE == signature
+    ):
+        return _DYNAMIC_EMPLOYEE_CACHE
+
+    employees = manager.load_all()
+    try:
+        stat = manager.config_file.stat()
+        signature = (int(stat.st_mtime_ns), int(stat.st_size))
+    except OSError:
+        signature = (-1, -1)
+    _DYNAMIC_EMPLOYEE_CACHE = {employee.name: employee for employee in employees}
+    _DYNAMIC_EMPLOYEE_CACHE_SIGNATURE = signature
+    return _DYNAMIC_EMPLOYEE_CACHE
+
+
 def get_employee(name: str) -> Employee:
     """
     名前で従業員を取得（employee_config の動的設定を優先）
     """
     # employee_config の動的設定（JSONファイル）を優先
     try:
-        from .employee_config import get_all_employees_including_retired
-        for e in get_all_employees_including_retired():
-            if e.name == name:
-                return e
+        employee = _dynamic_employee_map().get(name)
+        if employee is not None:
+            return employee
     except ImportError:
         pass
     # フォールバック: employees.py のハードコード値

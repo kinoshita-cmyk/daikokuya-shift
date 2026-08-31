@@ -43,6 +43,7 @@ from .shift_readjuster import (
     AdjustmentProposal,
     propose_tobishi_reduction,
     propose_yamamoto_cleanup,
+    tobishi_days,
 )
 from .validator import validate
 
@@ -66,7 +67,11 @@ SYSTEM_PROMPT = """\
 - 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
 - 本人が提出した「×」休み希望日は絶対に勤務へ変更しない
 - 制約違反のリスクがある場合は警告する
-- 「飛び石を減らして」のような目的指定には、専用の再調整ツールを優先する
+- 「飛び石を減らして」のような目的指定には、専用の広域再調整ツールを優先する
+- 専用ツールは単独出勤・単独休日と複数の相互入れ替えを比較する。候補なしの場合は
+  「不可能」と断定せず、その探索範囲では見つからなかったと説明する
+- 飛び石以外の依頼は get_adjustment_overview で全体像を確認してから、必要な日・人の
+  詳細を取得し、複数の変更を組み合わせて検討する
 - 山本は赤羽で本当に必要な日のみ自動出勤し、それ以外は空欄とする
 - 曖昧な依頼は勝手に決めず、確認に必要な日・従業員・店舗を質問する
 - 変更できない場合は、守る必要がある条件と、緩めれば可能になる条件を説明する
@@ -86,6 +91,32 @@ SYSTEM_PROMPT = """\
 # ============================================================
 
 TOOLS = [
+    {
+        "name": "get_adjustment_overview",
+        "description": (
+            "再調整したい観点について、現在の勤務日数、飛び石、店舗配分、"
+            "エラー・警告をまとめて取得します。個別の変更を考える前に使用します"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "enum": [
+                        "tobishi", "yamamoto", "staffing", "consecutive",
+                        "store_balance", "workdays", "training", "overall",
+                    ],
+                    "description": "確認したい調整目的",
+                },
+                "employees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "重点確認する従業員。省略時は全員",
+                },
+            },
+            "required": ["objective"],
+        },
+    },
     {
         "name": "get_day_assignments",
         "description": "指定した日の全員の配属を取得します",
@@ -175,7 +206,7 @@ TOOLS = [
                 "max_swaps": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 4,
+                    "maximum": 6,
                     "description": "提案する相互入れ替えの最大組数",
                 },
             },
@@ -444,6 +475,87 @@ class ShiftChatEngine:
         ym_day = f"{self.shift.month}/{day}"
         return f"{ym_day}日の配属:\n" + "\n".join(result) if result else f"{ym_day}日: 配属なし"
 
+    def _tool_get_adjustment_overview(
+        self,
+        objective: str,
+        employees: Optional[list[str]] = None,
+    ) -> str:
+        """Return compact facts the AI needs before planning a re-adjustment."""
+        from calendar import monthrange
+
+        preview = self._apply_pending_to_shift()
+        names = [
+            name for name in (employees or [emp.name for emp in ALL_EMPLOYEES])
+            if any(a.employee == name for a in preview.assignments)
+        ]
+        days = monthrange(preview.year, preview.month)[1]
+        lines = [
+            f"{preview.year}年{preview.month}月 / 調整目的: {objective}",
+            "対象: " + ("、".join(names) if names else "該当者なし"),
+        ]
+
+        for name in names:
+            assignments = [
+                a for a in preview.assignments
+                if a.employee == name and a.store != Store.OFF
+            ]
+            store_counts: dict[str, int] = {}
+            for assignment in assignments:
+                label = assignment.store.display_name
+                store_counts[label] = store_counts.get(label, 0) + 1
+            working = {
+                day: bool(
+                    (assignment := preview.get_assignment(name, day))
+                    and assignment.store != Store.OFF
+                )
+                for day in range(1, days + 1)
+            }
+            longest = 0
+            current = 0
+            for day in range(1, days + 1):
+                if working[day]:
+                    current += 1
+                    longest = max(longest, current)
+                else:
+                    current = 0
+            isolated_work, isolated_off = tobishi_days(preview, name)
+            store_text = "、".join(
+                f"{store}:{count}日" for store, count in sorted(store_counts.items())
+            ) or "なし"
+            lines.append(
+                f"- {name}: 出勤{len(assignments)}日 / 最長{longest}連勤 / "
+                f"単独出勤{isolated_work or 'なし'} / 単独休日{isolated_off or 'なし'} / "
+                f"配分 {store_text}"
+            )
+
+        validation = self._validate_shift_with_context(preview)
+        relevant_categories = {
+            "tobishi": ("飛び石勤務",),
+            "yamamoto": ("店舗人数", "全体人数"),
+            "staffing": ("店舗人数", "全体人数", "技能構成"),
+            "consecutive": ("連勤", "月末連勤"),
+            "store_balance": ("店舗バランス", "店舗人数"),
+            "workdays": ("月間勤務日数", "休日数"),
+            "training": ("研修", "絶対配置不可", "店舗人数"),
+            "overall": tuple(),
+        }
+        filters = relevant_categories.get(objective, tuple())
+        issues = [
+            issue for issue in validation.issues
+            if not filters or any(key in issue.category for key in filters)
+        ]
+        lines.append(
+            f"検証: エラー{validation.error_count}件 / 警告{validation.warning_count}件"
+        )
+        if issues:
+            lines.append("関連する指摘:")
+            lines.extend(f"- {issue}" for issue in issues[:20])
+            if len(issues) > 20:
+                lines.append(f"- ...他 {len(issues) - 20}件")
+        else:
+            lines.append("関連する指摘: なし")
+        return "\n".join(lines)
+
     def _tool_get_employee_schedule(self, employee: str) -> str:
         from calendar import monthrange
         days = monthrange(self.shift.year, self.shift.month)[1]
@@ -624,7 +736,7 @@ class ShiftChatEngine:
     def propose_tobishi_adjustment(
         self,
         employees: Optional[list[str]] = None,
-        max_swaps: int = 2,
+        max_swaps: int = 4,
     ) -> str:
         """画面の簡単操作から飛び石再調整案を作る。"""
         return self._tool_optimize_tobishi(employees, max_swaps)
@@ -660,7 +772,11 @@ class ShiftChatEngine:
     # ========== ツールルーター ==========
 
     def _execute_tool(self, name: str, args: dict) -> str:
-        if name == "get_day_assignments":
+        if name == "get_adjustment_overview":
+            return self._tool_get_adjustment_overview(
+                args["objective"], args.get("employees")
+            )
+        elif name == "get_day_assignments":
             return self._tool_get_day_assignments(args["day"])
         elif name == "get_employee_schedule":
             return self._tool_get_employee_schedule(args["employee"])
@@ -783,7 +899,7 @@ class ShiftChatEngine:
         self.openai_previous_response_id = getattr(response, "id", None)
         return "（応答生成中にツール呼び出しが多すぎました）"
 
-    def chat(self, user_message: str, max_iterations: int = 5) -> str:
+    def chat(self, user_message: str, max_iterations: int = 10) -> str:
         """ユーザーメッセージに応答（ツール呼び出しを含む）。"""
         if self.provider == "openai":
             return self._chat_openai(user_message, max_iterations)

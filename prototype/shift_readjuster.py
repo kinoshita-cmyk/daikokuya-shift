@@ -239,6 +239,187 @@ def _diff(original: MonthlyShift, adjusted: MonthlyShift) -> list[ProposedChange
     return changes
 
 
+def _shift_state_key(shift: MonthlyShift) -> tuple:
+    """Return a stable key for de-duplicating local-search states."""
+    return tuple(sorted(
+        (
+            assignment.employee,
+            int(assignment.day),
+            assignment.store.value,
+            bool(assignment.is_paid_leave),
+        )
+        for assignment in shift.assignments
+    ))
+
+
+def _off_request_days(context: Optional[dict], employee: str) -> set[int]:
+    raw_days = (context or {}).get("off_requests", {}).get(employee, []) or []
+    result = set()
+    for day in raw_days:
+        try:
+            result.add(int(day))
+        except (TypeError, ValueError):
+            continue
+    return result
+
+
+def _assignment_map(shift: MonthlyShift) -> dict[tuple[str, int], ShiftAssignment]:
+    return {
+        (assignment.employee, int(assignment.day)): assignment
+        for assignment in shift.assignments
+    }
+
+
+def _apply_reciprocal_swap(
+    shift: MonthlyShift,
+    *,
+    target: str,
+    other: str,
+    target_work_day: int,
+    target_off_day: int,
+) -> MonthlyShift:
+    """Swap work/off across two days while preserving daily store counts."""
+    candidate = clone_shift(shift)
+    target_work = shift.get_assignment(target, target_work_day)
+    other_work = shift.get_assignment(other, target_off_day)
+    if target_work is None or other_work is None:
+        return candidate
+
+    _replace_assignment(candidate, target, target_work_day, Store.OFF)
+    _replace_assignment(candidate, other, target_work_day, target_work.store)
+    _replace_assignment(candidate, target, target_off_day, other_work.store)
+    _replace_assignment(candidate, other, target_off_day, Store.OFF)
+    return candidate
+
+
+def _candidate_swaps(
+    shift: MonthlyShift,
+    *,
+    requested: list[str],
+    all_core: list[str],
+    validation_context: Optional[dict],
+) -> list[tuple]:
+    """Enumerate direct improvements for isolated work and isolated off days."""
+    employee_names = sorted({a.employee for a in shift.assignments})
+    assignments = _assignment_map(shift)
+    working_by_employee = {
+        name: _working_map(shift, name)
+        for name in employee_names
+    }
+    score_by_employee = {
+        name: _tobishi_score(_metrics_from_working(working))
+        for name, working in working_by_employee.items()
+    }
+    current_target_score = sum(score_by_employee.get(name, 0) for name in requested)
+    current_global_score = sum(score_by_employee.get(name, 0) for name in all_core)
+    requested_set = set(requested)
+    all_core_set = set(all_core)
+    off_request_cache = {
+        name: _off_request_days(validation_context, name)
+        for name in employee_names
+    }
+    ranked = []
+
+    for target in requested:
+        target_working = working_by_employee.get(target)
+        if not target_working:
+            continue
+        isolated_work_days, isolated_off_days = tobishi_days(shift, target)
+        isolated_work_set = set(isolated_work_days)
+        isolated_off_set = set(isolated_off_days)
+
+        for target_work_day, target_is_working in target_working.items():
+            if not target_is_working:
+                continue
+            target_work = assignments.get((target, target_work_day))
+            if target_work is None or target_work.is_paid_leave:
+                continue
+
+            for target_off_day, is_working in target_working.items():
+                if is_working or target_off_day == target_work_day:
+                    continue
+                # A move must directly address at least one current tobishi edge.
+                if (
+                    target_work_day not in isolated_work_set
+                    and target_off_day not in isolated_off_set
+                ):
+                    continue
+                target_off = assignments.get((target, target_off_day))
+                if target_off and target_off.is_paid_leave:
+                    continue
+                if target_off_day in off_request_cache.get(target, set()):
+                    continue
+
+                target_after = dict(target_working)
+                target_after[target_work_day] = False
+                target_after[target_off_day] = True
+                target_after_score = _tobishi_score(
+                    _metrics_from_working(target_after)
+                )
+
+                for other in employee_names:
+                    if other in {target, YamamotoLogic.EMPLOYEE_NAME}:
+                        continue
+                    other_at_target_work = assignments.get((other, target_work_day))
+                    other_at_target_off = assignments.get((other, target_off_day))
+                    if other_at_target_work is None or other_at_target_off is None:
+                        continue
+                    if other_at_target_work.store != Store.OFF:
+                        continue
+                    if other_at_target_off.store == Store.OFF:
+                        continue
+                    if (
+                        other_at_target_work.is_paid_leave
+                        or other_at_target_off.is_paid_leave
+                    ):
+                        continue
+                    if target_work_day in off_request_cache.get(other, set()):
+                        continue
+
+                    other_after_score = score_by_employee.get(other, 0)
+                    if other in all_core_set or other in requested_set:
+                        other_after = dict(working_by_employee[other])
+                        other_after[target_work_day] = True
+                        other_after[target_off_day] = False
+                        other_after_score = _tobishi_score(
+                            _metrics_from_working(other_after)
+                        )
+
+                    target_score = (
+                        current_target_score
+                        - score_by_employee.get(target, 0)
+                        + target_after_score
+                    )
+                    if other in requested_set:
+                        target_score += (
+                            other_after_score - score_by_employee.get(other, 0)
+                        )
+                    if target_score >= current_target_score:
+                        continue
+
+                    global_score = (
+                        current_global_score
+                        - score_by_employee.get(target, 0)
+                        + target_after_score
+                    )
+                    if other in all_core_set:
+                        global_score += (
+                            other_after_score - score_by_employee.get(other, 0)
+                        )
+
+                    ranked.append((
+                        target_score,
+                        global_score,
+                        target_work_day,
+                        target_off_day,
+                        target,
+                        other,
+                    ))
+
+    ranked.sort(key=lambda item: item)
+    return ranked
+
+
 def propose_tobishi_reduction(
     shift: MonthlyShift,
     *,
@@ -247,11 +428,11 @@ def propose_tobishi_reduction(
     employee_names: Optional[Iterable[str]] = None,
     max_swaps: int = 4,
 ) -> AdjustmentProposal:
-    """Propose reciprocal day swaps that reduce eco-core tobishi patterns.
+    """Search multiple reciprocal swaps that reduce eco-core tobishi patterns.
 
-    Each accepted move swaps work/off between two employees on two days.  This
-    keeps every day's store headcount and both employees' monthly work counts
-    unchanged, while the validator prevents new hard violations.
+    The search handles both isolated work days and isolated off days.  It keeps
+    every day's store headcount and every employee's monthly work count fixed,
+    explores several safe paths, and chooses the smallest best improvement.
     """
     original = clone_shift(shift)
     working_shift = clone_shift(shift)
@@ -264,140 +445,82 @@ def propose_tobishi_reduction(
         )
 
     before_metrics = _tobishi_metrics(working_shift, requested)
-    current_global = _tobishi_metrics(working_shift, all_core)
+    before_global = _tobishi_metrics(working_shift, all_core)
+    before_target_score = _tobishi_score(before_metrics)
+    before_global_score = _tobishi_score(before_global)
     validation = validate_with_context(working_shift, validation_context, max_consec)
-    off_requests = (validation_context or {}).get("off_requests", {}) or {}
-    employee_names_in_shift = sorted({a.employee for a in working_shift.assignments})
-    accepted_swaps = 0
-    candidate_history: list[MonthlyShift] = []
 
-    while accepted_swaps < min(4, max(0, int(max_swaps))):
-        current_target = _tobishi_metrics(working_shift, requested)
-        current_target_score = _tobishi_score(current_target)
-        current_global_score = _tobishi_score(current_global)
-        working_by_employee = {
-            name: _working_map(working_shift, name)
-            for name in employee_names_in_shift
-        }
-        score_by_employee = {
-            name: _tobishi_score(_metrics_from_working(working))
-            for name, working in working_by_employee.items()
-        }
-        ranked_candidates = []
+    # A small beam is enough for a monthly roster while still exploring paths
+    # beyond the first greedy swap.  Each state has already passed validation.
+    max_depth = min(6, max(0, int(max_swaps)))
+    beam_width = 18
+    candidates_per_state = 70
+    beam: list[tuple[MonthlyShift, int]] = [(clone_shift(original), 0)]
+    seen = {_shift_state_key(original)}
+    safe_improvements: list[tuple[tuple, MonthlyShift, int]] = []
+    validated_state_count = 0
 
-        for target in requested:
-            target_working = working_by_employee[target]
-            isolated_work_days, _ = tobishi_days(working_shift, target)
-            for work_day in isolated_work_days:
-                target_work = working_shift.get_assignment(target, work_day)
-                if not target_work or target_work.is_paid_leave:
+    for _depth in range(1, max_depth + 1):
+        raw_candidates: list[tuple[tuple, MonthlyShift, int]] = []
+        for state_shift, swap_count in beam:
+            swap_candidates = _candidate_swaps(
+                state_shift,
+                requested=requested,
+                all_core=all_core,
+                validation_context=validation_context,
+            )
+            for swap in swap_candidates[:candidates_per_state]:
+                target_score, global_score, work_day, off_day, target, other = swap
+                candidate = _apply_reciprocal_swap(
+                    state_shift,
+                    target=target,
+                    other=other,
+                    target_work_day=work_day,
+                    target_off_day=off_day,
+                )
+                state_key = _shift_state_key(candidate)
+                if state_key in seen:
                     continue
-                for off_day, target_is_working in target_working.items():
-                    if target_is_working or off_day == work_day:
-                        continue
-                    target_off = working_shift.get_assignment(target, off_day)
-                    if target_off and target_off.is_paid_leave:
-                        continue
-                    if off_day in {int(d) for d in off_requests.get(target, [])}:
-                        continue
-                    for other in employee_names_in_shift:
-                        if other == target or other == YamamotoLogic.EMPLOYEE_NAME:
-                            continue
-                        other_at_work_day = working_shift.get_assignment(other, work_day)
-                        other_at_off_day = working_shift.get_assignment(other, off_day)
-                        if not other_at_work_day or not other_at_off_day:
-                            continue
-                        if other_at_work_day.store != Store.OFF:
-                            continue
-                        if other_at_off_day.store == Store.OFF:
-                            continue
-                        if other_at_work_day.is_paid_leave or other_at_off_day.is_paid_leave:
-                            continue
-                        if work_day in {int(d) for d in off_requests.get(other, [])}:
-                            continue
+                seen.add(state_key)
+                change_count = len(_diff(original, candidate))
+                rank = (target_score, global_score, change_count, target, other)
+                raw_candidates.append((rank, candidate, swap_count + 1))
 
-                        target_after = dict(target_working)
-                        target_after[work_day] = False
-                        target_after[off_day] = True
-                        target_after_score = _tobishi_score(
-                            _metrics_from_working(target_after)
-                        )
-                        target_score = (
-                            current_target_score
-                            - score_by_employee[target]
-                            + target_after_score
-                        )
-
-                        other_after_score = score_by_employee.get(other, 0)
-                        if other in all_core or other in requested:
-                            other_after = dict(working_by_employee[other])
-                            other_after[work_day] = True
-                            other_after[off_day] = False
-                            other_after_score = _tobishi_score(
-                                _metrics_from_working(other_after)
-                            )
-                        if other in requested:
-                            target_score += (
-                                other_after_score - score_by_employee[other]
-                            )
-                        global_score = current_global_score
-                        global_score += target_after_score - score_by_employee[target]
-                        if other in all_core:
-                            global_score += (
-                                other_after_score - score_by_employee[other]
-                            )
-                        if target_score >= current_target_score:
-                            continue
-                        if global_score >= current_global_score:
-                            continue
-                        ranked_candidates.append((
-                            target_score,
-                            global_score,
-                            work_day,
-                            off_day,
-                            target,
-                            other,
-                            target_work.store,
-                            other_at_off_day.store,
-                        ))
-
-        if not ranked_candidates:
+        if not raw_candidates:
             break
 
-        ranked_candidates.sort(key=lambda item: item[:6])
-        candidate_info = ranked_candidates[0]
-        _, _, work_day, off_day, target, other, work_store, other_store = (
-            candidate_info
-        )
-        candidate = clone_shift(working_shift)
-        _replace_assignment(candidate, target, work_day, Store.OFF)
-        _replace_assignment(candidate, other, work_day, work_store)
-        _replace_assignment(candidate, target, off_day, other_store)
-        _replace_assignment(candidate, other, off_day, Store.OFF)
-        working_shift = candidate
-        current_global = _tobishi_metrics(working_shift, all_core)
-        candidate_history.append(clone_shift(working_shift))
-        accepted_swaps += 1
+        raw_candidates.sort(key=lambda item: item[0])
+        next_beam: list[tuple[MonthlyShift, int]] = []
+        for rank, candidate, swap_count in raw_candidates[:beam_width * 5]:
+            trial_validation = validate_with_context(
+                candidate, validation_context, max_consec
+            )
+            validated_state_count += 1
+            if trial_validation.error_count > validation.error_count:
+                continue
+            if _new_protected_issues(validation, trial_validation):
+                continue
 
-    # Full monthly validation is expensive, so validate complete proposals
-    # from best to smallest instead of validating every pattern-only candidate.
-    safe_shift = None
-    safe_swap_count = 0
-    for index in range(len(candidate_history) - 1, -1, -1):
-        trial = candidate_history[index]
-        trial_validation = validate_with_context(
-            trial, validation_context, max_consec
-        )
-        if trial_validation.error_count > validation.error_count:
-            continue
-        if _new_protected_issues(validation, trial_validation):
-            continue
-        safe_shift = trial
-        safe_swap_count = index + 1
-        break
-    if safe_shift is not None:
-        working_shift = safe_shift
-        accepted_swaps = safe_swap_count
+            next_beam.append((candidate, swap_count))
+            target_score, global_score, change_count = rank[:3]
+            if (
+                target_score < before_target_score
+                and global_score <= before_global_score
+            ):
+                safe_improvements.append((
+                    (target_score, global_score, change_count, swap_count),
+                    clone_shift(candidate),
+                    swap_count,
+                ))
+            if len(next_beam) >= beam_width:
+                break
+        beam = next_beam
+        if not beam:
+            break
+
+    safe_improvements.sort(key=lambda item: item[0])
+    if safe_improvements:
+        _, working_shift, accepted_swaps = safe_improvements[0]
     else:
         working_shift = clone_shift(original)
         accepted_swaps = 0
@@ -409,11 +532,17 @@ def propose_tobishi_reduction(
             title="飛び石勤務の再調整",
             summary=(
                 "本人の×休み、店舗人数、月間勤務日数、ほかの絶対条件を守ったまま"
-                "改善できる安全な入れ替えは見つかりませんでした。"
+                "改善できる候補を、このシフトの広域再探索では見つけられませんでした。"
             ),
             before_metrics=before_metrics,
             after_metrics=after_metrics,
-            notes=["対象: " + "、".join(requested)],
+            notes=[
+                "対象: " + "、".join(requested),
+                (
+                    "単独出勤・単独休日の両方と、複数の相互入れ替えを比較しました"
+                    f"（安全性を確認した候補 {validated_state_count}件）。"
+                ),
+            ],
         )
 
     return AdjustmentProposal(
@@ -427,7 +556,11 @@ def propose_tobishi_reduction(
         after_metrics=after_metrics,
         notes=[
             "対象: " + "、".join(requested),
-            "新しいエラーや飛び石以外の警告を増やさない候補だけを採用しました。",
+            (
+                f"安全性を確認した候補 {validated_state_count}件のうち、"
+                f"条件を満たす改善案 {len(safe_improvements)}件を比較しました。"
+            ),
+            "本人の×休み、新しいエラー、飛び石以外の新しい警告を増やさない候補だけを採用しました。",
         ],
     )
 
