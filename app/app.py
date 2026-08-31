@@ -406,15 +406,15 @@ def build_effective_rule_visibility_rows(
             "変更場所": "固定ルール",
         },
         {
-            "対象": "エコ主力（従業員マスタで指定）",
+            "対象": "全スタッフ（エコ主力を最優先）",
             "ルール": "飛び石勤務の回避",
             "適用範囲": "全月固定",
-            "強さ": "強い目標 / WARNING",
+            "強さ": "エコ主力: 強い目標 / WARNING、その他: 弱い目標",
             "現在有効な内容": (
-                "エコ主力について、休・出・休となる単独出勤を強く避け、"
-                "出・休・出となる単独休日も可能な範囲で減らす。"
-                "本人の×休み希望、必要人数、月別配置を優先するため、"
-                "避けられない場合はWARNINGで確認する。"
+                "飛び石勤務は「休み・出勤・休み」の1日だけの単独出勤を指す。"
+                "エコ主力は強く回避し、その他のスタッフも重要条件を崩さない"
+                "範囲で弱く回避する。管理者向けWARNINGはエコ主力だけに表示する。"
+                "「出勤・休み・出勤」と「休み・出勤・出勤・休み」は対象外。"
             ),
             "変更場所": "従業員マスタ > エコ主力",
         },
@@ -3295,6 +3295,26 @@ def render_generation_metadata_summary(metadata: dict, title: str = "保存済�
             st.write(f"- 休日日数の固定指定: {input_summary['exact_holiday_days']}")
         if input_summary.get("employee_max_consecutive_work"):
             st.write(f"- 個別の連勤上限: {input_summary['employee_max_consecutive_work']}")
+        if input_summary.get("tobishi_definition"):
+            st.write(
+                "- 飛び石勤務の定義: "
+                f"{input_summary['tobishi_definition']}"
+            )
+        tobishi_adjustment = input_summary.get("tobishi_post_adjustment") or {}
+        if tobishi_adjustment.get("attempted"):
+            if tobishi_adjustment.get("error"):
+                st.write("- 生成後の飛び石再調整: 未完了（元の生成結果を保持）")
+            elif tobishi_adjustment.get("applied"):
+                st.write(
+                    "- 生成後の飛び石再調整: "
+                    f"{tobishi_adjustment.get('before', 0)}件 → "
+                    f"{tobishi_adjustment.get('after', 0)}件"
+                )
+            else:
+                st.write(
+                    "- 生成後の飛び石再調整: 重要条件を維持できる"
+                    "追加の勤務交換なし"
+                )
         if input_summary.get("required_assignments"):
             st.markdown("**月別の日付指定配置**")
             for rule in input_summary["required_assignments"]:
@@ -6792,6 +6812,11 @@ if mode == "📊 経営者ビュー":
                         data_source_msg += (
                             "\n顧問は自動配置せず、必要な場合だけ候補として表示します。"
                         )
+                    tobishi_post_adjustment = {
+                        "definition": "休み・出勤・休みの1日だけの単独出勤",
+                        "attempted": False,
+                        "applied": False,
+                    }
                     shift = generate_shift(**generation_kwargs)
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
@@ -6809,6 +6834,96 @@ if mode == "📊 経営者ビュー":
                             "\n※警告が出ない条件では解が見つからなかったため、"
                             "一部の警告条件だけ緩めて生成しました。"
                         )
+
+                    if shift is not None:
+                        # 通常生成後も同じ飛び石定義で安全な勤務交換を試す。
+                        # 提案エンジンは、本人×休み、日別店舗人数、月間勤務日数、
+                        # 技能構成、配置不可、連勤、月別・固定ルールを再検証する。
+                        try:
+                            from prototype.shift_readjuster import (
+                                apply_adjustment_proposal,
+                                propose_tobishi_reduction,
+                            )
+                            _tobishi_context = {
+                                "work_requests": list(use_work_requests),
+                                "preferred_work_requests": list(
+                                    use_preferred_work_requests
+                                ),
+                                "preferred_work_groups": list(
+                                    use_preferred_work_groups
+                                ),
+                                "off_requests": dict(use_off_requests),
+                                "prev_month": list(use_prev_month),
+                                "holiday_overrides": dict(use_holiday_overrides),
+                                "exact_holiday_days": dict(use_exact_holiday_days),
+                                "paid_leave_days": dict(effective_paid_leave_days),
+                                "employee_max_consecutive_work": dict(
+                                    use_employee_max_consecutive_work
+                                ),
+                                "employee_max_consecutive_off": dict(
+                                    use_employee_max_consecutive_off
+                                ),
+                                "monthly_store_count_rules": list(
+                                    use_monthly_store_count_rules
+                                ),
+                                "required_assignments": list(
+                                    use_required_assignments
+                                ),
+                                "default_holidays": rule_cfg.parameters.get(
+                                    "default_holiday_days", 8,
+                                ),
+                            }
+                            _tobishi_proposal = propose_tobishi_reduction(
+                                shift,
+                                validation_context=_tobishi_context,
+                                max_consec=rule_cfg.parameters.get(
+                                    "max_consec_work", 5,
+                                ),
+                                max_swaps=6,
+                            )
+                            _tobishi_before = int(
+                                _tobishi_proposal.before_metrics.get(
+                                    "休みに挟まれた単独出勤", 0,
+                                )
+                            )
+                            _tobishi_after = int(
+                                _tobishi_proposal.after_metrics.get(
+                                    "休みに挟まれた単独出勤",
+                                    _tobishi_before,
+                                )
+                            )
+                            tobishi_post_adjustment.update({
+                                "attempted": True,
+                                "before": _tobishi_before,
+                                "after": _tobishi_after,
+                                "changed_cells": len(_tobishi_proposal.changes),
+                            })
+                            if _tobishi_proposal.has_changes:
+                                shift = apply_adjustment_proposal(
+                                    shift, _tobishi_proposal,
+                                )
+                                tobishi_post_adjustment["applied"] = True
+                                data_source_msg += (
+                                    "\n飛び石勤務（休み・出勤・休みの1日だけの"
+                                    f"単独出勤）を生成後に{_tobishi_before}件から"
+                                    f"{_tobishi_after}件へ再調整しました。"
+                                    "エコ主力を最優先し、その他の重要条件は維持しています。"
+                                )
+                            else:
+                                data_source_msg += (
+                                    "\n飛び石勤務は「休み・出勤・休み」の1日だけの"
+                                    "単独出勤として確認しました。重要条件を維持できる"
+                                    "追加の勤務交換はありませんでした。"
+                                )
+                        except Exception as _tobishi_error:
+                            tobishi_post_adjustment.update({
+                                "attempted": True,
+                                "error": type(_tobishi_error).__name__,
+                            })
+                            data_source_msg += (
+                                "\n⚠ 生成後の飛び石勤務再調整は完了しませんでした。"
+                                "元の生成結果を保持しています。"
+                            )
 
                     advisor_candidates = []
                     advisor_candidate_triggers = []
@@ -7038,6 +7153,10 @@ if mode == "📊 経営者ビュー":
                     "emergency_draft_used": bool(emergency_draft_used),
                     "incomplete_manual_draft_used": bool(incomplete_manual_draft_used),
                     "solver_limit_seconds": int(solver_limit_seconds),
+                    "tobishi_definition": (
+                        "休み・出勤・休みの1日だけの単独出勤"
+                    ),
+                    "tobishi_post_adjustment": dict(tobishi_post_adjustment),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
                     ),
@@ -8483,9 +8602,14 @@ if mode == "📊 経営者ビュー":
                     "Streamlit Cloud の Settings → Secrets に `OPENAI_API_KEY` "
                     "または `ANTHROPIC_API_KEY` を登録すると自由文を利用できます。"
                     "飛び石と山本の機械的な再調整は、キーなしでも利用できます。"
-                )
+            )
             if available_ai_providers:
                 from prototype.shift_chat import ShiftChatEngine
+                from prototype.shift_readjuster import (
+                    build_readjustment_quality_snapshot,
+                    compare_readjustment_quality,
+                    readjustment_shift_signature,
+                )
 
                 provider_labels = [item[0] for item in available_ai_providers]
                 selected_provider_label = st.selectbox(
@@ -8537,16 +8661,71 @@ if mode == "📊 経営者ビュー":
                     _chat_validation_inputs,
                     max_consec=_chat_max_consec,
                 )
+                quality_guard_ym = (
+                    f"{int(chat_engine.shift.year):04d}-"
+                    f"{int(chat_engine.shift.month):02d}"
+                )
+                quality_guard_state = st.session_state.get(
+                    "chat_quality_guard"
+                )
+                current_base_signature = readjustment_shift_signature(
+                    chat_engine.shift
+                )
+                session_guard_matches = bool(
+                    isinstance(quality_guard_state, dict)
+                    and quality_guard_state.get("ym") == quality_guard_ym
+                    and quality_guard_state.get("signature")
+                    == current_base_signature
+                )
+                if not session_guard_matches:
+                    loaded_metadata = st.session_state.get(
+                        "loaded_shift_metadata", {}
+                    )
+                    if isinstance(loaded_metadata, dict):
+                        restored_guard = loaded_metadata.get(
+                            "readjustment_quality_guard"
+                        )
+                        if (
+                            isinstance(restored_guard, dict)
+                            and restored_guard.get("ym") == quality_guard_ym
+                            and restored_guard.get("signature")
+                            == current_base_signature
+                        ):
+                            quality_guard_state = restored_guard
+                            st.session_state["chat_quality_guard"] = (
+                                restored_guard
+                            )
+                quality_guard_valid = bool(
+                    isinstance(quality_guard_state, dict)
+                    and quality_guard_state.get("ym") == quality_guard_ym
+                    and quality_guard_state.get("signature")
+                    == current_base_signature
+                )
+                if not quality_guard_valid:
+                    quality_guard_state = None
+                    st.session_state.pop("chat_quality_guard", None)
+                    st.session_state.pop("chat_quality_guard_undo", None)
+                    st.session_state.pop("chat_quality_guard_redo", None)
 
                 st.markdown("##### よく使う再調整")
                 st.caption(
                     "代表的な目的を選び、必要なら人・日・店舗などを追加してください。"
                     "AIは内容を整理し、変更案は既存ルールで検証してからプレビューします。"
                 )
+                unresolved_preview_count = (
+                    chat_engine.get_pending_change_count()
+                )
+                if unresolved_preview_count:
+                    st.warning(
+                        f"先にプレビュー中の変更 {unresolved_preview_count}件を"
+                        "「本シフトに反映」または「プレビューを破棄」で確定してください。"
+                        "確定するまで次の再調整は開始できません。"
+                    )
                 readjustment_goal_prompts = {
                     "飛び石勤務を減らす": (
-                        "飛び石勤務を減らしてください。対象の指定がなければ、"
-                        "エコ主力全体を対象にしてください。"
+                        "休み・出勤・休みとなる1日だけの単独出勤を減らしてください。"
+                        "対象の指定がなければ、エコ主力を最優先し、その後ほかの"
+                        "通常スタッフも可能な範囲で減らしてください。"
                     ),
                     "山本の出勤を見直す": (
                         "山本の出勤日を確認し、赤羽の通常スタッフだけで必要人数を"
@@ -8597,8 +8776,15 @@ if mode == "📊 経営者ビュー":
                     key="quick_readjustment_run",
                     type="primary",
                     width="stretch",
+                    disabled=unresolved_preview_count > 0,
                 ):
                     detail = quick_readjustment_detail.strip()
+                    pending_goal_label = selected_readjustment_goal
+                    if detail:
+                        pending_goal_label += f"（{detail}）"
+                    st.session_state["chat_pending_adjustment_goal"] = (
+                        pending_goal_label
+                    )
                     st.session_state.tobishi_reopt_options = []
                     with st.spinner("現在のシフトとルールを確認中..."):
                         try:
@@ -8631,7 +8817,7 @@ if mode == "📊 経営者ビュー":
                                 msg = (
                                     "追加条件やこの調整目的を自然な言葉で扱うには、"
                                     "OpenAIまたはClaudeのAPIキーが必要です。"
-                                    "飛び石全体と山本の不要出勤は、追加条件を空欄にすれば"
+                                    "飛び石勤務と山本の不要出勤は、追加条件を空欄にすれば"
                                     "AIなしでも確認できます。"
                                 )
                             else:
@@ -8671,17 +8857,10 @@ if mode == "📊 経営者ビュー":
                         after_work = option.after_metrics.get(
                             "休みに挟まれた単独出勤", 0
                         )
-                        before_off = option.before_metrics.get(
-                            "出勤に挟まれた単独休日", 0
-                        )
-                        after_off = option.after_metrics.get(
-                            "出勤に挟まれた単独休日", 0
-                        )
                         option_rows.append({
                             "案": option.title.replace("飛び石勤務の再最適化（", "").rstrip("）"),
                             "勤務交換": f"{len(option.changes) // 4}組",
-                            "単独出勤": f"{before_work} → {after_work}",
-                            "単独休日": f"{before_off} → {after_off}",
+                            "飛び石勤務（休・出・休）": f"{before_work} → {after_work}",
                             "変更セル": len(option.changes),
                         })
                     st.dataframe(
@@ -8722,6 +8901,18 @@ if mode == "📊 経営者ビュー":
                 st.caption("AIが作ったプレビュー変更は、表では濃い青枠で表示します。")
 
                 def _save_chat_shift_snapshot(note: str) -> None:
+                    metadata = current_or_remembered_generation_metadata_for_month(
+                        int(chat_engine.shift.year),
+                        int(chat_engine.shift.month),
+                    )
+                    metadata = dict(metadata) if isinstance(metadata, dict) else {}
+                    saved_quality_guard = st.session_state.get(
+                        "chat_quality_guard"
+                    )
+                    if isinstance(saved_quality_guard, dict):
+                        metadata["readjustment_quality_guard"] = (
+                            saved_quality_guard
+                        )
                     try:
                         save_shift_snapshot_with_github(
                             backup_mgr,
@@ -8729,10 +8920,96 @@ if mode == "📊 経営者ビュー":
                             kind="draft",
                             author="AI対話",
                             note=note,
+                            metadata=metadata,
                         )
                     except Exception:
                         pass
                     save_session_shift(chat_engine.shift)
+
+                def _clone_quality_guard(state):
+                    if not isinstance(state, dict):
+                        return None
+                    return json.loads(json.dumps(state, ensure_ascii=False))
+
+                def _record_quality_guard_after_apply(
+                    quality_snapshot: dict,
+                ) -> None:
+                    previous_guard = st.session_state.get(
+                        "chat_quality_guard"
+                    )
+                    undo_history = list(st.session_state.get(
+                        "chat_quality_guard_undo", []
+                    ))
+                    undo_history.append(_clone_quality_guard(previous_guard))
+                    st.session_state["chat_quality_guard_undo"] = (
+                        undo_history[-20:]
+                    )
+                    st.session_state["chat_quality_guard_redo"] = []
+
+                    priorities = []
+                    if isinstance(previous_guard, dict):
+                        priorities = list(
+                            previous_guard.get("priorities", [])
+                        )
+                    goal_label = str(st.session_state.get(
+                        "chat_pending_adjustment_goal", "再調整"
+                    ) or "再調整")
+                    priorities.append(goal_label)
+                    st.session_state["chat_quality_guard"] = {
+                        "ym": quality_guard_ym,
+                        "signature": readjustment_shift_signature(
+                            chat_engine.shift
+                        ),
+                        "metrics": quality_snapshot,
+                        "priorities": priorities[-10:],
+                    }
+                    st.session_state.pop(
+                        "chat_pending_adjustment_goal", None
+                    )
+
+                def _undo_quality_guard() -> None:
+                    current_guard = _clone_quality_guard(
+                        st.session_state.get("chat_quality_guard")
+                    )
+                    undo_history = list(st.session_state.get(
+                        "chat_quality_guard_undo", []
+                    ))
+                    redo_history = list(st.session_state.get(
+                        "chat_quality_guard_redo", []
+                    ))
+                    redo_history.append(current_guard)
+                    previous_guard = (
+                        undo_history.pop() if undo_history else None
+                    )
+                    st.session_state["chat_quality_guard_undo"] = undo_history
+                    st.session_state["chat_quality_guard_redo"] = (
+                        redo_history[-20:]
+                    )
+                    if previous_guard is None:
+                        st.session_state.pop("chat_quality_guard", None)
+                    else:
+                        st.session_state["chat_quality_guard"] = previous_guard
+
+                def _redo_quality_guard() -> None:
+                    current_guard = _clone_quality_guard(
+                        st.session_state.get("chat_quality_guard")
+                    )
+                    undo_history = list(st.session_state.get(
+                        "chat_quality_guard_undo", []
+                    ))
+                    redo_history = list(st.session_state.get(
+                        "chat_quality_guard_redo", []
+                    ))
+                    undo_history.append(current_guard)
+                    next_guard = redo_history.pop() if redo_history else None
+                    st.session_state["chat_quality_guard_undo"] = (
+                        undo_history[-20:]
+                    )
+                    st.session_state["chat_quality_guard_redo"] = redo_history
+                    if next_guard is None:
+                        st.session_state.pop("chat_quality_guard", None)
+                    else:
+                        st.session_state["chat_quality_guard"] = next_guard
 
                 pending_count = chat_engine.get_pending_change_count()
                 if pending_count:
@@ -8752,18 +9029,38 @@ if mode == "📊 経営者ビュー":
 
                     st.markdown("##### 操作")
                     if action_pending_count and st.session_state.get("chat_apply_confirm"):
-                        st.warning(
-                            f"プレビュー中の変更 **{action_pending_count}件** を本シフトに反映します。"
-                            "反映後も「戻る」で直前の反映を取り消せます。"
-                        )
+                        has_quality_regression = bool(quality_regressions)
+                        if has_quality_regression:
+                            st.error(
+                                f"この案は、先に反映した優先調整のうち "
+                                f"**{len(quality_regressions)}項目** を悪化させます。"
+                                "下の内容を許容する場合だけ反映してください。"
+                            )
+                            quality_regression_ack = st.checkbox(
+                                "先に反映した調整が悪化することを確認しました",
+                                key="chat_quality_regression_ack",
+                            )
+                        else:
+                            quality_regression_ack = True
+                            st.warning(
+                                f"プレビュー中の変更 **{action_pending_count}件** を本シフトに反映します。"
+                                "反映後も「戻る」で直前の反映を取り消せます。"
+                            )
                         confirm_apply_col, cancel_apply_col, _ = st.columns([1.3, 1, 2.7])
                         with confirm_apply_col:
                             if st.button(
-                                "本シフトに反映",
+                                (
+                                    "悪化を許容して反映"
+                                    if has_quality_regression
+                                    else "本シフトに反映"
+                                ),
                                 key="chat_apply_confirmed",
                                 type="primary",
                                 width="stretch",
-                                disabled=shift_readjustment_locked,
+                                disabled=(
+                                    shift_readjustment_locked
+                                    or not quality_regression_ack
+                                ),
                                 help=(
                                     "確定版のロックを解除してから反映してください"
                                     if shift_readjustment_locked
@@ -8771,6 +9068,9 @@ if mode == "📊 経営者ビュー":
                                 ),
                             ):
                                 msg = chat_engine.apply_pending_changes()
+                                _record_quality_guard_after_apply(
+                                    current_quality_snapshot
+                                )
                                 _save_chat_shift_snapshot(msg)
                                 st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                                 st.session_state["chat_apply_confirm"] = False
@@ -8800,6 +9100,9 @@ if mode == "📊 経営者ビュー":
                             ):
                                 st.session_state["chat_apply_confirm"] = True
                                 st.session_state["chat_discard_confirm"] = False
+                                st.session_state[
+                                    "chat_quality_regression_ack"
+                                ] = False
                                 st.rerun()
                         with btn_discard:
                             if st.button(
@@ -8831,6 +9134,7 @@ if mode == "📊 経営者ビュー":
                             ),
                         ):
                             msg = chat_engine.undo_last_apply()
+                            _undo_quality_guard()
                             _save_chat_shift_snapshot(msg)
                             st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                             st.session_state["chat_apply_confirm"] = False
@@ -8849,6 +9153,7 @@ if mode == "📊 経営者ビュー":
                             ),
                         ):
                             msg = chat_engine.redo_last_apply()
+                            _redo_quality_guard()
                             _save_chat_shift_snapshot(msg)
                             st.session_state.chat_messages.append({"role": "assistant", "content": msg})
                             st.session_state["chat_apply_confirm"] = False
@@ -8910,6 +9215,24 @@ if mode == "📊 経営者ビュー":
                 )
                 short_staff_by_store_chat = detect_short_staff_by_store(display_shift)
                 short_days_chat = set(short_staff_by_store_chat.keys())
+                current_quality_snapshot = build_readjustment_quality_snapshot(
+                    display_shift,
+                    chat_result,
+                    short_staff_by_store_chat,
+                )
+                quality_regressions = []
+                protected_priorities = []
+                if quality_guard_state is not None:
+                    quality_regressions = (
+                        compare_readjustment_quality(
+                            quality_guard_state.get("metrics", {}),
+                            current_quality_snapshot,
+                        )
+                        if pending_count else []
+                    )
+                    protected_priorities = list(
+                        quality_guard_state.get("priorities", [])
+                    )
 
                 render_shift_legend()
                 if _cv_off:
@@ -8922,6 +9245,49 @@ if mode == "📊 経営者ビュー":
                     off_request_cells=build_off_request_cells(_cv_off),
                     changed_cell_color="#1d4ed8",
                 )
+
+                if protected_priorities:
+                    priority_text = " → ".join(
+                        f"{index}. {label}"
+                        for index, label in enumerate(
+                            protected_priorities, start=1
+                        )
+                    )
+                    st.caption(
+                        "先に反映した調整ほど優先: " + priority_text
+                    )
+                if pending_count and quality_guard_state is not None:
+                    if quality_regressions:
+                        st.warning(
+                            "⚠ 今回のプレビューは、先に反映した調整結果を"
+                            "一部悪化させます。優先順位を確認してください。"
+                        )
+                        st.dataframe(
+                            pd.DataFrame([
+                                {
+                                    "悪化する項目": item.label,
+                                    "前回反映時": item.before,
+                                    "今回案": item.after,
+                                    "増加": f"+{item.increase}",
+                                }
+                                for item in quality_regressions
+                            ]),
+                            hide_index=True,
+                            width="stretch",
+                        )
+                        st.caption(
+                            "優先順位の低い追加希望であれば「プレビューを破棄」、"
+                            "悪化を承知で採用する場合は反映確認へ進んでください。"
+                        )
+                    else:
+                        st.success(
+                            "✅ 先に反映した調整結果を崩さないプレビューです。"
+                        )
+                elif pending_count:
+                    st.info(
+                        "この案を最初に反映すると、その時点の品質が次の再調整の"
+                        "比較基準になります。"
+                    )
 
                 _render_chat_action_buttons()
 
@@ -9042,6 +9408,7 @@ if mode == "📊 経営者ビュー":
                         "送信",
                         type="primary",
                         width="stretch",
+                        disabled=unresolved_preview_count > 0,
                     )
 
                 if send_prompt:
@@ -9049,6 +9416,9 @@ if mode == "📊 経営者ビュー":
                     if not prompt:
                         st.warning("AIに送る内容を入力してください。")
                     else:
+                        st.session_state[
+                            "chat_pending_adjustment_goal"
+                        ] = prompt
                         st.session_state.chat_messages.append({"role": "user", "content": prompt})
                         st.session_state["chat_apply_confirm"] = False
                         st.session_state["chat_discard_confirm"] = False
@@ -11657,7 +12027,7 @@ elif mode == "⚙️ 設定":
                             "備考", value=target.notes, height=100,
                         )
                         new_is_eco_core = st.checkbox(
-                            "エコ主力（飛び石勤務回避の対象）",
+                            "エコ主力（単独出勤を強く回避）",
                             value=bool(getattr(target, "is_eco_core", False)),
                             help=(
                                 "店長・副店長など、勤務をできるだけまとめたい"
@@ -11802,7 +12172,7 @@ elif mode == "⚙️ 設定":
                         help="一般正社員の標準は265日",
                     )
                     new_emp_is_eco_core = st.checkbox(
-                        "エコ主力（飛び石勤務回避の対象）",
+                        "エコ主力（単独出勤を強く回避）",
                         value=False,
                         help="店長・副店長などの独り立ち済みエコ担当だけに設定します。",
                     )
