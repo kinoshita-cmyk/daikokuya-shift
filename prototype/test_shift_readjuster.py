@@ -109,6 +109,50 @@ class ShiftReadjusterTest(unittest.TestCase):
             len(tobishi_days(shift, "今津")),
         )
 
+    def test_tobishi_repair_can_join_lone_work_from_adjacent_day(self) -> None:
+        assignments = []
+        work_days = {
+            # 5日が単独出勤。5日そのものを岩野の勤務日に移しても
+            # 単独出勤のままだが、8日を4日へ移すと4-5日勤務になる。
+            "春山": {5, 8, 9, 10},
+            "岩野": {2, 3, 4, 9, 10},
+        }
+        stores = {
+            "春山": Store.OMIYA,
+            "岩野": Store.AKABANE,
+        }
+        for employee, employee_work_days in work_days.items():
+            for day in range(1, 31):
+                assignments.append(self._assignment(
+                    employee,
+                    day,
+                    stores[employee] if day in employee_work_days else Store.OFF,
+                ))
+        shift = MonthlyShift(year=2026, month=9, assignments=assignments)
+
+        self.assertEqual(tobishi_days(shift, "春山"), [5])
+        with patch(
+            "prototype.shift_readjuster.validate_with_context",
+            return_value=ValidationResult(),
+        ):
+            proposal = propose_tobishi_reduction(
+                shift,
+                employee_names=["春山"],
+                max_swaps=1,
+            )
+
+        self.assertTrue(proposal.has_changes)
+        adjusted = apply_adjustment_proposal(shift, proposal)
+        self.assertEqual(tobishi_days(adjusted, "春山"), [])
+        self.assertNotEqual(
+            adjusted.get_assignment("春山", 4).store,
+            Store.OFF,
+        )
+        self.assertNotEqual(
+            adjusted.get_assignment("春山", 5).store,
+            Store.OFF,
+        )
+
     def test_yamamoto_cleanup_only_removes_unneeded_akabane_days(self) -> None:
         shift = MonthlyShift(
             year=2026,

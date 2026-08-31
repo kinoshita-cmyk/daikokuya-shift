@@ -463,7 +463,13 @@ def _candidate_swaps(
     protected_names: list[str],
     validation_context: Optional[dict],
 ) -> list[tuple]:
-    """Enumerate direct improvements for OFF-WORK-OFF days only."""
+    """Enumerate reciprocal swaps that directly reduce OFF-WORK-OFF days.
+
+    A repair may either move the isolated work day itself or move another work
+    day into an adjacent off day so the isolated day becomes part of a work
+    block.  The latter is important when moving the isolated day would only
+    recreate the same pattern elsewhere.
+    """
     employee_names = sorted({a.employee for a in shift.assignments})
     assignments = _assignment_map(shift)
     working_by_employee = {
@@ -494,6 +500,15 @@ def _candidate_swaps(
         if not target_working:
             continue
         isolated_work_set = set(tobishi_days(shift, target))
+        adjacent_repair_off_days = {
+            adjacent_day
+            for isolated_day in isolated_work_set
+            for adjacent_day in (isolated_day - 1, isolated_day + 1)
+            if (
+                1 <= adjacent_day <= len(target_working)
+                and not target_working.get(adjacent_day, False)
+            )
+        }
 
         for target_work_day, target_is_working in target_working.items():
             if not target_is_working:
@@ -505,8 +520,14 @@ def _candidate_swaps(
             for target_off_day, is_working in target_working.items():
                 if is_working or target_off_day == target_work_day:
                     continue
-                # The work day being removed must itself be OFF-WORK-OFF.
-                if target_work_day not in isolated_work_set:
+                # Also allow moving a regular work day next to the isolated
+                # day.  The simulated score check below still requires the
+                # completed swap to reduce OFF-WORK-OFF, so this does not make
+                # isolated days off or two-day work blocks adjustment goals.
+                if (
+                    target_work_day not in isolated_work_set
+                    and target_off_day not in adjacent_repair_off_days
+                ):
                     continue
                 target_off = assignments.get((target, target_off_day))
                 if target_off and target_off.is_paid_leave:
