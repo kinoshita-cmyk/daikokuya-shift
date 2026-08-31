@@ -22,6 +22,7 @@ AI対話によるシフト微調整
 from __future__ import annotations
 import json
 import os
+from calendar import monthrange
 from dataclasses import dataclass
 from typing import Optional
 
@@ -42,6 +43,7 @@ from .employees import ALL_EMPLOYEES, get_employee
 from .shift_readjuster import (
     AdjustmentProposal,
     classify_tobishi_days,
+    new_protected_issues,
     propose_tobishi_reoptimization_options,
     propose_yamamoto_cleanup,
 )
@@ -254,6 +256,28 @@ class PendingShiftChange:
     is_paid_leave: bool = False
 
 
+@dataclass
+class PendingSafetyReport:
+    """Safety comparison between the base shift and the current preview."""
+
+    structural_errors: list[str]
+    off_request_errors: list[str]
+    new_errors: list
+    new_warnings: list
+    before_error_count: int = 0
+    before_warning_count: int = 0
+    after_error_count: int = 0
+    after_warning_count: int = 0
+
+    @property
+    def can_apply(self) -> bool:
+        return not (
+            self.structural_errors
+            or self.off_request_errors
+            or self.new_errors
+        )
+
+
 # ============================================================
 # チャットエンジン
 # ============================================================
@@ -411,6 +435,65 @@ class ShiftChatEngine:
                 )
         return messages
 
+    def _structural_change_violation_messages(
+        self,
+        changes: list[PendingShiftChange],
+    ) -> list[str]:
+        """Reject malformed AI tool output before it reaches validation."""
+        days_in_month = monthrange(int(self.shift.year), int(self.shift.month))[1]
+        known_employees = {employee.name for employee in ALL_EMPLOYEES}
+        messages = []
+        for change in changes:
+            if change.employee not in known_employees:
+                messages.append(
+                    f"従業員マスタに存在しない氏名です: {change.employee}"
+                )
+            try:
+                day = int(change.day)
+            except (TypeError, ValueError):
+                messages.append(f"日付が数値ではありません: {change.day}")
+                continue
+            if not 1 <= day <= days_in_month:
+                messages.append(
+                    f"{self.shift.month}月に存在しない日付です: {day}日"
+                )
+            if change.store is not None and not isinstance(change.store, Store):
+                messages.append(
+                    f"不明な店舗指定です: {change.employee} {day}日"
+                )
+        return messages
+
+    def inspect_pending_changes(self) -> PendingSafetyReport:
+        """Validate the full preview and compare it with the current shift."""
+        pending = self._dedup_pending_changes()
+        structural_errors = self._structural_change_violation_messages(pending)
+        off_request_errors = self._off_request_violation_messages(pending)
+        if structural_errors:
+            return PendingSafetyReport(
+                structural_errors=structural_errors,
+                off_request_errors=off_request_errors,
+                new_errors=[],
+                new_warnings=[],
+            )
+
+        before = self._validate_shift_with_context(self.shift)
+        after = self._validate_shift_with_context(self._apply_pending_to_shift())
+        introduced = new_protected_issues(before, after)
+        return PendingSafetyReport(
+            structural_errors=structural_errors,
+            off_request_errors=off_request_errors,
+            new_errors=[
+                issue for issue in introduced if issue.severity == "ERROR"
+            ],
+            new_warnings=[
+                issue for issue in introduced if issue.severity == "WARNING"
+            ],
+            before_error_count=before.error_count,
+            before_warning_count=before.warning_count,
+            after_error_count=after.error_count,
+            after_warning_count=after.warning_count,
+        )
+
     def _validate_shift_with_context(self, shift: MonthlyShift):
         """生成時に使った希望データがあれば、それも含めて検証する。"""
         return validate(
@@ -440,6 +523,7 @@ class ShiftChatEngine:
                 "required_assignments", []
             ),
             allow_omiya_short=self.validation_inputs.get("allow_omiya_short"),
+            default_holidays=self.validation_inputs.get("default_holidays", 8),
             max_consec=self.max_consec,
         )
 
@@ -639,6 +723,12 @@ class ShiftChatEngine:
         ])
 
     def _tool_swap_assignments(self, emp1: str, day1: int, emp2: str, day2: int) -> str:
+        structural = self._structural_change_violation_messages([
+            PendingShiftChange(emp1, day1, Store.OFF),
+            PendingShiftChange(emp2, day2, Store.OFF),
+        ])
+        if structural:
+            return "変更できません: " + " / ".join(structural)
         a1 = self._get_effective_assignment(emp1, day1)
         a2 = self._get_effective_assignment(emp2, day2)
         if a1 is None or a2 is None:
@@ -666,6 +756,9 @@ class ShiftChatEngine:
         before = self._get_effective_assignment(employee, day)
         before_str = before.store.display_name if before else "未配置"
         proposed = PendingShiftChange(employee=employee, day=day, store=store)
+        structural = self._structural_change_violation_messages([proposed])
+        if structural:
+            return "変更できません: " + " / ".join(structural)
         violations = self._off_request_violation_messages([proposed])
         if violations:
             return "変更できません: " + " / ".join(violations)
@@ -757,22 +850,50 @@ class ShiftChatEngine:
     def _tool_validate_current(self) -> str:
         copy = self._apply_pending_to_shift()
         result = self._validate_shift_with_context(copy)
+        pending_count = self.get_pending_change_count()
+        safety = self.inspect_pending_changes() if pending_count else None
         if result.error_count == 0 and result.warning_count == 0:
             return "✅ 制約違反はありません"
-        out = [f"エラー {result.error_count}件 / 警告 {result.warning_count}件"]
+        if safety is not None:
+            out = [
+                "変更前からプレビュー後: "
+                f"エラー {safety.before_error_count}→{safety.after_error_count}件 / "
+                f"警告 {safety.before_warning_count}→{safety.after_warning_count}件"
+            ]
+            if safety.new_errors:
+                out.append("変更前になかったエラー:")
+                out.extend(f"  {issue}" for issue in safety.new_errors[:5])
+            if safety.new_warnings:
+                out.append("変更前になかった重要な警告:")
+                out.extend(f"  {issue}" for issue in safety.new_warnings[:5])
+        else:
+            out = [f"エラー {result.error_count}件 / 警告 {result.warning_count}件"]
         for issue in result.issues[:8]:  # 上位8件のみ
             out.append(f"  {issue}")
         if len(result.issues) > 8:
             out.append(f"  ...他 {len(result.issues) - 8} 件")
         return "\n".join(out)
 
-    def _tool_apply_changes(self) -> str:
+    def _tool_apply_changes(self, *, allow_new_warnings: bool = False) -> str:
         pending = self._dedup_pending_changes()
         if not pending:
             return "適用すべき変更はありません"
-        violations = self._off_request_violation_messages(pending)
-        if violations:
-            return "反映できません: " + " / ".join(violations)
+        report = self.inspect_pending_changes()
+        blocking = report.structural_errors + report.off_request_errors
+        if blocking:
+            return "反映できません: " + " / ".join(blocking)
+        if report.new_errors:
+            details = " / ".join(str(issue) for issue in report.new_errors[:5])
+            return (
+                "反映を停止しました。変更前になかったエラーが発生します: "
+                + details
+            )
+        if report.new_warnings and not allow_new_warnings:
+            details = " / ".join(str(issue) for issue in report.new_warnings[:5])
+            return (
+                "反映を停止しました。変更前になかった重要な警告があります: "
+                + details
+            )
         n = len(pending)
         before = self._clone_shift(self.shift)
         # 確定シフトに反映
@@ -803,9 +924,11 @@ class ShiftChatEngine:
         self.last_status_message = f"🗑 {n}件のプレビュー変更を破棄しました"
         return self.last_status_message
 
-    def apply_pending_changes(self) -> str:
+    def apply_pending_changes(self, *, allow_new_warnings: bool = False) -> str:
         """画面ボタンからプレビュー変更を確定する。"""
-        return self._tool_apply_changes()
+        return self._tool_apply_changes(
+            allow_new_warnings=allow_new_warnings,
+        )
 
     def discard_pending_changes(self) -> str:
         """画面ボタンからプレビュー変更を破棄する。"""
@@ -881,38 +1004,41 @@ class ShiftChatEngine:
     # ========== ツールルーター ==========
 
     def _execute_tool(self, name: str, args: dict) -> str:
-        if name == "get_adjustment_overview":
-            return self._tool_get_adjustment_overview(
-                args["objective"], args.get("employees")
-            )
-        elif name == "get_day_assignments":
-            return self._tool_get_day_assignments(args["day"])
-        elif name == "get_employee_schedule":
-            return self._tool_get_employee_schedule(args["employee"])
-        elif name == "get_employee_profile":
-            return self._tool_get_employee_profile(args["employee"])
-        elif name == "swap_assignments":
-            return self._tool_swap_assignments(
-                args["emp1"], args["day1"], args["emp2"], args["day2"]
-            )
-        elif name == "change_single_assignment":
-            return self._tool_change_single_assignment(
-                args["employee"], args["day"], args["new_store"]
-            )
-        elif name == "validate_current":
-            return self._tool_validate_current()
-        elif name == "optimize_tobishi":
-            return self._tool_optimize_tobishi(
-                employees=args.get("employees"),
-                max_swaps=args.get("max_swaps", 6),
-            )
-        elif name == "cleanup_yamamoto":
-            return self._tool_cleanup_yamamoto()
-        elif name == "apply_changes":
-            return self._tool_apply_changes()
-        elif name == "discard_changes":
-            return self._tool_discard_changes()
-        return f"不明なツール: {name}"
+        try:
+            if name == "get_adjustment_overview":
+                return self._tool_get_adjustment_overview(
+                    args["objective"], args.get("employees")
+                )
+            elif name == "get_day_assignments":
+                return self._tool_get_day_assignments(args["day"])
+            elif name == "get_employee_schedule":
+                return self._tool_get_employee_schedule(args["employee"])
+            elif name == "get_employee_profile":
+                return self._tool_get_employee_profile(args["employee"])
+            elif name == "swap_assignments":
+                return self._tool_swap_assignments(
+                    args["emp1"], args["day1"], args["emp2"], args["day2"]
+                )
+            elif name == "change_single_assignment":
+                return self._tool_change_single_assignment(
+                    args["employee"], args["day"], args["new_store"]
+                )
+            elif name == "validate_current":
+                return self._tool_validate_current()
+            elif name == "optimize_tobishi":
+                return self._tool_optimize_tobishi(
+                    employees=args.get("employees"),
+                    max_swaps=args.get("max_swaps", 6),
+                )
+            elif name == "cleanup_yamamoto":
+                return self._tool_cleanup_yamamoto()
+            elif name == "apply_changes":
+                return self._tool_apply_changes()
+            elif name == "discard_changes":
+                return self._tool_discard_changes()
+            return f"不明なツール: {name}"
+        except (KeyError, TypeError, ValueError) as exc:
+            return f"ツール入力エラー: {name} / {exc}"
 
     # ========== チャットメイン ==========
 

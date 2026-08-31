@@ -141,11 +141,21 @@ def _issue_signature(issue) -> tuple:
     # Message text often contains a count or an employee list.  A harmless
     # re-adjustment can change that text while leaving the same underlying
     # issue in place, so identity is based on its structured location.
+    message = str(getattr(issue, "message", "") or "")
+    store_subject = next(
+        (
+            store.display_name
+            for store in Store
+            if store != Store.OFF and store.display_name in message
+        ),
+        None,
+    )
     return (
         issue.severity,
         issue.category,
         issue.day,
         issue.employee,
+        store_subject,
     )
 
 
@@ -166,6 +176,18 @@ def _new_protected_issues(
             )
         )
     ]
+
+
+def new_protected_issues(
+    before: ValidationResult,
+    after: ValidationResult,
+) -> list:
+    """Return new errors and important warnings introduced by a proposal.
+
+    This public wrapper is shared by the deterministic optimizer and the
+    natural-language adjustment UI so both paths use the same safety rule.
+    """
+    return _new_protected_issues(before, after)
 
 
 def _working_map(shift: MonthlyShift, employee: str) -> dict[int, bool]:

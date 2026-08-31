@@ -9,6 +9,7 @@ from prototype.shift_readjuster import (
     build_readjustment_quality_snapshot,
     classify_tobishi_days,
     compare_readjustment_quality,
+    new_protected_issues,
     propose_tobishi_reduction,
     propose_tobishi_reoptimization_options,
     propose_yamamoto_cleanup,
@@ -459,6 +460,25 @@ class ShiftReadjusterTest(unittest.TestCase):
         self.assertEqual(regressions[0].label, "今津の単独出勤（休・出・休）")
         self.assertEqual(regressions[0].before, 1)
         self.assertEqual(regressions[0].after, 2)
+
+    def test_new_issue_detection_distinguishes_stores_on_same_day(self) -> None:
+        before = ValidationResult(issues=[Issue(
+            severity="WARNING",
+            category="店舗人数",
+            day=8,
+            employee=None,
+            message="大宮駅前店が2名です",
+        )])
+        after_issue = Issue(
+            severity="WARNING",
+            category="店舗人数",
+            day=8,
+            employee=None,
+            message="赤羽駅前店が2名です",
+        )
+        after = ValidationResult(issues=[after_issue])
+
+        self.assertEqual(new_protected_issues(before, after), [after_issue])
 
     def test_quality_snapshot_tracks_tobishi_staffing_and_errors(self) -> None:
         shift = MonthlyShift(
