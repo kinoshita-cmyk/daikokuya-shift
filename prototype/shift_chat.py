@@ -67,6 +67,9 @@ SYSTEM_PROMPT = """\
 - 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
 - 本人が提出した「×」休み希望日は絶対に勤務へ変更しない
 - 制約違反のリスクがある場合は警告する
+- 「飛び石勤務」は「休み・出勤・休み」の1日だけの単独出勤を意味する。
+  「出勤・休み・出勤」の単独休日や「休み・出勤・出勤・休み」の2連勤は
+  飛び石勤務として扱わない
 - 「飛び石を減らして」のような目的指定には、専用の再最適化ツールを優先する
 - 専用ツールは現在の本シフトを出発点に、複数の相互入れ替えを同時に比較する。
   対象者が複数いる場合は一部の人だけでなく、対象者全員の改善を優先する。候補なしの場合は
@@ -192,10 +195,10 @@ TOOLS = [
     {
         "name": "optimize_tobishi",
         "description": (
-            "エコ主力の飛び石勤務を、本人の絶対休み・各日の店舗人数・"
+            "休み・出勤・休みとなる1日だけの単独出勤を、本人の絶対休み・各日の店舗人数・"
             "各人の月間勤務日数を維持し、複数の相互入れ替えを同時に"
-            "再最適化して減らします。"
-            "対象者を省略すると全エコ主力を対象にします。"
+            "再最適化して減らします。対象者を省略するとエコ主力を最優先し、"
+            "その後ほかの通常スタッフも可能な範囲で減らします。"
         ),
         "input_schema": {
             "type": "object",
@@ -203,7 +206,7 @@ TOOLS = [
                 "employees": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "対象従業員名。省略時は全エコ主力",
+                    "description": "対象従業員名。省略時はエコ主力優先で全通常スタッフ",
                 },
                 "max_swaps": {
                     "type": "integer",
@@ -520,13 +523,13 @@ class ShiftChatEngine:
                     longest = max(longest, current)
                 else:
                     current = 0
-            isolated_work, isolated_off = tobishi_days(preview, name)
+            isolated_work = tobishi_days(preview, name)
             store_text = "、".join(
                 f"{store}:{count}日" for store, count in sorted(store_counts.items())
             ) or "なし"
             lines.append(
                 f"- {name}: 出勤{len(assignments)}日 / 最長{longest}連勤 / "
-                f"単独出勤{isolated_work or 'なし'} / 単独休日{isolated_off or 'なし'} / "
+                f"飛び石勤務（休み・出勤・休み）{isolated_work or 'なし'} / "
                 f"配分 {store_text}"
             )
 

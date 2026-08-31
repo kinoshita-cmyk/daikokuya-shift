@@ -1086,7 +1086,7 @@ def _check_tobishi_work_patterns(
     result: ValidationResult,
     days: int,
 ) -> None:
-    """エコ主力の休・出・休、出・休・出を確認する。"""
+    """エコ主力の「休み・出勤・休み」の単独出勤を確認する。"""
     for emp in _validation_employees():
         if not emp.is_shift_eligible or getattr(emp, "is_auxiliary", False):
             continue
@@ -1110,36 +1110,17 @@ def _check_tobishi_work_patterns(
             and working[day]
             and not working[day + 1]
         ]
-        isolated_off_days = [
-            day for day in range(2, days)
-            if working[day - 1]
-            and not working[day]
-            and working[day + 1]
-        ]
-        # 管理者向け警告は「休・出・休」の単独出勤がある場合だけ出す。
-        # 単独休日だけの場合も生成時には軽く避けるが、通常の休日配置でも
-        # 起こり得るため警告を増やさない。
         if not isolated_work_days:
             continue
 
-        details = []
-        if isolated_work_days:
-            details.append(
-                "休みに挟まれた単独出勤: "
-                + "、".join(f"{day}日" for day in isolated_work_days)
-            )
-        if isolated_off_days:
-            details.append(
-                "周辺の単独休日: "
-                + "、".join(f"{day}日" for day in isolated_off_days)
-            )
         result.issues.append(Issue(
             severity="WARNING",
             category="飛び石勤務",
             day=None,
             employee=emp.name,
             message=(
-                " / ".join(details)
+                "休みに挟まれた1日だけの単独出勤: "
+                + "、".join(f"{day}日" for day in isolated_work_days)
                 + "。本人希望・店舗体制を優先した結果として残っているため、"
                 "可能なら前後日との入れ替えを確認してください"
             ),

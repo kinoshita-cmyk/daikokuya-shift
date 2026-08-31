@@ -162,7 +162,7 @@ class Employee:
     constraint_check_excluded: bool = False  # 制約チェック対象外
     is_auxiliary: bool = False               # 補助要員（カウント対象外）
     only_on_request_days: bool = False       # 出勤希望日のみ稼働
-    is_eco_core: bool = False                # エコ主力（飛び石勤務回避の対象）
+    is_eco_core: bool = False                # エコ主力（単独出勤を強く回避）
 
     def __repr__(self) -> str:
         return f"Employee({self.name})"

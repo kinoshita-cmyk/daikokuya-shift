@@ -184,10 +184,11 @@ AKABANE_SHORTAGE_PENALTY = 60
 ONLY_ON_REQUEST_TARGET_DAYS = 8
 ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
 
-# エコ主力の飛び石勤務を回避。店舗の必要体制（例: 大宮3名優先=400）は崩さず、
-# 店舗配分の単純な均等化や5連勤回避よりは強く優先する。
-TOBISHI_ISOLATED_WORK_PENALTY = 240  # 休・出・休
-TOBISHI_ISOLATED_OFF_PENALTY = 70    # 出・休・出
+# 「休み・出勤・休み」の1日だけの単独出勤を飛び石勤務として回避する。
+# エコ主力は強く回避し、その他の従業員は店舗運営や重要条件を崩さない
+# 弱い目標に留める。「出勤・休み・出勤」は飛び石として評価しない。
+TOBISHI_ECO_CORE_PENALTY = 240
+TOBISHI_OTHER_EMPLOYEE_PENALTY = 20
 
 
 def _add_eco_support_pairing_constraints(
@@ -257,10 +258,9 @@ def _add_tobishi_pattern_indicators(
     employee_name: str,
     off_by_day: dict[int, object],
     days_in_month: int,
-) -> tuple[list, list]:
-    """休・出・休と出・休・出の発生を表す変数を返す。"""
+) -> list:
+    """「休み・出勤・休み」の単独出勤を表す変数を返す。"""
     isolated_work_terms = []
-    isolated_off_terms = []
     for day in range(2, int(days_in_month)):
         isolated_work = model.NewBoolVar(
             f"tobishi_work_{employee_name}_{day}"
@@ -275,21 +275,7 @@ def _add_tobishi_pattern_indicators(
             [literal.Not() for literal in work_literals]
         ).OnlyEnforceIf(isolated_work.Not())
         isolated_work_terms.append(isolated_work)
-
-        isolated_off = model.NewBoolVar(
-            f"tobishi_off_{employee_name}_{day}"
-        )
-        off_literals = [
-            off_by_day[day - 1].Not(),
-            off_by_day[day],
-            off_by_day[day + 1].Not(),
-        ]
-        model.AddBoolAnd(off_literals).OnlyEnforceIf(isolated_off)
-        model.AddBoolOr(
-            [literal.Not() for literal in off_literals]
-        ).OnlyEnforceIf(isolated_off.Not())
-        isolated_off_terms.append(isolated_off)
-    return isolated_work_terms, isolated_off_terms
+    return isolated_work_terms
 
 
 def generate_shift(
@@ -1208,8 +1194,8 @@ def generate_shift(
     over_4_indicators = []  # 4連勤超えのインジケータ（ソフトペナルティ用）
     two_off_goal_terms = []  # 2連休を確保できた人のインジケータ
     two_off_over_terms = []  # 2連休が多すぎる場合のソフトペナルティ
-    tobishi_isolated_work_terms = []  # 休・出・休
-    tobishi_isolated_off_terms = []   # 出・休・出
+    tobishi_eco_core_terms = []
+    tobishi_other_employee_terms = []
 
     for e in main_employees:
         prev = prev_consec_map.get(e.name, 0)
@@ -1320,17 +1306,18 @@ def generate_shift(
                 model.Add(over_two_off >= 0)
                 two_off_over_terms.append(over_two_off)
 
-        # 飛び石勤務の回避は、従業員マスタで「エコ主力」に指定した人だけに適用する。
-        # 本人希望・店舗運営・月別配置を優先する強い目標とし、絶対禁止にはしない。
+        # 飛び石勤務は「休み・出勤・休み」の単独出勤だけを意味する。
+        # エコ主力は強く回避し、その他は弱い生成目標として扱う。
+        isolated_work = _add_tobishi_pattern_indicators(
+            model,
+            e.name,
+            off[e.name],
+            days_in_month,
+        )
         if getattr(e, "is_eco_core", False):
-            isolated_work, isolated_off = _add_tobishi_pattern_indicators(
-                model,
-                e.name,
-                off[e.name],
-                days_in_month,
-            )
-            tobishi_isolated_work_terms.extend(isolated_work)
-            tobishi_isolated_off_terms.extend(isolated_off)
+            tobishi_eco_core_terms.extend(isolated_work)
+        else:
+            tobishi_other_employee_terms.extend(isolated_work)
 
     # ============================================================
     # 制約 11: 3連休回避（ハード）
@@ -1768,19 +1755,19 @@ def generate_shift(
     if two_off_over_terms:
         # 2連休が多すぎる状態も、可能な限り避ける。
         obj = obj - 520 * sum(two_off_over_terms)
-    if tobishi_isolated_work_terms:
-        # 休みに挟まれた1日出勤は従業員負荷が高いため、飛び石の中でも強く避ける。
+    if tobishi_eco_core_terms:
+        # エコ主力の1日だけの単独出勤は強く避ける。
         obj = (
             obj
-            - TOBISHI_ISOLATED_WORK_PENALTY
-            * sum(tobishi_isolated_work_terms)
+            - TOBISHI_ECO_CORE_PENALTY
+            * sum(tobishi_eco_core_terms)
         )
-    if tobishi_isolated_off_terms:
-        # 出勤に挟まれた単独休日も、既存の2連休回数との両立範囲で避ける。
+    if tobishi_other_employee_terms:
+        # その他の従業員も、重要条件に影響しない範囲で弱く避ける。
         obj = (
             obj
-            - TOBISHI_ISOLATED_OFF_PENALTY
-            * sum(tobishi_isolated_off_terms)
+            - TOBISHI_OTHER_EMPLOYEE_PENALTY
+            * sum(tobishi_other_employee_terms)
         )
     if preferred_consecutive_off_indicators:
         # 自由記載で明示された連休希望は優先するが、3連休禁止のハード条件は別途維持する。
@@ -1894,13 +1881,21 @@ def generate_shift(
                 == OperationMode.NORMAL
             )
             status_out["tobishi_patterns"] = {
+                "definition": "休み・出勤・休みの1日だけの単独出勤",
                 "isolated_work_days": sum(
                     solver.Value(term)
-                    for term in tobishi_isolated_work_terms
+                    for term in (
+                        tobishi_eco_core_terms
+                        + tobishi_other_employee_terms
+                    )
                 ),
-                "isolated_off_days": sum(
+                "eco_core_isolated_work_days": sum(
                     solver.Value(term)
-                    for term in tobishi_isolated_off_terms
+                    for term in tobishi_eco_core_terms
+                ),
+                "other_employee_isolated_work_days": sum(
+                    solver.Value(term)
+                    for term in tobishi_other_employee_terms
                 ),
             }
 
