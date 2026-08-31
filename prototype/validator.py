@@ -469,7 +469,15 @@ def _check_store_capacity(
         capacity_map = get_capacity(mode)
         weekday = date(shift.year, shift.month, day).weekday()
 
-        day_assignments = shift.get_day_assignments(day)
+        # シフト表は同一人物・同一日の最初の1件を表示するため、検証人数も
+        # 同じ見え方に揃える。復元データ等の重複で人数だけ増えるのを防ぐ。
+        day_assignments = []
+        seen_employees: set[str] = set()
+        for assignment in shift.get_day_assignments(day):
+            if assignment.employee in seen_employees:
+                continue
+            seen_employees.add(assignment.employee)
+            day_assignments.append(assignment)
 
         for store, cap in capacity_map.items():
             if cap is None:
@@ -640,7 +648,7 @@ def _check_store_capacity(
             # 大宮の通常体制はエコ対応1名以上・合計3名以上。
             # エコ担当はチケット対応もできるため、専任者の内訳は固定しない。
             # 需給調整時はエコ対応1名以上・合計2名を許容する（警告のみ）。
-            if store == Store.OMIYA and mode == OperationMode.NORMAL:
+            if store == Store.OMIYA:
                 if eco_count >= 1 and total >= 3:
                     continue
                 if (
