@@ -26,7 +26,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "鈴木",
@@ -74,7 +75,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "牧野",
@@ -124,7 +126,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "下地",
@@ -149,7 +152,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "長尾",
@@ -173,7 +177,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "土井",
@@ -198,7 +203,8 @@
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
-      "only_on_request_days": false
+      "only_on_request_days": false,
+      "is_eco_core": true
     },
     {
       "name": "板倉",
