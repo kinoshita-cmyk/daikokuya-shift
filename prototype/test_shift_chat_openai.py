@@ -89,11 +89,26 @@ class ShiftChatOpenAITest(unittest.TestCase):
             Store.OMIYA,
         )
 
-        engine.undo_last_apply()
+        undo_message = engine.undo_last_apply()
+        self.assertIn("青枠プレビュー", undo_message)
         self.assertEqual(
             engine.shift.get_assignment("山本", 1).store,
             Store.AKABANE,
         )
+        self.assertEqual(engine.get_pending_change_count(), 1)
+        self.assertEqual(
+            engine.get_preview_shift().get_assignment("山本", 1).store,
+            Store.OMIYA,
+        )
+
+        back_message = engine.undo_last_apply()
+        self.assertIn("修正前", back_message)
+        self.assertEqual(engine.get_pending_change_count(), 0)
+        self.assertEqual(
+            engine.shift.get_assignment("山本", 1).store,
+            Store.AKABANE,
+        )
+
         message = engine.redo_last_apply()
 
         self.assertIn("プレビューを復元", message)

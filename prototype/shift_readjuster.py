@@ -943,23 +943,26 @@ def _apply_move_set(
     return candidate
 
 
-def _individually_safe_move_pool(
+def _candidate_move_pool(
     shift: MonthlyShift,
     *,
     moves: list[_ReciprocalMove],
     validation_context: Optional[dict],
     max_consec: int,
     baseline_validation: ValidationResult,
-    max_per_target_pattern: int = 1,
+    max_per_target_pattern: int = 3,
+    max_total_moves: int = 600,
 ) -> tuple[list[_ReciprocalMove], int]:
-    """Keep a small set of safe substitutes for each target day pattern.
+    """Keep safe and complementary moves for the exact repair model.
 
-    The full validator contains operational rules that would be cumbersome to
-    duplicate inside CP-SAT.  Checking each one-swap building block first
-    removes most impossible combinations while retaining alternative partners.
+    A move can temporarily add a warning that a second move removes.  Therefore
+    individually unsafe moves must remain available for combined validation.
+    Individually safe moves are ordered first, while alternative partners and
+    complementary moves are retained within a bounded monthly-size pool.
     """
     safe_moves: list[_ReciprocalMove] = []
-    safe_count_by_pattern: dict[tuple, int] = {}
+    complementary_moves: list[_ReciprocalMove] = []
+    checked_count_by_pattern: dict[tuple, int] = {}
     validated = 0
     for move in moves:
         pattern = (
@@ -967,18 +970,22 @@ def _individually_safe_move_pool(
             move.target_work_day,
             move.target_off_day,
         )
-        if safe_count_by_pattern.get(pattern, 0) >= max_per_target_pattern:
+        if checked_count_by_pattern.get(pattern, 0) >= max_per_target_pattern:
             continue
+        checked_count_by_pattern[pattern] = (
+            checked_count_by_pattern.get(pattern, 0) + 1
+        )
         candidate = _apply_move_set(shift, [move])
         result = validate_with_context(candidate, validation_context, max_consec)
         validated += 1
-        if result.error_count > baseline_validation.error_count:
-            continue
-        if _new_protected_issues(baseline_validation, result):
-            continue
-        safe_moves.append(move)
-        safe_count_by_pattern[pattern] = safe_count_by_pattern.get(pattern, 0) + 1
-    return safe_moves, validated
+        if (
+            result.error_count <= baseline_validation.error_count
+            and not _new_protected_issues(baseline_validation, result)
+        ):
+            safe_moves.append(move)
+        else:
+            complementary_moves.append(move)
+    return (safe_moves + complementary_moves)[:max_total_moves], validated
 
 
 def _isolated_metric_vars(
@@ -1237,8 +1244,14 @@ def _solve_tobishi_move_set(
         ):
             return candidate, validated, len(moves)
 
-        # Exclude this exact set and continue with the next-best full solution.
-        model.Add(sum(selected[index] for index in chosen_indices) <= len(chosen_indices) - 1)
+        # Exclude only this exact selection.  A superset may add the reciprocal
+        # move that resolves the warning which made this partial set unsafe.
+        chosen_set = set(chosen_indices)
+        exact_match_terms = [
+            selected[index] if index in chosen_set else 1 - selected[index]
+            for index in range(len(selected))
+        ]
+        model.Add(sum(exact_match_terms) <= len(selected) - 1)
 
     return None, validated, len(moves)
 
@@ -1367,7 +1380,7 @@ def propose_tobishi_reoptimization_options(
         protected_names=all_adjustable,
         validation_context=validation_context,
     )
-    moves, building_blocks_checked = _individually_safe_move_pool(
+    moves, building_blocks_checked = _candidate_move_pool(
         original,
         moves=raw_moves,
         validation_context=validation_context,
@@ -1437,7 +1450,7 @@ def propose_tobishi_reoptimization_options(
         notes=[
             "対象: " + "、".join(requested),
             (
-                f"交換候補{len(raw_moves)}組を確認し、安全な候補{len(moves)}組から"
+                f"交換候補{len(raw_moves)}組を確認し、組み合わせ候補{len(moves)}組から"
                 f"完成案を探索しました（検証{checked_total}回）。"
             ),
         ],

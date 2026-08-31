@@ -376,6 +376,61 @@ class ShiftReadjusterTest(unittest.TestCase):
         self.assertIn("今津", changed_names)
         self.assertIn("春山", changed_names)
 
+    def test_exact_reoptimization_keeps_complementary_unsafe_moves(self) -> None:
+        assignments = []
+        work_days = {
+            "今津": {2, 4, 5, 6},
+            "春山": {10, 12, 13, 14},
+            "鈴木": {3},
+            "大塚": {11},
+        }
+        stores = {
+            "今津": Store.OMIYA,
+            "春山": Store.OMIYA,
+            "鈴木": Store.SUZURAN,
+            "大塚": Store.SUZURAN,
+        }
+        for employee, employee_work_days in work_days.items():
+            for day in range(1, 31):
+                assignments.append(self._assignment(
+                    employee,
+                    day,
+                    stores[employee] if day in employee_work_days else Store.OFF,
+                ))
+        shift = MonthlyShift(year=2026, month=9, assignments=assignments)
+
+        def validate_combination(candidate, *_args, **_kwargs):
+            remaining = sum(
+                len(tobishi_days(candidate, employee))
+                for employee in ("今津", "春山")
+            )
+            if candidate is shift or remaining in {0, 2}:
+                return ValidationResult()
+            return ValidationResult(issues=[Issue(
+                severity="WARNING",
+                category="組み合わせ途中",
+                day=1,
+                employee="今津",
+                message="もう一方の交換と組み合わせれば解消します",
+            )])
+
+        with patch(
+            "prototype.shift_readjuster.validate_with_context",
+            side_effect=validate_combination,
+        ):
+            options = propose_tobishi_reoptimization_options(
+                shift,
+                employee_names=["今津", "春山"],
+                max_swaps=2,
+            )
+
+        best = options[0]
+        self.assertTrue(best.has_changes)
+        self.assertEqual(
+            best.after_metrics["休みに挟まれた単独出勤"], 0
+        )
+        self.assertEqual(len(best.changes), 8)
+
     def test_quality_guard_reports_regressed_indicators(self) -> None:
         baseline = {
             "tobishi_work:今津": {

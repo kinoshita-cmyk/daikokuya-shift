@@ -842,16 +842,27 @@ class ShiftChatEngine:
         return self._tool_cleanup_yamamoto()
 
     def undo_last_apply(self) -> str:
-        """直近の確定変更を元に戻す。"""
+        """Step back from applied shift to preview, then to the base shift."""
+        if self.redo_preview_active and self.get_pending_change_count():
+            n = self.get_pending_change_count()
+            self.pending_changes.clear()
+            self.redo_preview_active = False
+            self.last_status_message = (
+                f"↩ {n}件のプレビューを外し、修正前のシフトに戻しました"
+            )
+            return self.last_status_message
         if not self.undo_stack:
             return "戻せる変更はありません"
         label, previous = self.undo_stack.pop()
         current = self._clone_shift(self.shift)
         self.redo_stack.append((label, current))
-        self.pending_changes.clear()
-        self.redo_preview_active = False
         self._replace_shift_contents(previous)
-        self.last_status_message = f"↩ {label}を元に戻しました"
+        self.pending_changes = self._pending_changes_to_shift(current)
+        self.redo_preview_active = bool(self.pending_changes)
+        self.last_status_message = (
+            f"↩ {label}を青枠プレビューへ戻しました。"
+            "もう一度「戻る」で修正前へ戻せます"
+        )
         return self.last_status_message
 
     def redo_last_apply(self) -> str:
