@@ -8460,6 +8460,13 @@ if mode == "📊 経営者ビュー":
                 "作成済みのシフトを対象に、目的や気になる点を普段の言葉で伝えられます。"
                 "変更はまずプレビューになり、確認してから本シフトへ反映します。"
             )
+            shift_readjustment_locked = lock_info is not None
+            if shift_readjustment_locked:
+                st.info(
+                    "🔒 この月は確定版としてロック中です。改善案の作成とプレビュー確認は"
+                    "できますが、本シフトへの反映には先にロック解除が必要です。"
+                )
+                st.session_state["chat_apply_confirm"] = False
 
             openai_api_key = get_openai_api_key()
             anthropic_api_key = get_anthropic_api_key()
@@ -8712,7 +8719,7 @@ if mode == "📊 経営者ビュー":
                         st.rerun()
 
                 st.markdown("##### 📋 現在のシフト表")
-                st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
+                st.caption("AIが作ったプレビュー変更は、表では濃い青枠で表示します。")
 
                 def _save_chat_shift_snapshot(note: str) -> None:
                     try:
@@ -8756,6 +8763,12 @@ if mode == "📊 経営者ビュー":
                                 key="chat_apply_confirmed",
                                 type="primary",
                                 width="stretch",
+                                disabled=shift_readjustment_locked,
+                                help=(
+                                    "確定版のロックを解除してから反映してください"
+                                    if shift_readjustment_locked
+                                    else "確認したプレビュー変更を本シフトに反映します"
+                                ),
                             ):
                                 msg = chat_engine.apply_pending_changes()
                                 _save_chat_shift_snapshot(msg)
@@ -8775,8 +8788,15 @@ if mode == "📊 経営者ビュー":
                                 key="chat_apply_pending",
                                 type="primary",
                                 width="stretch",
-                                disabled=action_pending_count == 0,
-                                help="プレビュー中の変更を本シフトに反映する前に確認します",
+                                disabled=(
+                                    action_pending_count == 0
+                                    or shift_readjustment_locked
+                                ),
+                                help=(
+                                    "確定版のロックを解除してから反映してください"
+                                    if shift_readjustment_locked
+                                    else "プレビュー中の変更を本シフトに反映する前に確認します"
+                                ),
                             ):
                                 st.session_state["chat_apply_confirm"] = True
                                 st.session_state["chat_discard_confirm"] = False
@@ -8803,8 +8823,12 @@ if mode == "📊 経営者ビュー":
                             "← 戻る",
                             key="chat_undo",
                             width="stretch",
-                            disabled=not can_undo,
-                            help="直前に反映した変更を元に戻します",
+                            disabled=(not can_undo or shift_readjustment_locked),
+                            help=(
+                                "確定版のロックを解除してから変更履歴を操作してください"
+                                if shift_readjustment_locked
+                                else "直前に反映した変更を元に戻します"
+                            ),
                         ):
                             msg = chat_engine.undo_last_apply()
                             _save_chat_shift_snapshot(msg)
@@ -8817,8 +8841,12 @@ if mode == "📊 経営者ビュー":
                             "進む →",
                             key="chat_redo",
                             width="stretch",
-                            disabled=not can_redo,
-                            help="元に戻した変更をもう一度反映します",
+                            disabled=(not can_redo or shift_readjustment_locked),
+                            help=(
+                                "確定版のロックを解除してから変更履歴を操作してください"
+                                if shift_readjustment_locked
+                                else "元に戻した変更をもう一度反映します"
+                            ),
                         ):
                             msg = chat_engine.redo_last_apply()
                             _save_chat_shift_snapshot(msg)
@@ -8892,6 +8920,7 @@ if mode == "📊 経営者ビュー":
                     sticky=True,
                     changed_cells=changed_cells,
                     off_request_cells=build_off_request_cells(_cv_off),
+                    changed_cell_color="#1d4ed8",
                 )
 
                 _render_chat_action_buttons()
