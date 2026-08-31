@@ -974,7 +974,7 @@ def _candidate_move_pool(
     baseline_validation: ValidationResult,
     max_per_target_pattern: int = 3,
     max_total_moves: int = 600,
-) -> tuple[list[_ReciprocalMove], int]:
+) -> tuple[list[_ReciprocalMove], list[_ReciprocalMove], int]:
     """Keep safe and complementary moves for the exact repair model.
 
     A move can temporarily add a warning that a second move removes.  Therefore
@@ -1007,7 +1007,10 @@ def _candidate_move_pool(
             safe_moves.append(move)
         else:
             complementary_moves.append(move)
-    return (safe_moves + complementary_moves)[:max_total_moves], validated
+    safe_moves = safe_moves[:max_total_moves]
+    remaining_slots = max(0, max_total_moves - len(safe_moves))
+    complementary_moves = complementary_moves[:remaining_slots]
+    return safe_moves, complementary_moves, validated
 
 
 def _isolated_metric_vars(
@@ -1402,7 +1405,7 @@ def propose_tobishi_reoptimization_options(
         protected_names=all_adjustable,
         validation_context=validation_context,
     )
-    moves, building_blocks_checked = _candidate_move_pool(
+    safe_moves, complementary_moves, building_blocks_checked = _candidate_move_pool(
         original,
         moves=raw_moves,
         validation_context=validation_context,
@@ -1417,38 +1420,52 @@ def propose_tobishi_reoptimization_options(
     options: list[AdjustmentProposal] = []
     seen_states: set[tuple] = set()
     checked_total = building_blocks_checked
-    for strategy, label in strategy_labels:
-        adjusted, checked, pool_size = _solve_tobishi_move_set(
-            original,
-            moves=moves,
-            requested=requested,
-            priority_names=priority_names,
-            protected_names=all_adjustable,
-            strategy=strategy,
-            max_swaps=max_swaps,
-            validation_context=validation_context,
-            max_consec=max_consec,
-            baseline_validation=baseline_validation,
-        )
-        checked_total += checked
-        if adjusted is None:
-            continue
-        state_key = _shift_state_key(adjusted)
-        if state_key in seen_states:
-            continue
-        seen_states.add(state_key)
-        options.append(_proposal_for_tobishi_solution(
-            original,
-            adjusted,
-            requested=requested,
-            label=label,
-            strategy=strategy,
-            validated_count=checked,
-            move_pool_size=pool_size,
-            baseline_validation=baseline_validation,
-            validation_context=validation_context,
-            max_consec=max_consec,
-        ))
+    full_move_pool = safe_moves + complementary_moves
+    search_pools: list[list[_ReciprocalMove]] = []
+    if safe_moves:
+        # First solve only with moves that are already safe on their own.
+        # Mixing them immediately with hundreds of complementary building
+        # blocks can exhaust the validation-attempt limit before a known-safe
+        # combination is reached.
+        search_pools.append(safe_moves)
+    if full_move_pool and full_move_pool != safe_moves:
+        search_pools.append(full_move_pool)
+
+    for search_moves in search_pools:
+        for strategy, label in strategy_labels:
+            adjusted, checked, pool_size = _solve_tobishi_move_set(
+                original,
+                moves=search_moves,
+                requested=requested,
+                priority_names=priority_names,
+                protected_names=all_adjustable,
+                strategy=strategy,
+                max_swaps=max_swaps,
+                validation_context=validation_context,
+                max_consec=max_consec,
+                baseline_validation=baseline_validation,
+            )
+            checked_total += checked
+            if adjusted is None:
+                continue
+            state_key = _shift_state_key(adjusted)
+            if state_key in seen_states:
+                continue
+            seen_states.add(state_key)
+            options.append(_proposal_for_tobishi_solution(
+                original,
+                adjusted,
+                requested=requested,
+                label=label,
+                strategy=strategy,
+                validated_count=checked,
+                move_pool_size=pool_size,
+                baseline_validation=baseline_validation,
+                validation_context=validation_context,
+                max_consec=max_consec,
+            ))
+        if options:
+            break
 
     if options:
         options.sort(key=lambda proposal: (
@@ -1472,7 +1489,8 @@ def propose_tobishi_reoptimization_options(
         notes=[
             "対象: " + "、".join(requested),
             (
-                f"交換候補{len(raw_moves)}組を確認し、組み合わせ候補{len(moves)}組から"
+                f"交換候補{len(raw_moves)}組を確認し、"
+                f"組み合わせ候補{len(full_move_pool)}組から"
                 f"完成案を探索しました（検証{checked_total}回）。"
             ),
         ],

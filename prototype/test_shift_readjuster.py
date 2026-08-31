@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from prototype import shift_readjuster as readjuster
 from prototype.models import MonthlyShift, ShiftAssignment, Store
 from prototype.shift_readjuster import (
     apply_adjustment_proposal,
@@ -431,6 +432,67 @@ class ShiftReadjusterTest(unittest.TestCase):
             best.after_metrics["休みに挟まれた単独出勤"], 0
         )
         self.assertEqual(len(best.changes), 8)
+
+    def test_exact_reoptimization_tries_safe_pool_before_complementary_pool(self) -> None:
+        assignments = []
+        target_work_days = {2, 4, 5, 6}
+        for day in range(1, 31):
+            assignments.append(self._assignment(
+                "今津",
+                day,
+                Store.OMIYA if day in target_work_days else Store.OFF,
+            ))
+            assignments.append(self._assignment(
+                "鈴木",
+                day,
+                Store.OFF if day == 2 else Store.SUZURAN,
+            ))
+        shift = MonthlyShift(year=2026, month=9, assignments=assignments)
+        safe_move = readjuster._ReciprocalMove(
+            target="今津",
+            other="鈴木",
+            target_work_day=2,
+            target_off_day=3,
+        )
+        complementary_move = readjuster._ReciprocalMove(
+            target="今津",
+            other="鈴木",
+            target_work_day=4,
+            target_off_day=3,
+        )
+        searched_pools = []
+
+        def solve_pool(original, *, moves, **_kwargs):
+            searched_pools.append(list(moves))
+            self.assertEqual(list(moves), [safe_move])
+            return (
+                readjuster._apply_move_set(original, [safe_move]),
+                1,
+                len(moves),
+            )
+
+        with patch(
+            "prototype.shift_readjuster._enumerate_reciprocal_moves",
+            return_value=[safe_move, complementary_move],
+        ), patch(
+            "prototype.shift_readjuster._candidate_move_pool",
+            return_value=([safe_move], [complementary_move], 2),
+        ), patch(
+            "prototype.shift_readjuster._solve_tobishi_move_set",
+            side_effect=solve_pool,
+        ), patch(
+            "prototype.shift_readjuster.validate_with_context",
+            return_value=ValidationResult(),
+        ):
+            options = propose_tobishi_reoptimization_options(
+                shift,
+                employee_names=["今津"],
+                max_swaps=2,
+            )
+
+        self.assertTrue(options[0].has_changes)
+        self.assertTrue(searched_pools)
+        self.assertTrue(all(pool == [safe_move] for pool in searched_pools))
 
     def test_quality_guard_reports_regressed_indicators(self) -> None:
         baseline = {
