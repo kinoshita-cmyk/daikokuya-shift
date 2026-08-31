@@ -1,0 +1,59 @@
+# シフト管理システムの事前検査
+# ================================================================
+# 【設置先】アプリ本体リポジトリ daikokuya-shift
+# GitHub の Add file -> Create new file で、次の名前として登録する:
+#   .github/workflows/preflight_tests.yml
+#
+# app / prototype / config / requirements.txt の更新時に、構文確認と
+# 全自動テストを実行する。緑のチェックを確認してからStreamlitを
+# リブートすることで、既知の不具合を本番反映前に検知できる。
+
+name: シフトシステム事前検査
+
+on:
+  push:
+    paths:
+      - "app/**"
+      - "prototype/**"
+      - "config/**"
+      - "requirements.txt"
+      - ".github/workflows/preflight_tests.yml"
+  pull_request:
+    paths:
+      - "app/**"
+      - "prototype/**"
+      - "config/**"
+      - "requirements.txt"
+      - ".github/workflows/preflight_tests.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: shift-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: 構文・ルール・再調整を確認
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: コードを取得
+        uses: actions/checkout@v5
+
+      - name: Python 3.11 を準備
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 依存パッケージを準備
+        run: python -m pip install -r requirements.txt
+
+      - name: Python構文を確認
+        run: python -m compileall -q app prototype
+
+      - name: 全テストを実行
+        run: python -m unittest discover -s . -p 'test_*.py' -v
