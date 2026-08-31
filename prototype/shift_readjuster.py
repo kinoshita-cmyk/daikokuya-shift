@@ -11,6 +11,8 @@ from calendar import monthrange
 from dataclasses import dataclass, field
 from typing import Iterable, Optional
 
+from ortools.sat.python import cp_model
+
 from .employees import get_employee
 from .models import MonthlyShift, ShiftAssignment, Skill, Store
 from .rules import YamamotoLogic
@@ -38,6 +40,16 @@ class AdjustmentProposal:
     @property
     def has_changes(self) -> bool:
         return bool(self.changes)
+
+
+@dataclass(frozen=True)
+class _ReciprocalMove:
+    """One work/off exchange that keeps both headcount and workdays fixed."""
+
+    target: str
+    other: str
+    target_work_day: int
+    target_off_day: int
 
 
 def clone_shift(shift: MonthlyShift) -> MonthlyShift:
@@ -112,12 +124,14 @@ def validate_with_context(
 
 
 def _issue_signature(issue) -> tuple:
+    # Message text often contains a count or an employee list.  A harmless
+    # re-adjustment can change that text while leaving the same underlying
+    # issue in place, so identity is based on its structured location.
     return (
         issue.severity,
         issue.category,
         issue.day,
         issue.employee,
-        issue.message,
     )
 
 
@@ -420,7 +434,7 @@ def _candidate_swaps(
     return ranked
 
 
-def propose_tobishi_reduction(
+def _propose_tobishi_beam(
     shift: MonthlyShift,
     *,
     validation_context: Optional[dict] = None,
@@ -562,6 +576,546 @@ def propose_tobishi_reduction(
             ),
             "本人の×休み、新しいエラー、飛び石以外の新しい警告を増やさない候補だけを採用しました。",
         ],
+    )
+
+
+def _move_changes(
+    shift: MonthlyShift,
+    move: _ReciprocalMove,
+) -> dict[tuple[str, int], Store]:
+    target_work = shift.get_assignment(move.target, move.target_work_day)
+    other_work = shift.get_assignment(move.other, move.target_off_day)
+    if target_work is None or other_work is None:
+        return {}
+    return {
+        (move.target, move.target_work_day): Store.OFF,
+        (move.other, move.target_work_day): target_work.store,
+        (move.target, move.target_off_day): other_work.store,
+        (move.other, move.target_off_day): Store.OFF,
+    }
+
+
+def _enumerate_reciprocal_moves(
+    shift: MonthlyShift,
+    *,
+    requested: list[str],
+    all_core: list[str],
+    validation_context: Optional[dict],
+) -> list[_ReciprocalMove]:
+    """Return unique direct-improvement moves for the exact repair model."""
+    moves: list[_ReciprocalMove] = []
+    seen_changes: set[tuple] = set()
+    before_isolated_work = {
+        employee: len(tobishi_days(shift, employee)[0])
+        for employee in requested
+    }
+    prioritize_lone_work = any(before_isolated_work.values())
+    for swap in _candidate_swaps(
+        shift,
+        requested=requested,
+        all_core=all_core,
+        validation_context=validation_context,
+    ):
+        _, _, work_day, off_day, target, other = swap
+        move = _ReciprocalMove(
+            target=target,
+            other=other,
+            target_work_day=work_day,
+            target_off_day=off_day,
+        )
+        if prioritize_lone_work:
+            target_working = _working_map(shift, target)
+            target_working[work_day] = False
+            target_working[off_day] = True
+            after_isolated_work = _metrics_from_working(target_working)[
+                "休みに挟まれた単独出勤"
+            ]
+            if after_isolated_work >= before_isolated_work.get(target, 0):
+                continue
+        changes = _move_changes(shift, move)
+        if len(changes) != 4:
+            continue
+        change_key = tuple(sorted(
+            (employee, day, store.value)
+            for (employee, day), store in changes.items()
+        ))
+        if change_key in seen_changes:
+            continue
+        seen_changes.add(change_key)
+        moves.append(move)
+    return moves
+
+
+def _apply_move_set(
+    shift: MonthlyShift,
+    moves: list[_ReciprocalMove],
+) -> MonthlyShift:
+    candidate = clone_shift(shift)
+    for move in moves:
+        for (employee, day), store in _move_changes(shift, move).items():
+            _replace_assignment(candidate, employee, day, store)
+    return candidate
+
+
+def _individually_safe_move_pool(
+    shift: MonthlyShift,
+    *,
+    moves: list[_ReciprocalMove],
+    validation_context: Optional[dict],
+    max_consec: int,
+    baseline_validation: ValidationResult,
+    max_per_target_pattern: int = 1,
+) -> tuple[list[_ReciprocalMove], int]:
+    """Keep a small set of safe substitutes for each target day pattern.
+
+    The full validator contains operational rules that would be cumbersome to
+    duplicate inside CP-SAT.  Checking each one-swap building block first
+    removes most impossible combinations while retaining alternative partners.
+    """
+    safe_moves: list[_ReciprocalMove] = []
+    safe_count_by_pattern: dict[tuple, int] = {}
+    validated = 0
+    for move in moves:
+        pattern = (
+            move.target,
+            move.target_work_day,
+            move.target_off_day,
+        )
+        if safe_count_by_pattern.get(pattern, 0) >= max_per_target_pattern:
+            continue
+        candidate = _apply_move_set(shift, [move])
+        result = validate_with_context(candidate, validation_context, max_consec)
+        validated += 1
+        if result.error_count > baseline_validation.error_count:
+            continue
+        if _new_protected_issues(baseline_validation, result):
+            continue
+        safe_moves.append(move)
+        safe_count_by_pattern[pattern] = safe_count_by_pattern.get(pattern, 0) + 1
+    return safe_moves, validated
+
+
+def _isolated_metric_vars(
+    model: cp_model.CpModel,
+    working: dict[tuple[str, int], cp_model.IntVar],
+    employee: str,
+    days: int,
+) -> tuple[list[cp_model.IntVar], list[cp_model.IntVar]]:
+    isolated_work = []
+    isolated_off = []
+    for day in range(2, days):
+        previous = working[(employee, day - 1)]
+        current = working[(employee, day)]
+        following = working[(employee, day + 1)]
+
+        lone_work = model.NewBoolVar(f"iw_{employee}_{day}")
+        model.Add(lone_work <= current)
+        model.Add(lone_work + previous <= 1)
+        model.Add(lone_work + following <= 1)
+        model.Add(lone_work >= current - previous - following)
+        isolated_work.append(lone_work)
+
+        lone_off = model.NewBoolVar(f"io_{employee}_{day}")
+        model.Add(lone_off <= previous)
+        model.Add(lone_off <= following)
+        model.Add(lone_off + current <= 1)
+        model.Add(lone_off >= previous + following - current - 1)
+        isolated_off.append(lone_off)
+    return isolated_work, isolated_off
+
+
+def _solve_tobishi_move_set(
+    shift: MonthlyShift,
+    *,
+    moves: list[_ReciprocalMove],
+    requested: list[str],
+    all_core: list[str],
+    strategy: str,
+    max_swaps: int,
+    validation_context: Optional[dict],
+    max_consec: int,
+    baseline_validation: ValidationResult,
+) -> tuple[Optional[MonthlyShift], int, int]:
+    """Solve all compatible swaps together, then reject unsafe full solutions."""
+    if not moves or max_swaps <= 0:
+        return None, 0, 0
+
+    model = cp_model.CpModel()
+    selected = [model.NewBoolVar(f"move_{index}") for index in range(len(moves))]
+    model.Add(sum(selected) >= 1)
+    model.Add(sum(selected) <= max_swaps)
+
+    move_changes = [_move_changes(shift, move) for move in moves]
+    cell_moves: dict[tuple[str, int], list[int]] = {}
+    for index, changes in enumerate(move_changes):
+        for cell in changes:
+            cell_moves.setdefault(cell, []).append(index)
+    for indices in cell_moves.values():
+        if len(indices) > 1:
+            model.Add(sum(selected[index] for index in indices) <= 1)
+
+    days = monthrange(shift.year, shift.month)[1]
+    metric_names = sorted(set(all_core) | set(requested))
+    model_names = sorted(
+        set(metric_names)
+        | {move.target for move in moves}
+        | {move.other for move in moves}
+    )
+    working: dict[tuple[str, int], cp_model.IntVar] = {}
+    initial_working: dict[tuple[str, int], int] = {}
+    for employee in model_names:
+        for day in range(1, days + 1):
+            initial_assignment = shift.get_assignment(employee, day)
+            initial = int(bool(
+                initial_assignment and initial_assignment.store != Store.OFF
+            ))
+            initial_working[(employee, day)] = initial
+            work_var = model.NewBoolVar(f"work_{employee}_{day}")
+            deltas = []
+            for index in cell_moves.get((employee, day), []):
+                after = move_changes[index][(employee, day)]
+                after_work = int(after != Store.OFF)
+                delta = after_work - initial
+                if delta:
+                    deltas.append(delta * selected[index])
+            model.Add(work_var == initial + sum(deltas))
+            working[(employee, day)] = work_var
+
+    # Do not create a new over-limit work or off streak.  Existing exceptional
+    # windows are left untouched and the full validator still checks the final
+    # result, including previous-month carryover and monthly exceptions.
+    ctx = validation_context or {}
+    employee_work_limits = ctx.get("employee_max_consecutive_work", {}) or {}
+    employee_off_limits = ctx.get("employee_max_consecutive_off", {}) or {}
+    off_requests = ctx.get("off_requests", {}) or {}
+    for employee in requested:
+        work_limit = min(
+            int(max_consec),
+            int(employee_work_limits.get(employee, max_consec)),
+        )
+        if work_limit > 0:
+            for start in range(1, days - work_limit + 1):
+                window = list(range(start, start + work_limit + 1))
+                if all(initial_working[(employee, day)] for day in window):
+                    continue
+                model.Add(
+                    sum(working[(employee, day)] for day in window)
+                    <= work_limit
+                )
+
+        off_limit = min(2, int(employee_off_limits.get(employee, 2)))
+        requested_off = _off_request_days(validation_context, employee)
+        if off_limit > 0:
+            for start in range(1, days - off_limit + 1):
+                window = list(range(start, start + off_limit + 1))
+                original_is_off = all(
+                    not initial_working[(employee, day)] for day in window
+                )
+                submitted_exception = all(day in requested_off for day in window)
+                if original_is_off or submitted_exception:
+                    continue
+                model.Add(
+                    sum(working[(employee, day)] for day in window) >= 1
+                )
+
+    isolated_by_employee: dict[str, tuple[list, list]] = {}
+    for employee in metric_names:
+        isolated_by_employee[employee] = _isolated_metric_vars(
+            model, working, employee, days
+        )
+
+    target_iw = sum(
+        variable
+        for employee in requested
+        for variable in isolated_by_employee[employee][0]
+    )
+    target_io = sum(
+        variable
+        for employee in requested
+        for variable in isolated_by_employee[employee][1]
+    )
+    global_iw = sum(
+        variable
+        for employee in all_core
+        for variable in isolated_by_employee[employee][0]
+    )
+    global_io = sum(
+        variable
+        for employee in all_core
+        for variable in isolated_by_employee[employee][1]
+    )
+
+    improvement_flags = []
+    before_target_score = 0
+    for employee in requested:
+        before_work, before_off = tobishi_days(shift, employee)
+        before_score = len(before_work) * 10 + len(before_off) * 2
+        before_target_score += before_score
+        employee_iw = sum(isolated_by_employee[employee][0])
+        employee_io = sum(isolated_by_employee[employee][1])
+        employee_score = employee_iw * 10 + employee_io * 2
+        model.Add(employee_iw <= len(before_work))
+        model.Add(employee_score <= before_score)
+        if before_score > 0:
+            improved = model.NewBoolVar(f"improved_{employee}")
+            model.Add(employee_score <= before_score - 1).OnlyEnforceIf(improved)
+            model.Add(employee_score == before_score).OnlyEnforceIf(improved.Not())
+            improvement_flags.append(improved)
+
+    target_score = target_iw * 10 + target_io * 2
+    model.Add(target_score <= before_target_score - 1)
+    if improvement_flags:
+        model.Add(sum(improvement_flags) >= 1)
+    not_improved = (
+        len(improvement_flags) - sum(improvement_flags)
+        if improvement_flags else 0
+    )
+    move_count = sum(selected)
+
+    if strategy == "minimal":
+        objective = (
+            move_count * 100_000_000
+            + not_improved * 1_000_000
+            + target_iw * 10_000
+            + target_io * 100
+            + global_iw * 10
+            + global_io
+        )
+    elif strategy == "balanced":
+        objective = (
+            not_improved * 100_000_000
+            + target_iw * 2_000_000
+            + global_iw * 100_000
+            + move_count * 10_000
+            + target_io * 100
+            + global_io
+        )
+    else:
+        objective = (
+            not_improved * 1_000_000_000
+            + target_iw * 10_000_000
+            # Once lone work days are minimized, prefer the smallest repair.
+            # This avoids chasing a theoretical zero lone-off score through
+            # many operationally disruptive exchanges.
+            + move_count * 1_000_000
+            + target_io * 10_000
+            + global_iw * 100
+            + global_io
+        )
+    model.Minimize(objective)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 8.0
+    solver.parameters.num_search_workers = 8
+    solver.parameters.random_seed = 42
+    validated = 0
+    for _attempt in range(200):
+        status = solver.Solve(model)
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            return None, validated, len(moves)
+        chosen_indices = [
+            index for index, variable in enumerate(selected)
+            if solver.Value(variable)
+        ]
+        chosen_moves = [moves[index] for index in chosen_indices]
+        candidate = _apply_move_set(shift, chosen_moves)
+        candidate_validation = validate_with_context(
+            candidate, validation_context, max_consec
+        )
+        validated += 1
+        if (
+            candidate_validation.error_count <= baseline_validation.error_count
+            and not _new_protected_issues(
+                baseline_validation, candidate_validation
+            )
+        ):
+            return candidate, validated, len(moves)
+
+        # Exclude this exact set and continue with the next-best full solution.
+        model.Add(sum(selected[index] for index in chosen_indices) <= len(chosen_indices) - 1)
+
+    return None, validated, len(moves)
+
+
+def _proposal_for_tobishi_solution(
+    original: MonthlyShift,
+    adjusted: MonthlyShift,
+    *,
+    requested: list[str],
+    label: str,
+    strategy: str,
+    validated_count: int,
+    move_pool_size: int,
+    baseline_validation: ValidationResult,
+    validation_context: Optional[dict],
+    max_consec: int,
+) -> AdjustmentProposal:
+    before_metrics = _tobishi_metrics(original, requested)
+    after_metrics = _tobishi_metrics(adjusted, requested)
+    changes = _diff(original, adjusted)
+    after_validation = validate_with_context(adjusted, validation_context, max_consec)
+    notes = ["対象: " + "、".join(requested)]
+    for employee in requested:
+        before_work, before_off = tobishi_days(original, employee)
+        after_work, after_off = tobishi_days(adjusted, employee)
+        before_work_text = "・".join(map(str, before_work)) or "なし"
+        after_work_text = "・".join(map(str, after_work)) or "なし"
+        before_off_text = "・".join(map(str, before_off)) or "なし"
+        after_off_text = "・".join(map(str, after_off)) or "なし"
+        notes.append(
+            f"{employee}: 単独出勤 {before_work_text} → {after_work_text} / "
+            f"単独休日 {before_off_text} → {after_off_text}"
+        )
+    notes.extend([
+        (
+            f"交換候補{move_pool_size}組を同時に比較し、"
+            f"完成案{validated_count}件を安全性確認しました。"
+        ),
+        (
+            f"検証結果: エラー {baseline_validation.error_count}→"
+            f"{after_validation.error_count}件 / 警告 "
+            f"{baseline_validation.warning_count}→{after_validation.warning_count}件"
+        ),
+        "本人の×休み、各日の店舗人数、各人の月間勤務日数は変更しません。",
+    ])
+    return AdjustmentProposal(
+        title=f"飛び石勤務の再最適化（{label}）",
+        summary=(
+            f"{label}として、{len(changes) // 4}組・{len(changes)}セルの"
+            "相互入れ替えを提案します。"
+        ),
+        changes=changes,
+        before_metrics=before_metrics,
+        after_metrics=after_metrics,
+        notes=notes,
+    )
+
+
+def propose_tobishi_reoptimization_options(
+    shift: MonthlyShift,
+    *,
+    validation_context: Optional[dict] = None,
+    max_consec: int = 5,
+    employee_names: Optional[Iterable[str]] = None,
+    max_swaps: int = 6,
+) -> list[AdjustmentProposal]:
+    """Return distinct exact-repair options for an existing monthly shift."""
+    original = clone_shift(shift)
+    all_core = _eco_core_names(original)
+    requested = [name for name in (employee_names or all_core) if name in all_core]
+    if not requested:
+        return [AdjustmentProposal(
+            title="飛び石勤務の再最適化",
+            summary="対象となるエコ主力が見つかりませんでした。",
+        )]
+
+    baseline_validation = validate_with_context(
+        original, validation_context, max_consec
+    )
+    raw_moves = _enumerate_reciprocal_moves(
+        original,
+        requested=requested,
+        all_core=all_core,
+        validation_context=validation_context,
+    )
+    moves, building_blocks_checked = _individually_safe_move_pool(
+        original,
+        moves=raw_moves,
+        validation_context=validation_context,
+        max_consec=max_consec,
+        baseline_validation=baseline_validation,
+    )
+    strategy_labels = [
+        ("improvement", "改善優先案"),
+        ("balanced", "バランス案"),
+        ("minimal", "変更最小案"),
+    ]
+    options: list[AdjustmentProposal] = []
+    seen_states: set[tuple] = set()
+    checked_total = building_blocks_checked
+    for strategy, label in strategy_labels:
+        adjusted, checked, pool_size = _solve_tobishi_move_set(
+            original,
+            moves=moves,
+            requested=requested,
+            all_core=all_core,
+            strategy=strategy,
+            max_swaps=max_swaps,
+            validation_context=validation_context,
+            max_consec=max_consec,
+            baseline_validation=baseline_validation,
+        )
+        checked_total += checked
+        if adjusted is None:
+            continue
+        state_key = _shift_state_key(adjusted)
+        if state_key in seen_states:
+            continue
+        seen_states.add(state_key)
+        options.append(_proposal_for_tobishi_solution(
+            original,
+            adjusted,
+            requested=requested,
+            label=label,
+            strategy=strategy,
+            validated_count=checked,
+            move_pool_size=pool_size,
+            baseline_validation=baseline_validation,
+            validation_context=validation_context,
+            max_consec=max_consec,
+        ))
+
+    if options:
+        options.sort(key=lambda proposal: (
+            proposal.after_metrics.get("休みに挟まれた単独出勤", 0),
+            len(proposal.changes),
+            proposal.after_metrics.get("出勤に挟まれた単独休日", 0),
+        ))
+        options[0].title = "飛び石勤務の再最適化（改善優先案）"
+        return options
+    before_metrics = _tobishi_metrics(original, requested)
+    return [AdjustmentProposal(
+        title="飛び石勤務の再最適化",
+        summary=(
+            "本人の×休み、店舗人数、月間勤務日数、ほかの絶対条件を守る"
+            "完成案を、組み合わせ再最適化でも見つけられませんでした。"
+        ),
+        before_metrics=before_metrics,
+        after_metrics=before_metrics,
+        notes=[
+            "対象: " + "、".join(requested),
+            (
+                f"交換候補{len(raw_moves)}組を確認し、安全な候補{len(moves)}組から"
+                f"完成案を探索しました（検証{checked_total}回）。"
+            ),
+        ],
+    )]
+
+
+def propose_tobishi_reduction(
+    shift: MonthlyShift,
+    *,
+    validation_context: Optional[dict] = None,
+    max_consec: int = 5,
+    employee_names: Optional[Iterable[str]] = None,
+    max_swaps: int = 6,
+) -> AdjustmentProposal:
+    """Return the strongest safe exact-repair option, with beam fallback."""
+    options = propose_tobishi_reoptimization_options(
+        shift,
+        validation_context=validation_context,
+        max_consec=max_consec,
+        employee_names=employee_names,
+        max_swaps=max_swaps,
+    )
+    if options and options[0].has_changes:
+        return options[0]
+    return _propose_tobishi_beam(
+        shift,
+        validation_context=validation_context,
+        max_consec=max_consec,
+        employee_names=employee_names,
+        max_swaps=max_swaps,
     )
 
 

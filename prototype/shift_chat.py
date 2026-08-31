@@ -41,7 +41,7 @@ from .models import MonthlyShift, ShiftAssignment, Store
 from .employees import ALL_EMPLOYEES, get_employee
 from .shift_readjuster import (
     AdjustmentProposal,
-    propose_tobishi_reduction,
+    propose_tobishi_reoptimization_options,
     propose_yamamoto_cleanup,
     tobishi_days,
 )
@@ -67,8 +67,9 @@ SYSTEM_PROMPT = """\
 - 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
 - 本人が提出した「×」休み希望日は絶対に勤務へ変更しない
 - 制約違反のリスクがある場合は警告する
-- 「飛び石を減らして」のような目的指定には、専用の広域再調整ツールを優先する
-- 専用ツールは単独出勤・単独休日と複数の相互入れ替えを比較する。候補なしの場合は
+- 「飛び石を減らして」のような目的指定には、専用の再最適化ツールを優先する
+- 専用ツールは現在の本シフトを出発点に、複数の相互入れ替えを同時に比較する。
+  対象者が複数いる場合は一部の人だけでなく、対象者全員の改善を優先する。候補なしの場合は
   「不可能」と断定せず、その探索範囲では見つからなかったと説明する
 - 飛び石以外の依頼は get_adjustment_overview で全体像を確認してから、必要な日・人の
   詳細を取得し、複数の変更を組み合わせて検討する
@@ -192,7 +193,8 @@ TOOLS = [
         "name": "optimize_tobishi",
         "description": (
             "エコ主力の飛び石勤務を、本人の絶対休み・各日の店舗人数・"
-            "各人の月間勤務日数を維持した相互入れ替えで減らします。"
+            "各人の月間勤務日数を維持し、複数の相互入れ替えを同時に"
+            "再最適化して減らします。"
             "対象者を省略すると全エコ主力を対象にします。"
         ),
         "input_schema": {
@@ -624,7 +626,12 @@ class ShiftChatEngine:
         self.pending_changes.append(proposed)
         return f"プレビュー: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
 
-    def _queue_proposal(self, proposal: AdjustmentProposal) -> str:
+    def _queue_proposal(
+        self,
+        proposal: AdjustmentProposal,
+        *,
+        replace_pending: bool = False,
+    ) -> str:
         """Add a deterministic proposal to the shared preview queue."""
         if not proposal.has_changes:
             details = " / ".join(proposal.notes)
@@ -641,6 +648,8 @@ class ShiftChatEngine:
         violations = self._off_request_violation_messages(proposed)
         if violations:
             return "変更できません: " + " / ".join(violations)
+        if replace_pending:
+            self.pending_changes.clear()
         self.pending_changes.extend(proposed)
 
         lines = [proposal.summary]
@@ -653,6 +662,22 @@ class ShiftChatEngine:
             ) or "-"
             lines.append(f"再調整前: {before}")
             lines.append(f"再調整後: {after}")
+        lines.append("変更内容:")
+        for change in sorted(
+            proposal.changes, key=lambda item: (item.day, item.employee)
+        ):
+            before_store = (
+                change.before_store.display_name
+                if change.before_store is not None else "未配置"
+            )
+            after_store = (
+                change.after_store.display_name
+                if change.after_store is not None else "未配置"
+            )
+            lines.append(
+                f"- {change.day}日 {change.employee}: "
+                f"{before_store} → {after_store}"
+            )
         lines.extend(proposal.notes)
         lines.append(
             f"プレビュー {len(proposal.changes)}セル分を作成しました。"
@@ -663,16 +688,19 @@ class ShiftChatEngine:
     def _tool_optimize_tobishi(
         self,
         employees: Optional[list[str]] = None,
-        max_swaps: int = 2,
+        max_swaps: int = 6,
     ) -> str:
-        proposal = propose_tobishi_reduction(
-            self._apply_pending_to_shift(),
+        # The language model may choose an overly small value.  The repair
+        # engine needs room for the five-exchange patterns seen in production.
+        max_swaps = max(6, int(max_swaps or 6))
+        options = propose_tobishi_reoptimization_options(
+            self.shift,
             validation_context=self.validation_inputs,
             max_consec=self.max_consec,
             employee_names=employees,
             max_swaps=max_swaps,
         )
-        return self._queue_proposal(proposal)
+        return self._queue_proposal(options[0], replace_pending=True)
 
     def _tool_cleanup_yamamoto(self) -> str:
         proposal = propose_yamamoto_cleanup(self._apply_pending_to_shift())
@@ -736,10 +764,28 @@ class ShiftChatEngine:
     def propose_tobishi_adjustment(
         self,
         employees: Optional[list[str]] = None,
-        max_swaps: int = 4,
+        max_swaps: int = 6,
     ) -> str:
         """画面の簡単操作から飛び石再調整案を作る。"""
         return self._tool_optimize_tobishi(employees, max_swaps)
+
+    def find_tobishi_adjustment_options(
+        self,
+        employees: Optional[list[str]] = None,
+        max_swaps: int = 6,
+    ) -> list[AdjustmentProposal]:
+        """Return safe alternatives without changing the current preview."""
+        return propose_tobishi_reoptimization_options(
+            self.shift,
+            validation_context=self.validation_inputs,
+            max_consec=self.max_consec,
+            employee_names=employees,
+            max_swaps=max_swaps,
+        )
+
+    def preview_adjustment_proposal(self, proposal: AdjustmentProposal) -> str:
+        """Replace the current preview with a manager-selected proposal."""
+        return self._queue_proposal(proposal, replace_pending=True)
 
     def propose_yamamoto_adjustment(self) -> str:
         """画面の簡単操作から山本の不要出勤整理案を作る。"""
@@ -795,7 +841,7 @@ class ShiftChatEngine:
         elif name == "optimize_tobishi":
             return self._tool_optimize_tobishi(
                 employees=args.get("employees"),
-                max_swaps=args.get("max_swaps", 2),
+                max_swaps=args.get("max_swaps", 6),
             )
         elif name == "cleanup_yamamoto":
             return self._tool_cleanup_yamamoto()
@@ -901,6 +947,22 @@ class ShiftChatEngine:
 
     def chat(self, user_message: str, max_iterations: int = 10) -> str:
         """ユーザーメッセージに応答（ツール呼び出しを含む）。"""
+        normalized_message = str(user_message or "")
+        if (
+            "飛び石" in normalized_message
+            and any(
+                keyword in normalized_message
+                for keyword in ("減ら", "改善", "調整", "なく", "最適")
+            )
+        ):
+            requested_names = [
+                employee.name for employee in ALL_EMPLOYEES
+                if employee.name in normalized_message
+            ]
+            return self._tool_optimize_tobishi(
+                employees=requested_names or None,
+                max_swaps=6,
+            )
         if self.provider == "openai":
             return self._chat_openai(user_message, max_iterations)
         if self.provider == "local":
