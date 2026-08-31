@@ -41,9 +41,9 @@ from .models import MonthlyShift, ShiftAssignment, Store
 from .employees import ALL_EMPLOYEES, get_employee
 from .shift_readjuster import (
     AdjustmentProposal,
+    classify_tobishi_days,
     propose_tobishi_reoptimization_options,
     propose_yamamoto_cleanup,
-    tobishi_days,
 )
 from .validator import validate
 
@@ -70,6 +70,8 @@ SYSTEM_PROMPT = """\
 - 「飛び石勤務」は「休み・出勤・休み」の1日だけの単独出勤を意味する。
   「出勤・休み・出勤」の単独休日や「休み・出勤・出勤・休み」の2連勤は
   飛び石勤務として扱わない
+- 両隣とも本人が提出した「×」休みで生じる飛び石勤務は、本人希望による許容として
+  改善対象から除外する。片側だけが「×」の場合は改善対象に残す
 - 「飛び石を減らして」のような目的指定には、専用の再最適化ツールを優先する
 - 専用ツールは現在の本シフトを出発点に、複数の相互入れ替えを同時に比較する。
   対象者が複数いる場合は一部の人だけでなく、対象者全員の改善を優先する。候補なしの場合は
@@ -300,6 +302,7 @@ class ShiftChatEngine:
         self.openai_previous_response_id: Optional[str] = None
         self.undo_stack: list[tuple[str, MonthlyShift]] = []
         self.redo_stack: list[tuple[str, MonthlyShift]] = []
+        self.redo_preview_active = False
         self.last_status_message = ""
         self.validation_inputs = validation_inputs or {}
         self.max_consec = max_consec
@@ -338,6 +341,36 @@ class ShiftChatEngine:
             for a in source.assignments
         ]
         self.shift.operation_modes = dict(source.operation_modes)
+
+    def _pending_changes_to_shift(
+        self,
+        target: MonthlyShift,
+    ) -> list[PendingShiftChange]:
+        """Return preview changes needed to transform the base into target."""
+        keys = {
+            (assignment.employee, int(assignment.day))
+            for assignment in self.shift.assignments
+        } | {
+            (assignment.employee, int(assignment.day))
+            for assignment in target.assignments
+        }
+        changes = []
+        for employee, day in sorted(keys, key=lambda item: (item[1], item[0])):
+            before = self.shift.get_assignment(employee, day)
+            after = target.get_assignment(employee, day)
+            before_store = before.store if before else None
+            after_store = after.store if after else None
+            before_paid = bool(before and before.is_paid_leave)
+            after_paid = bool(after and after.is_paid_leave)
+            if before_store == after_store and before_paid == after_paid:
+                continue
+            changes.append(PendingShiftChange(
+                employee=employee,
+                day=day,
+                store=after_store,
+                is_paid_leave=after_paid,
+            ))
+        return changes
 
     def _dedup_pending_changes(self) -> list[PendingShiftChange]:
         """同じ人・同じ日のプレビュー変更は最後の内容だけを有効にする。"""
@@ -523,13 +556,22 @@ class ShiftChatEngine:
                     longest = max(longest, current)
                 else:
                     current = 0
-            isolated_work = tobishi_days(preview, name)
+            categories = classify_tobishi_days(
+                preview,
+                name,
+                (self.validation_inputs.get("off_requests", {}) or {}).get(
+                    name, []
+                ),
+            )
+            isolated_work = categories["actionable"]
+            requested_tobishi = categories["requested_exception"]
             store_text = "、".join(
                 f"{store}:{count}日" for store, count in sorted(store_counts.items())
             ) or "なし"
             lines.append(
                 f"- {name}: 出勤{len(assignments)}日 / 最長{longest}連勤 / "
-                f"飛び石勤務（休み・出勤・休み）{isolated_work or 'なし'} / "
+                f"改善対象の飛び石{isolated_work or 'なし'} / "
+                f"本人希望による許容{requested_tobishi or 'なし'} / "
                 f"配分 {store_text}"
             )
 
@@ -609,6 +651,7 @@ class ShiftChatEngine:
         violations = self._off_request_violation_messages(proposed)
         if violations:
             return "変更できません: " + " / ".join(violations)
+        self.redo_preview_active = False
         self.pending_changes.extend(proposed)
         return (
             f"プレビュー: {emp1} {self.shift.month}/{day1} ({a1.store.display_name} → {a2.store.display_name}) / "
@@ -626,6 +669,7 @@ class ShiftChatEngine:
         violations = self._off_request_violation_messages([proposed])
         if violations:
             return "変更できません: " + " / ".join(violations)
+        self.redo_preview_active = False
         self.pending_changes.append(proposed)
         return f"プレビュー: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
 
@@ -651,6 +695,7 @@ class ShiftChatEngine:
         violations = self._off_request_violation_messages(proposed)
         if violations:
             return "変更できません: " + " / ".join(violations)
+        self.redo_preview_active = False
         if replace_pending:
             self.pending_changes.clear()
         self.pending_changes.extend(proposed)
@@ -744,6 +789,7 @@ class ShiftChatEngine:
                     is_paid_leave=p.is_paid_leave,
                 ))
         self.pending_changes.clear()
+        self.redo_preview_active = False
         self.undo_stack.append((f"{n}件の変更", before))
         self.undo_stack = self.undo_stack[-20:]
         self.redo_stack.clear()
@@ -753,6 +799,7 @@ class ShiftChatEngine:
     def _tool_discard_changes(self) -> str:
         n = self.get_pending_change_count()
         self.pending_changes.clear()
+        self.redo_preview_active = False
         self.last_status_message = f"🗑 {n}件のプレビュー変更を破棄しました"
         return self.last_status_message
 
@@ -802,20 +849,22 @@ class ShiftChatEngine:
         current = self._clone_shift(self.shift)
         self.redo_stack.append((label, current))
         self.pending_changes.clear()
+        self.redo_preview_active = False
         self._replace_shift_contents(previous)
         self.last_status_message = f"↩ {label}を元に戻しました"
         return self.last_status_message
 
     def redo_last_apply(self) -> str:
-        """元に戻した変更をやり直す。"""
+        """Restore an undone change as a preview for manager confirmation."""
         if not self.redo_stack:
             return "進める変更はありません"
         label, next_shift = self.redo_stack.pop()
-        current = self._clone_shift(self.shift)
-        self.undo_stack.append((label, current))
-        self.pending_changes.clear()
-        self._replace_shift_contents(next_shift)
-        self.last_status_message = f"↪ {label}をやり直しました"
+        self.pending_changes = self._pending_changes_to_shift(next_shift)
+        self.redo_preview_active = bool(self.pending_changes)
+        self.last_status_message = (
+            f"↪ {label}のプレビューを復元しました。"
+            "内容を確認してから「本シフトに反映」を押してください"
+        )
         return self.last_status_message
 
     # ========== ツールルーター ==========

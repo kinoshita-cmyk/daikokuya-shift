@@ -7,6 +7,7 @@ from prototype.models import MonthlyShift, ShiftAssignment, Store
 from prototype.shift_readjuster import (
     apply_adjustment_proposal,
     build_readjustment_quality_snapshot,
+    classify_tobishi_days,
     compare_readjustment_quality,
     propose_tobishi_reduction,
     propose_tobishi_reoptimization_options,
@@ -152,6 +153,58 @@ class ShiftReadjusterTest(unittest.TestCase):
             adjusted.get_assignment("春山", 5).store,
             Store.OFF,
         )
+
+    def test_employee_requested_tobishi_is_reported_but_not_adjusted(self) -> None:
+        assignments = []
+        target_work_days = {2, 4, 5, 6}
+        for day in range(1, 31):
+            assignments.append(self._assignment(
+                "今津", day,
+                Store.OMIYA if day in target_work_days else Store.OFF,
+            ))
+            assignments.append(self._assignment(
+                "鈴木", day,
+                Store.OFF if day == 2 else Store.SUZURAN,
+            ))
+        shift = MonthlyShift(year=2026, month=9, assignments=assignments)
+        context = {"off_requests": {"今津": [1, 3]}}
+
+        categories = classify_tobishi_days(shift, "今津", [1, 3])
+        self.assertEqual(categories["actionable"], [])
+        self.assertEqual(categories["requested_exception"], [2])
+
+        with patch(
+            "prototype.shift_readjuster.validate_with_context",
+            return_value=ValidationResult(),
+        ):
+            proposal = propose_tobishi_reduction(
+                shift,
+                validation_context=context,
+                employee_names=["今津"],
+                max_swaps=1,
+            )
+
+        self.assertFalse(proposal.has_changes)
+        self.assertEqual(
+            proposal.before_metrics["休みに挟まれた単独出勤"], 0
+        )
+        self.assertEqual(proposal.before_metrics["本人希望による許容"], 1)
+
+    def test_one_sided_off_request_stays_actionable(self) -> None:
+        shift = MonthlyShift(
+            year=2026,
+            month=9,
+            assignments=[
+                self._assignment("今津", 1, Store.OFF),
+                self._assignment("今津", 2, Store.AKABANE),
+                self._assignment("今津", 3, Store.OFF),
+            ],
+        )
+
+        categories = classify_tobishi_days(shift, "今津", [1])
+
+        self.assertEqual(categories["actionable"], [2])
+        self.assertEqual(categories["requested_exception"], [])
 
     def test_yamamoto_cleanup_only_removes_unneeded_akabane_days(self) -> None:
         shift = MonthlyShift(

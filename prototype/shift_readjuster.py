@@ -187,6 +187,34 @@ def tobishi_days(shift: MonthlyShift, employee: str) -> list[int]:
     ]
 
 
+def classify_tobishi_days(
+    shift: MonthlyShift,
+    employee: str,
+    off_request_days: Optional[Iterable[int]] = None,
+) -> dict[str, list[int]]:
+    """Split lone work into actionable and employee-requested exceptions.
+
+    A lone work day is treated as an employee-requested exception only when
+    both surrounding off days were submitted as absolute off requests.  When
+    only one side was requested, the other side may still be safely adjusted.
+    """
+    requested = set()
+    for raw_day in off_request_days or []:
+        try:
+            requested.add(int(raw_day))
+        except (TypeError, ValueError):
+            continue
+    allowed = []
+    actionable = []
+    for day in tobishi_days(shift, employee):
+        target = allowed if day - 1 in requested and day + 1 in requested else actionable
+        target.append(day)
+    return {
+        "actionable": actionable,
+        "requested_exception": allowed,
+    }
+
+
 def readjustment_shift_signature(shift: MonthlyShift) -> str:
     """Return a stable identity for the currently applied shift state."""
     parts = [f"{int(shift.year):04d}-{int(shift.month):02d}"]
@@ -224,6 +252,7 @@ def build_readjustment_quality_snapshot(
     shift: MonthlyShift,
     validation: ValidationResult,
     short_staff_by_store: Optional[dict[int, set[Store]]] = None,
+    off_requests: Optional[dict[str, Iterable[int]]] = None,
 ) -> dict[str, dict[str, object]]:
     """Capture manager-facing quality indicators; lower values are better."""
     metrics: dict[str, dict[str, object]] = {}
@@ -235,10 +264,14 @@ def build_readjustment_quality_snapshot(
         except KeyError:
             profile = None
         if profile is not None and getattr(profile, "is_eco_core", False):
-            isolated_work = tobishi_days(shift, employee)
+            categories = classify_tobishi_days(
+                shift,
+                employee,
+                (off_requests or {}).get(employee, []),
+            )
             metrics[f"tobishi_work:{employee}"] = {
-                "label": f"{employee}の単独出勤（休・出・休）",
-                "value": len(isolated_work),
+                "label": f"{employee}の改善対象の単独出勤（休・出・休）",
+                "value": len(categories["actionable"]),
             }
         if profile is not None and not getattr(profile, "is_auxiliary", False):
             metrics[f"max_consecutive:{employee}"] = {
@@ -337,10 +370,23 @@ def _adjustable_employee_names(shift: MonthlyShift) -> list[str]:
     return names
 
 
-def _tobishi_metrics(shift: MonthlyShift, names: Iterable[str]) -> dict[str, int]:
-    isolated_work = sum(len(tobishi_days(shift, name)) for name in names)
+def _tobishi_metrics(
+    shift: MonthlyShift,
+    names: Iterable[str],
+    validation_context: Optional[dict] = None,
+) -> dict[str, int]:
+    off_requests = (validation_context or {}).get("off_requests", {}) or {}
+    categories = [
+        classify_tobishi_days(shift, name, off_requests.get(name, []))
+        for name in names
+    ]
     return {
-        "休みに挟まれた単独出勤": isolated_work,
+        "休みに挟まれた単独出勤": sum(
+            len(item["actionable"]) for item in categories
+        ),
+        "本人希望による許容": sum(
+            len(item["requested_exception"]) for item in categories
+        ),
     }
 
 
@@ -348,14 +394,28 @@ def _tobishi_score(metrics: dict[str, int]) -> int:
     return metrics["休みに挟まれた単独出勤"]
 
 
-def _metrics_from_working(working: dict[int, bool]) -> dict[str, int]:
+def _metrics_from_working(
+    working: dict[int, bool],
+    off_request_days: Optional[Iterable[int]] = None,
+) -> dict[str, int]:
     days = len(working)
-    isolated_work = sum(
-        1 for day in range(2, days)
+    requested = set()
+    for raw_day in off_request_days or []:
+        try:
+            requested.add(int(raw_day))
+        except (TypeError, ValueError):
+            continue
+    isolated_work = [
+        day for day in range(2, days)
         if not working[day - 1] and working[day] and not working[day + 1]
-    )
+    ]
+    allowed = [
+        day for day in isolated_work
+        if day - 1 in requested and day + 1 in requested
+    ]
     return {
-        "休みに挟まれた単独出勤": isolated_work,
+        "休みに挟まれた単独出勤": len(isolated_work) - len(allowed),
+        "本人希望による許容": len(allowed),
     }
 
 
@@ -476,9 +536,20 @@ def _candidate_swaps(
         name: _working_map(shift, name)
         for name in employee_names
     }
-    score_by_employee = {
-        name: _tobishi_score(_metrics_from_working(working))
+    off_request_cache = {
+        name: _off_request_days(validation_context, name)
+        for name in employee_names
+    }
+    metrics_by_employee = {
+        name: _metrics_from_working(
+            working,
+            off_request_cache.get(name, set()),
+        )
         for name, working in working_by_employee.items()
+    }
+    score_by_employee = {
+        name: _tobishi_score(metrics)
+        for name, metrics in metrics_by_employee.items()
     }
     current_target_score = sum(
         score_by_employee.get(name, 0) for name in requested
@@ -489,17 +560,18 @@ def _candidate_swaps(
     requested_set = set(requested)
     priority_set = set(priority_names)
     protected_set = set(protected_names)
-    off_request_cache = {
-        name: _off_request_days(validation_context, name)
-        for name in employee_names
-    }
     ranked = []
 
     for target in requested:
         target_working = working_by_employee.get(target)
         if not target_working:
             continue
-        isolated_work_set = set(tobishi_days(shift, target))
+        target_categories = classify_tobishi_days(
+            shift,
+            target,
+            off_request_cache.get(target, set()),
+        )
+        isolated_work_set = set(target_categories["actionable"])
         adjacent_repair_off_days = {
             adjacent_day
             for isolated_day in isolated_work_set
@@ -538,10 +610,17 @@ def _candidate_swaps(
                 target_after = dict(target_working)
                 target_after[target_work_day] = False
                 target_after[target_off_day] = True
-                target_after_score = _tobishi_score(
-                    _metrics_from_working(target_after)
+                target_after_metrics = _metrics_from_working(
+                    target_after,
+                    off_request_cache.get(target, set()),
                 )
+                target_after_score = _tobishi_score(target_after_metrics)
                 if target_after_score >= score_by_employee.get(target, 0):
+                    continue
+                if (
+                    target_after_metrics["本人希望による許容"]
+                    > metrics_by_employee[target]["本人希望による許容"]
+                ):
                     continue
 
                 for other in protected_names:
@@ -568,10 +647,17 @@ def _candidate_swaps(
                         other_after = dict(working_by_employee[other])
                         other_after[target_work_day] = True
                         other_after[target_off_day] = False
-                        other_after_score = _tobishi_score(
-                            _metrics_from_working(other_after)
+                        other_after_metrics = _metrics_from_working(
+                            other_after,
+                            off_request_cache.get(other, set()),
                         )
+                        other_after_score = _tobishi_score(other_after_metrics)
                         if other_after_score > score_by_employee.get(other, 0):
+                            continue
+                        if (
+                            other_after_metrics["本人希望による許容"]
+                            > metrics_by_employee[other]["本人希望による許容"]
+                        ):
                             continue
 
                     target_score = (
@@ -638,8 +724,12 @@ def _propose_tobishi_beam(
             summary="再調整対象となる通常スタッフが見つかりませんでした。",
         )
 
-    before_metrics = _tobishi_metrics(working_shift, requested)
-    before_global = _tobishi_metrics(working_shift, priority_names)
+    before_metrics = _tobishi_metrics(
+        working_shift, requested, validation_context
+    )
+    before_global = _tobishi_metrics(
+        working_shift, priority_names, validation_context
+    )
     before_target_score = _tobishi_score(before_metrics)
     before_global_score = _tobishi_score(before_global)
     validation = validate_with_context(working_shift, validation_context, max_consec)
@@ -720,7 +810,9 @@ def _propose_tobishi_beam(
         working_shift = clone_shift(original)
         accepted_swaps = 0
 
-    after_metrics = _tobishi_metrics(working_shift, requested)
+    after_metrics = _tobishi_metrics(
+        working_shift, requested, validation_context
+    )
     changes = _diff(original, working_shift)
     if not changes:
         return AdjustmentProposal(
@@ -787,8 +879,16 @@ def _enumerate_reciprocal_moves(
     """Return unique direct-improvement moves for the exact repair model."""
     moves: list[_ReciprocalMove] = []
     seen_changes: set[tuple] = set()
+    off_request_cache = {
+        employee: _off_request_days(validation_context, employee)
+        for employee in requested
+    }
     before_isolated_work = {
-        employee: len(tobishi_days(shift, employee))
+        employee: len(classify_tobishi_days(
+            shift,
+            employee,
+            off_request_cache.get(employee, set()),
+        )["actionable"])
         for employee in requested
     }
     prioritize_lone_work = any(before_isolated_work.values())
@@ -810,7 +910,10 @@ def _enumerate_reciprocal_moves(
             target_working = _working_map(shift, target)
             target_working[work_day] = False
             target_working[off_day] = True
-            after_isolated_work = _metrics_from_working(target_working)[
+            after_isolated_work = _metrics_from_working(
+                target_working,
+                off_request_cache.get(target, set()),
+            )[
                 "休みに挟まれた単独出勤"
             ]
             if after_isolated_work >= before_isolated_work.get(target, 0):
@@ -883,9 +986,12 @@ def _isolated_metric_vars(
     working: dict[tuple[str, int], cp_model.IntVar],
     employee: str,
     days: int,
+    include_days: Optional[set[int]] = None,
 ) -> list[cp_model.IntVar]:
     isolated_work = []
     for day in range(2, days):
+        if include_days is not None and day not in include_days:
+            continue
         previous = working[(employee, day - 1)]
         current = working[(employee, day)]
         following = working[(employee, day + 1)]
@@ -995,9 +1101,19 @@ def _solve_tobishi_move_set(
                 )
 
     isolated_by_employee: dict[str, list] = {}
+    requested_exception_by_employee: dict[str, list] = {}
     for employee in metric_names:
+        requested_days = _off_request_days(validation_context, employee)
+        requested_exception_days = {
+            day for day in range(2, days)
+            if day - 1 in requested_days and day + 1 in requested_days
+        }
+        actionable_days = set(range(2, days)) - requested_exception_days
         isolated_by_employee[employee] = _isolated_metric_vars(
-            model, working, employee, days
+            model, working, employee, days, actionable_days
+        )
+        requested_exception_by_employee[employee] = _isolated_metric_vars(
+            model, working, employee, days, requested_exception_days
         )
 
     target_iw = sum(
@@ -1015,17 +1131,36 @@ def _solve_tobishi_move_set(
         for employee in protected_names
         for variable in isolated_by_employee[employee]
     )
+    protected_requested_iw = sum(
+        variable
+        for employee in protected_names
+        for variable in requested_exception_by_employee[employee]
+    )
 
     # A repair must not create more lone work days for any normal employee,
     # including the reciprocal swap partner.
     for employee in protected_names:
-        before_count = len(tobishi_days(shift, employee))
+        categories = classify_tobishi_days(
+            shift,
+            employee,
+            _off_request_days(validation_context, employee),
+        )
+        before_count = len(categories["actionable"])
+        before_requested_count = len(categories["requested_exception"])
         model.Add(sum(isolated_by_employee[employee]) <= before_count)
+        model.Add(
+            sum(requested_exception_by_employee[employee])
+            <= before_requested_count
+        )
 
     improvement_flags = []
     before_target_count = 0
     for employee in requested:
-        before_work = tobishi_days(shift, employee)
+        before_work = classify_tobishi_days(
+            shift,
+            employee,
+            _off_request_days(validation_context, employee),
+        )["actionable"]
         before_count = len(before_work)
         before_target_count += before_count
         employee_iw = sum(isolated_by_employee[employee])
@@ -1051,7 +1186,8 @@ def _solve_tobishi_move_set(
             + target_iw * 10_000_000
             + move_count * 100_000
             + not_improved * 1_000
-            + protected_iw
+            + protected_iw * 10
+            + protected_requested_iw
         )
     elif strategy == "balanced":
         objective = (
@@ -1059,7 +1195,8 @@ def _solve_tobishi_move_set(
             + target_iw * 10_000_000
             + not_improved * 100_000
             + move_count * 10_000
-            + protected_iw
+            + protected_iw * 10
+            + protected_requested_iw
         )
     else:
         objective = (
@@ -1068,7 +1205,8 @@ def _solve_tobishi_move_set(
             + not_improved * 1_000_000
             # Once lone work days are minimized, prefer the smallest repair.
             + move_count * 100_000
-            + protected_iw
+            + protected_iw * 10
+            + protected_requested_iw
         )
     model.Minimize(objective)
 
@@ -1118,8 +1256,12 @@ def _proposal_for_tobishi_solution(
     validation_context: Optional[dict],
     max_consec: int,
 ) -> AdjustmentProposal:
-    before_metrics = _tobishi_metrics(original, requested)
-    after_metrics = _tobishi_metrics(adjusted, requested)
+    before_metrics = _tobishi_metrics(
+        original, requested, validation_context
+    )
+    after_metrics = _tobishi_metrics(
+        adjusted, requested, validation_context
+    )
     requested_core = [
         employee for employee in requested
         if employee in set(_eco_core_names(original))
@@ -1128,28 +1270,41 @@ def _proposal_for_tobishi_solution(
         employee for employee in requested if employee not in requested_core
     ]
     before_metrics["うちエコ主力"] = _tobishi_metrics(
-        original, requested_core
+        original, requested_core, validation_context
     )["休みに挟まれた単独出勤"]
     after_metrics["うちエコ主力"] = _tobishi_metrics(
-        adjusted, requested_core
+        adjusted, requested_core, validation_context
     )["休みに挟まれた単独出勤"]
     before_metrics["うちその他スタッフ"] = _tobishi_metrics(
-        original, requested_other
+        original, requested_other, validation_context
     )["休みに挟まれた単独出勤"]
     after_metrics["うちその他スタッフ"] = _tobishi_metrics(
-        adjusted, requested_other
+        adjusted, requested_other, validation_context
     )["休みに挟まれた単独出勤"]
     changes = _diff(original, adjusted)
     after_validation = validate_with_context(adjusted, validation_context, max_consec)
     notes = ["対象: " + "、".join(requested)]
+    off_requests = (validation_context or {}).get("off_requests", {}) or {}
     for employee in requested:
-        before_work = tobishi_days(original, employee)
-        after_work = tobishi_days(adjusted, employee)
+        before_categories = classify_tobishi_days(
+            original, employee, off_requests.get(employee, [])
+        )
+        after_categories = classify_tobishi_days(
+            adjusted, employee, off_requests.get(employee, [])
+        )
+        before_work = before_categories["actionable"]
+        after_work = after_categories["actionable"]
+        before_requested = before_categories["requested_exception"]
+        after_requested = after_categories["requested_exception"]
         before_work_text = "・".join(map(str, before_work)) or "なし"
         after_work_text = "・".join(map(str, after_work)) or "なし"
+        before_requested_text = "・".join(map(str, before_requested)) or "なし"
+        after_requested_text = "・".join(map(str, after_requested)) or "なし"
+        remaining_text = after_work_text
         notes.append(
-            f"{employee}: 飛び石勤務（休み・出勤・休み） "
-            f"{before_work_text} → {after_work_text}"
+            f"{employee}: 改善対象 {before_work_text} → {after_work_text} / "
+            f"本人希望による許容 {before_requested_text} → "
+            f"{after_requested_text} / 改善できず残存 {remaining_text}"
         )
     notes.extend([
         (
@@ -1268,7 +1423,9 @@ def propose_tobishi_reoptimization_options(
         ))
         options[0].title = "飛び石勤務の再最適化（改善優先案）"
         return options
-    before_metrics = _tobishi_metrics(original, requested)
+    before_metrics = _tobishi_metrics(
+        original, requested, validation_context
+    )
     return [AdjustmentProposal(
         title="飛び石勤務の再最適化",
         summary=(
