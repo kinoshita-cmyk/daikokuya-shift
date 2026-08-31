@@ -453,8 +453,16 @@ def export_shift_to_pdf(
         # 隣接セルの黒罫線で消えないよう、行の描画後に赤枠を上書きする。
         for box_x, box_y, box_w, box_h in off_request_boxes:
             pdf.setStrokeColor(colors.HexColor("#DC2626"))
-            pdf.setLineWidth(max(0.8, 1.8 * scale))
-            pdf.rect(box_x, box_y, box_w, box_h, stroke=1, fill=0)
+            pdf.setLineWidth(max(2.0, 3.2 * scale))
+            inset = max(0.6, 0.8 * scale)
+            pdf.rect(
+                box_x + inset,
+                box_y + inset,
+                box_w - (inset * 2),
+                box_h - (inset * 2),
+                stroke=1,
+                fill=0,
+            )
         current_y = y
 
     # Excelと同じ空白行

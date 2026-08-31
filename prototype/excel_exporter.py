@@ -226,7 +226,7 @@ def export_shift_to_excel(
     # 罫線・スタイル
     thin = Side(border_style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    off_request_side = Side(border_style="medium", color="DC2626")
+    off_request_side = Side(border_style="thick", color="DC2626")
     off_request_border = Border(
         left=off_request_side,
         right=off_request_side,
