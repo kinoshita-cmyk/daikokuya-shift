@@ -157,6 +157,7 @@ def export_shift_to_excel(
     short_staff_days: Optional[object] = None,
     key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
     color_output: bool = True,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
 ) -> Path:
     """
     シフトを Excel に出力する（テンプレート完全互換・A4縦）。
@@ -170,6 +171,7 @@ def export_shift_to_excel(
         short_staff_days: 「人員少」マークを付ける日のリスト、または {日: {店舗}} の辞書
         key_warnings_by_store: 鍵確認の {日: {店舗: "missing"|"support"}}
         color_output: True の場合、店舗記号セルに画面に近い背景色を付ける
+        off_request_cells: 本人の絶対休み希望として赤枠を付ける (氏名, 日) の集合
 
     Returns:
         実際に書き込んだファイルパス
@@ -180,6 +182,7 @@ def export_shift_to_excel(
 
     short_staff_days = short_staff_days or []
     key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
+    off_request_cells = set(off_request_cells or set())
     days_in_month = monthrange(shift.year, shift.month)[1]
 
     if title is None:
@@ -223,6 +226,13 @@ def export_shift_to_excel(
     # 罫線・スタイル
     thin = Side(border_style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    off_request_side = Side(border_style="medium", color="DC2626")
+    off_request_border = Border(
+        left=off_request_side,
+        right=off_request_side,
+        top=off_request_side,
+        bottom=off_request_side,
+    )
     # shrink_to_fit=True で大きな文字も列幅に収まるように自動縮小（### を防ぐ）
     center = Alignment(horizontal="center", vertical="center", shrink_to_fit=True)
     left_center = Alignment(horizontal="left", vertical="center", wrap_text=False, shrink_to_fit=True)
@@ -369,7 +379,11 @@ def export_shift_to_excel(
             else:
                 c.font = cell_font
             c.alignment = center
-            c.border = border
+            c.border = (
+                off_request_border
+                if (name, d) in off_request_cells
+                else border
+            )
 
         # 日付（右）
         c = ws.cell(row=row, column=RIGHT_DATE_COL, value=d)

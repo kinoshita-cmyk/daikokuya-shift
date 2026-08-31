@@ -215,6 +215,7 @@ def export_shift_to_pdf(
     short_staff_days: Optional[object] = None,
     key_warnings_by_store: Optional[dict[int, dict[Store, str]]] = None,
     color_output: bool = True,
+    off_request_cells: Optional[set[tuple[str, int]]] = None,
 ) -> Path:
     """
     シフトを Excel 印刷イメージに合わせた A4 縦 1ページ PDF に出力する。
@@ -224,6 +225,7 @@ def export_shift_to_pdf(
 
     short_staff_days = short_staff_days or []
     key_warnings_by_store = key_warnings_by_store or detect_key_warnings_by_store(shift)
+    off_request_cells = set(off_request_cells or set())
     days_in_month = monthrange(shift.year, shift.month)[1]
     title = title or f"{shift.year}年{shift.month}月の目標とシフト表  決定版"
     header_notes = list(header_notes or ["", "", ""])[:3]
@@ -367,6 +369,7 @@ def export_shift_to_pdf(
     data_h = ROW_HEIGHTS["data"] * scale
     for day in range(1, days_in_month + 1):
         y = current_y - data_h
+        off_request_boxes: list[tuple[float, float, float, float]] = []
         current_date = date(shift.year, shift.month, day)
         wd = WEEKDAY_JP[current_date.weekday()]
         date_weekday_fill = (
@@ -403,6 +406,10 @@ def export_shift_to_pdf(
                 text_color=store_text_color,
                 line_width=line_width,
             )
+            if (emp_name, day) in off_request_cells:
+                off_request_boxes.append(
+                    (col_x(col_idx), y, col_widths[col_idx], data_h)
+                )
 
         _draw_cell(
             pdf, col_x(right_date_idx), y, col_widths[right_date_idx], data_h,
@@ -443,6 +450,11 @@ def export_shift_to_pdf(
             fill_color=colors.HexColor("#FFEDD5") if key_text else colors.white,
             line_width=line_width,
         )
+        # 隣接セルの黒罫線で消えないよう、行の描画後に赤枠を上書きする。
+        for box_x, box_y, box_w, box_h in off_request_boxes:
+            pdf.setStrokeColor(colors.HexColor("#DC2626"))
+            pdf.setLineWidth(max(0.8, 1.8 * scale))
+            pdf.rect(box_x, box_y, box_w, box_h, stroke=1, fill=0)
         current_y = y
 
     # Excelと同じ空白行

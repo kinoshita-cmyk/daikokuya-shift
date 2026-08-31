@@ -46,7 +46,9 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, fixed_suzuran_core_presence_rules,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTH_EDGE_FIXED_EMPLOYEES,
+    MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
+    OMIYA_TWO_PERSON_EXCLUDED_STAFF, fixed_suzuran_core_presence_rules,
     monthly_avoid_same_off_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
@@ -182,7 +184,7 @@ AKABANE_SHORTAGE_PENALTY = 60
 ONLY_ON_REQUEST_TARGET_DAYS = 8
 ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
 
-# 飛び石勤務の回避。店舗の必要体制（例: 大宮3名優先=400）は崩さず、
+# エコ主力の飛び石勤務を回避。店舗の必要体制（例: 大宮3名優先=400）は崩さず、
 # 店舗配分の単純な均等化や5連勤回避よりは強く優先する。
 TOBISHI_ISOLATED_WORK_PENALTY = 240  # 休・出・休
 TOBISHI_ISOLATED_OFF_PENALTY = 70    # 出・休・出
@@ -207,6 +209,47 @@ def _add_eco_support_pairing_constraints(
                 model.Add(
                     x[support.name][day][store] <= independent_eco_here
                 )
+
+
+def _add_omiya_two_person_exclusion_constraints(
+    model,
+    x: dict,
+    days: list[int],
+    employee_names: list[str],
+) -> None:
+    """大塚・南を大宮駅前の2名以下体制に含めない。"""
+    available_names = [name for name in employee_names if name in x]
+    for day in days:
+        omiya_total = sum(
+            x[name][day][Store.OMIYA] for name in available_names
+        )
+        for excluded_name in OMIYA_TWO_PERSON_EXCLUDED_STAFF:
+            if excluded_name not in x:
+                continue
+            model.Add(omiya_total >= 3).OnlyEnforceIf(
+                x[excluded_name][day][Store.OMIYA]
+            )
+
+
+def _add_month_end_fixed_staff_consecutive_constraints(
+    model,
+    off: dict,
+    days_in_month: int,
+) -> None:
+    """月初固定勤務者の月末連勤を最大4日に制限する。"""
+    window_size = int(MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF) + 1
+    if int(days_in_month) < window_size:
+        return
+    month_end_days = list(
+        range(int(days_in_month) - window_size + 1, int(days_in_month) + 1)
+    )
+    for employee_name in MONTH_EDGE_FIXED_EMPLOYEES:
+        if employee_name not in off:
+            continue
+        model.Add(
+            sum(1 - off[employee_name][day] for day in month_end_days)
+            <= int(MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF)
+        )
 
 
 def _add_tobishi_pattern_indicators(
@@ -480,6 +523,15 @@ def generate_shift(
     for e in main_employees:
         for d in days:
             model.Add(sum(x[e.name][d][s] for s in main_stores) + off[e.name][d] == 1)
+
+    # 大宮駅前を2名以下で運営する日は、大塚・南を構成員にしない。
+    # 3名以上の日の大宮勤務は従来どおり許容する。
+    _add_omiya_two_person_exclusion_constraints(
+        model,
+        x,
+        days,
+        main_employee_names,
+    )
 
     # ============================================================
     # 制約 2: 休み希望厳守
@@ -889,6 +941,14 @@ def generate_shift(
         for name, d, store in month_edge_forced:
             model.Add(x[name][d][store] == 1)
 
+    # 月初固定勤務とつながって6連勤にならないよう、対象7名は
+    # 月末の最後の5日を全勤務にしない（月末最大4連勤）。
+    _add_month_end_fixed_staff_consecutive_constraints(
+        model,
+        off,
+        days_in_month,
+    )
+
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
     # ============================================================
@@ -1260,9 +1320,9 @@ def generate_shift(
                 model.Add(over_two_off >= 0)
                 two_off_over_terms.append(over_two_off)
 
-        # 飛び石勤務は本人希望・店舗運営を優先したうえで可能な限り避ける。
-        # 出勤希望日のみ稼働するパートは、勤務可能日が元から飛び飛びになるため対象外。
-        if not getattr(e, "only_on_request_days", False):
+        # 飛び石勤務の回避は、従業員マスタで「エコ主力」に指定した人だけに適用する。
+        # 本人希望・店舗運営・月別配置を優先する強い目標とし、絶対禁止にはしない。
+        if getattr(e, "is_eco_core", False):
             isolated_work, isolated_off = _add_tobishi_pattern_indicators(
                 model,
                 e.name,

@@ -38,7 +38,9 @@ from .rules import (
     get_monthly_required_holiday_days,
     FORBIDDEN_SAME_STORE_PAIRINGS, FORBIDDEN_SAME_STORE_GROUPS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES, MONTH_END_START_OMIYA_STAFF,
-    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, avoid_same_off_rules,
+    MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTH_EDGE_FIXED_EMPLOYEES,
+    MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
+    OMIYA_TWO_PERSON_EXCLUDED_STAFF, avoid_same_off_rules,
     fixed_suzuran_core_presence_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
@@ -281,6 +283,9 @@ def validate(
     # 1. 店舗別の必要人数チェック
     _check_store_capacity(shift, result, days_in_month, allow_omiya_short=allow_omiya_short)
 
+    # 1-2. 大宮駅前2名体制の構成員チェック
+    _check_omiya_two_person_excluded_staff(shift, result, days_in_month)
+
     # 2. 1日全体の人数上限チェック
     _check_daily_staffing_limit(shift, result, days_in_month)
 
@@ -295,6 +300,11 @@ def validate(
         shift, result, days_in_month, prev_month,
         max_consec=max_consec,
         employee_max_consecutive_work=employee_max_consecutive_work,
+    )
+
+    # 4-2. 月初固定勤務者は月末最大4連勤
+    _check_month_end_fixed_staff_consecutive_limit(
+        shift, result, days_in_month,
     )
 
     # 5. 休日日数チェック
@@ -1076,11 +1086,13 @@ def _check_tobishi_work_patterns(
     result: ValidationResult,
     days: int,
 ) -> None:
-    """休・出・休、出・休・出の飛び石パターンをまとめて確認する。"""
+    """エコ主力の休・出・休、出・休・出を確認する。"""
     for emp in _validation_employees():
         if not emp.is_shift_eligible or getattr(emp, "is_auxiliary", False):
             continue
         if getattr(emp, "only_on_request_days", False):
+            continue
+        if not getattr(emp, "is_eco_core", False):
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
             continue
@@ -1478,6 +1490,68 @@ def _check_month_edge_assignments(
             message=(
                 f"{emp_name}は月初1日・月末最終日は{rule_text}"
                 f"現在は{actual_store.display_name}です。"
+            ),
+        ))
+
+
+def _check_omiya_two_person_excluded_staff(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """大宮駅前2名体制に大塚・南が含まれていないか検証する。"""
+    excluded = set(OMIYA_TWO_PERSON_EXCLUDED_STAFF)
+    for day in range(1, int(days) + 1):
+        workers = []
+        seen = set()
+        for assignment in shift.get_day_assignments(day):
+            if assignment.store != Store.OMIYA:
+                continue
+            if assignment.employee in seen:
+                continue
+            seen.add(assignment.employee)
+            workers.append(assignment.employee)
+        blocked_workers = sorted(excluded.intersection(workers))
+        if len(workers) != 2 or not blocked_workers:
+            continue
+        result.issues.append(Issue(
+            severity="ERROR",
+            category="大宮2名体制",
+            day=day,
+            employee="・".join(blocked_workers),
+            message=(
+                "大宮駅前店の終日2名体制には大塚・南を含めません。"
+                f"現在の配属: {', '.join(workers)}。"
+                "大塚・南を配置する場合は合計3名以上にしてください。"
+            ),
+        ))
+
+
+def _check_month_end_fixed_staff_consecutive_limit(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+) -> None:
+    """月初固定勤務者の月末時点の連勤が4日以内か検証する。"""
+    limit = int(MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF)
+    for employee_name in MONTH_EDGE_FIXED_EMPLOYEES:
+        consecutive = 0
+        for day in range(int(days), 0, -1):
+            assignment = shift.get_assignment(employee_name, day)
+            if assignment is None or assignment.store == Store.OFF:
+                break
+            consecutive += 1
+        if consecutive <= limit:
+            continue
+        result.issues.append(Issue(
+            severity="ERROR",
+            category="月末連勤",
+            day=int(days),
+            employee=employee_name,
+            message=(
+                f"{employee_name}は月末時点で{consecutive}連勤です。"
+                f"月初固定勤務と連続しないよう、月末は最大{limit}連勤に"
+                "してください。"
             ),
         ))
 

@@ -563,6 +563,18 @@ MONTH_EDGE_HOME_STORE_ASSIGNMENTS: dict[str, Store] = {
     "楯": Store.NISHIGUCHI,
 }
 
+# 月初固定勤務があるため、月末の連勤を4日までに抑える対象者。
+# 大宮駅前固定と店長自店舗固定の和集合から作り、対象者の追加時に
+# 生成・検証のルールがずれないようにする。
+MONTH_EDGE_FIXED_EMPLOYEES: tuple[str, ...] = tuple(dict.fromkeys(
+    (*MONTH_END_START_OMIYA_STAFF, *MONTH_EDGE_HOME_STORE_ASSIGNMENTS.keys())
+))
+MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF = 4
+
+# 大宮駅前を終日2名で運営する日は、パートのチケット要員には
+# 負担が大きいため、この2名を構成員にしない。3名以上の日は対象外。
+OMIYA_TWO_PERSON_EXCLUDED_STAFF: tuple[str, ...] = ("大塚", "南")
+
 # 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
 HIGASHIGUCHI_PRIMARY_STAFF = "土井"
 HIGASHIGUCHI_SUBSTITUTE_STAFF: tuple[str, ...] = ("楯", "春山", "長尾", "今津")
@@ -818,6 +830,15 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
             "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"
             "（通常はエコ対応1名以上・合計3名体制を優先）"
         )
+    notes.append(
+        "固定絶対条件: 大宮駅前の終日2名体制には大塚・南を含めない"
+        "（両名を配置する場合は合計3名以上）"
+    )
+    notes.append(
+        "固定絶対条件: 月初固定勤務者（"
+        + "・".join(MONTH_EDGE_FIXED_EMPLOYEES)
+        + f"）は月末最大{MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF}連勤"
+    )
     tanaka_rule = tanaka_pair_training_rule(year, month)
     if tanaka_rule:
         training_employee = str(tanaka_rule.get("employee") or "対象者")

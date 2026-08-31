@@ -32,6 +32,7 @@ from .submission_window import now_jst
 
 EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
+DEFAULT_ECO_CORE_NAMES = frozenset({"今津", "土井", "楯", "春山", "下地", "長尾"})
 
 
 def _employment_status_from_value(value: str | None) -> EmploymentStatus:
@@ -148,6 +149,7 @@ def employee_to_dict(emp: Employee) -> dict:
         "constraint_check_excluded": emp.constraint_check_excluded,
         "is_auxiliary": emp.is_auxiliary,
         "only_on_request_days": emp.only_on_request_days,
+        "is_eco_core": emp.is_eco_core,
     }
 
 
@@ -179,6 +181,12 @@ def employee_from_dict(data: dict) -> Employee:
         constraint_check_excluded=data.get("constraint_check_excluded", False),
         is_auxiliary=data.get("is_auxiliary", False),
         only_on_request_days=data.get("only_on_request_days", False),
+        # 旧バックアップには項目自体がないため、初回だけ6名を移行する。
+        # 画面保存後は True/False が明示保存されるので、管理者の変更を優先する。
+        is_eco_core=data.get(
+            "is_eco_core",
+            str(data.get("name", "")) in DEFAULT_ECO_CORE_NAMES,
+        ),
     )
 
 
@@ -206,6 +214,12 @@ class EmployeeConfigManager:
           1. JSONファイルがあればそれを使う
           2. ない場合は employees.py のデフォルトを使う
         """
+        try:
+            from .github_backup import sync_latest_config_from_github
+
+            sync_latest_config_from_github("employees", self.config_dir)
+        except Exception:
+            pass
         if self.config_file.exists():
             try:
                 with open(self.config_file, encoding="utf-8") as f:
@@ -244,6 +258,17 @@ class EmployeeConfigManager:
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            from .github_backup import push_config_to_github
+
+            pushed, message = push_config_to_github("employees", data)
+            if not pushed and message != "未設定":
+                print(f"[employee_config] GitHub backup failed: {message}")
+        except Exception as exc:
+            print(
+                "[employee_config] GitHub backup failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return self.config_file
 
     def add_employee(
