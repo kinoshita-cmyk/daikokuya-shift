@@ -23,7 +23,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
-from typing import Optional, Callable
+from typing import Optional
 
 try:
     from anthropic import Anthropic
@@ -31,14 +31,25 @@ try:
 except ImportError:
     HAS_ANTHROPIC = False
 
+try:
+    from openai import OpenAI
+    HAS_OPENAI = True
+except ImportError:
+    HAS_OPENAI = False
+
 from .models import MonthlyShift, ShiftAssignment, Store
 from .employees import ALL_EMPLOYEES, get_employee
+from .shift_readjuster import (
+    AdjustmentProposal,
+    propose_tobishi_reduction,
+    propose_yamamoto_cleanup,
+)
 from .validator import validate
 
 
 SYSTEM_PROMPT = """\
-あなたは大黒屋（ブランド買取店）のシフト管理アシスタントです。
-経営者と対話しながらシフトを微調整するのが役割です。
+あなたは大黒屋（ブランド買取店）のシフト再調整アシスタントです。
+経営者が自然な言葉で伝えた意図を整理し、現在のシフト案を安全に微調整します。
 
 # 大黒屋の店舗（記号）
 - AKABANE (○): 赤羽駅前店
@@ -55,6 +66,10 @@ SYSTEM_PROMPT = """\
 - 経営者が「実行して」「変更して」と書いても、確定操作は画面の「本シフトに反映」ボタンを案内する
 - 本人が提出した「×」休み希望日は絶対に勤務へ変更しない
 - 制約違反のリスクがある場合は警告する
+- 「飛び石を減らして」のような目的指定には、専用の再調整ツールを優先する
+- 山本は赤羽で本当に必要な日のみ自動出勤し、それ以外は空欄とする
+- 曖昧な依頼は勝手に決めず、確認に必要な日・従業員・店舗を質問する
+- 変更できない場合は、守る必要がある条件と、緩めれば可能になる条件を説明する
 - 簡潔で実用的な日本語で答える
 
 # 配属変更の流れ
@@ -94,6 +109,20 @@ TOOLS = [
         },
     },
     {
+        "name": "get_employee_profile",
+        "description": (
+            "指定従業員のスキル、主担当、店舗適性、配置不可、備考を取得します。"
+            "店舗変更を提案する前に確認してください"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "employee": {"type": "string", "description": "従業員名"}
+            },
+            "required": ["employee"],
+        },
+    },
+    {
         "name": "swap_assignments",
         "description": "2つの配属を入れ替えます（プレビュー変更を作成し、反映前にユーザー承認が必要）。1人だけの店舗変更も可能（emp2/day2 を省略すると emp1 を target_store に配置）",
         "input_schema": {
@@ -128,7 +157,63 @@ TOOLS = [
         "description": "現在の（仮）シフトの制約違反をチェックして要約を返します",
         "input_schema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "optimize_tobishi",
+        "description": (
+            "エコ主力の飛び石勤務を、本人の絶対休み・各日の店舗人数・"
+            "各人の月間勤務日数を維持した相互入れ替えで減らします。"
+            "対象者を省略すると全エコ主力を対象にします。"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "employees": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "対象従業員名。省略時は全エコ主力",
+                },
+                "max_swaps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4,
+                    "description": "提案する相互入れ替えの最大組数",
+                },
+            },
+        },
+    },
+    {
+        "name": "cleanup_yamamoto",
+        "description": (
+            "山本の現在の出勤日のうち、赤羽の通常スタッフだけで必要人数を"
+            "満たしていて不要になった日を空欄へ戻すプレビューを作ります"
+        ),
+        "input_schema": {"type": "object", "properties": {}},
+    },
 ]
+
+
+def _openai_tools() -> list[dict]:
+    """Convert the shared tool definitions to Responses API function tools."""
+    return [
+        {
+            "type": "function",
+            "name": tool["name"],
+            "description": tool["description"],
+            "parameters": tool["input_schema"],
+            "strict": False,
+        }
+        for tool in TOOLS
+    ]
+
+
+@dataclass
+class PendingShiftChange:
+    """A preview change.  ``store=None`` means remove the assignment."""
+
+    employee: str
+    day: int
+    store: Optional[Store]
+    is_paid_leave: bool = False
 
 
 # ============================================================
@@ -142,22 +227,41 @@ class ShiftChatEngine:
         self,
         shift: MonthlyShift,
         api_key: Optional[str] = None,
-        model: str = "claude-opus-4-7",
+        model: Optional[str] = None,
+        provider: str = "anthropic",
         validation_inputs: Optional[dict] = None,
         max_consec: int = 5,
     ):
-        if not HAS_ANTHROPIC:
+        provider = str(provider or "anthropic").strip().lower()
+        if provider not in {"anthropic", "openai", "local"}:
+            raise ValueError(f"未対応のAIプロバイダーです: {provider}")
+        if provider == "anthropic" and not HAS_ANTHROPIC:
             raise ImportError("anthropic パッケージが必要です")
-        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY")
-        if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY が必要です")
-        self.client = Anthropic(api_key=self.api_key)
-        self.model = model
+        if provider == "openai" and not HAS_OPENAI:
+            raise ImportError("openai パッケージが必要です")
+
+        env_key = "OPENAI_API_KEY" if provider == "openai" else "ANTHROPIC_API_KEY"
+        self.api_key = api_key or (os.environ.get(env_key) if provider != "local" else None)
+        if provider != "local" and not self.api_key:
+            raise ValueError(f"{env_key} が必要です")
+        self.provider = provider
+        if provider == "openai":
+            self.client = OpenAI(api_key=self.api_key)
+            self.model = model or os.environ.get("OPENAI_MODEL", "gpt-5-mini")
+        elif provider == "anthropic":
+            self.client = Anthropic(api_key=self.api_key)
+            self.model = model or os.environ.get(
+                "ANTHROPIC_SHIFT_MODEL", "claude-opus-4-7"
+            )
+        else:
+            self.client = None
+            self.model = "local-rules"
 
         # 確定済みシフト + 仮（pending）変更
         self.shift = shift
-        self.pending_changes: list[ShiftAssignment] = []
+        self.pending_changes: list[PendingShiftChange] = []
         self.message_history: list[dict] = []
+        self.openai_previous_response_id: Optional[str] = None
         self.undo_stack: list[tuple[str, MonthlyShift]] = []
         self.redo_stack: list[tuple[str, MonthlyShift]] = []
         self.last_status_message = ""
@@ -199,9 +303,9 @@ class ShiftChatEngine:
         ]
         self.shift.operation_modes = dict(source.operation_modes)
 
-    def _dedup_pending_changes(self) -> list[ShiftAssignment]:
+    def _dedup_pending_changes(self) -> list[PendingShiftChange]:
         """同じ人・同じ日のプレビュー変更は最後の内容だけを有効にする。"""
-        changes: dict[tuple[str, int], ShiftAssignment] = {}
+        changes: dict[tuple[str, int], PendingShiftChange] = {}
         for p in self.pending_changes:
             changes[(p.employee, p.day)] = p
         return list(changes.values())
@@ -219,13 +323,13 @@ class ShiftChatEngine:
 
     def _off_request_violation_messages(
         self,
-        changes: list[ShiftAssignment],
+        changes: list[PendingShiftChange],
     ) -> list[str]:
         """本人の×休み希望を勤務へ変えようとしていないか確認する。"""
         off_requests = self.validation_inputs.get("off_requests", {}) or {}
         messages = []
         for change in changes:
-            if change.store == Store.OFF:
+            if change.store in (None, Store.OFF):
                 continue
             off_days = {
                 int(d) for d in off_requests.get(change.employee, [])
@@ -243,11 +347,30 @@ class ShiftChatEngine:
         return validate(
             shift=shift,
             work_requests=self.validation_inputs.get("work_requests", []),
+            preferred_work_requests=self.validation_inputs.get(
+                "preferred_work_requests", []
+            ),
+            preferred_work_groups=self.validation_inputs.get(
+                "preferred_work_groups", []
+            ),
             off_requests=self.validation_inputs.get("off_requests", {}),
             prev_month=self.validation_inputs.get("prev_month", []),
             holiday_overrides=self.validation_inputs.get("holiday_overrides", {}),
             exact_holiday_days=self.validation_inputs.get("exact_holiday_days", {}),
             paid_leave_days=self.validation_inputs.get("paid_leave_days", {}),
+            employee_max_consecutive_work=self.validation_inputs.get(
+                "employee_max_consecutive_work", {}
+            ),
+            employee_max_consecutive_off=self.validation_inputs.get(
+                "employee_max_consecutive_off", {}
+            ),
+            monthly_store_count_rules=self.validation_inputs.get(
+                "monthly_store_count_rules", []
+            ),
+            required_assignments=self.validation_inputs.get(
+                "required_assignments", []
+            ),
+            allow_omiya_short=self.validation_inputs.get("allow_omiya_short"),
             max_consec=self.max_consec,
         )
 
@@ -263,7 +386,7 @@ class ShiftChatEngine:
         for p in sorted(self._dedup_pending_changes(), key=lambda x: (x.day, x.employee)):
             before = self.shift.get_assignment(p.employee, p.day)
             before_store = before.store.display_name if before else "未配置"
-            after_store = p.store.display_name
+            after_store = p.store.display_name if p.store is not None else "未配置（空欄）"
             summary.append(
                 f"{self.shift.month}/{p.day} {p.employee}: {before_store} → {after_store}"
             )
@@ -280,7 +403,14 @@ class ShiftChatEngine:
         # プレビュー変更があればそれを返す
         for p in reversed(self.pending_changes):
             if p.employee == employee and p.day == day:
-                return p
+                if p.store is None:
+                    return None
+                return ShiftAssignment(
+                    employee=p.employee,
+                    day=p.day,
+                    store=p.store,
+                    is_paid_leave=p.is_paid_leave,
+                )
         return self.shift.get_assignment(employee, day)
 
     def _apply_pending_to_shift(self) -> MonthlyShift:
@@ -293,7 +423,13 @@ class ShiftChatEngine:
                 a for a in copy.assignments
                 if not (a.employee == p.employee and a.day == p.day)
             ]
-            copy.assignments.append(p)
+            if p.store is not None:
+                copy.assignments.append(ShiftAssignment(
+                    employee=p.employee,
+                    day=p.day,
+                    store=p.store,
+                    is_paid_leave=p.is_paid_leave,
+                ))
         return copy
 
     # ========== ツール実装 ==========
@@ -318,6 +454,31 @@ class ShiftChatEngine:
             result.append(f"  {self.shift.month}/{d}: {store_str}")
         return f"{employee}の{self.shift.month}月スケジュール:\n" + "\n".join(result)
 
+    def _tool_get_employee_profile(self, employee: str) -> str:
+        try:
+            profile = get_employee(employee)
+        except KeyError:
+            return f"エラー: 従業員 {employee} が見つかりません"
+        home_store = profile.home_store.display_name if profile.home_store else "なし"
+        affinities = []
+        forbidden = []
+        for store, affinity in profile.affinities.items():
+            if affinity.value == "不可":
+                forbidden.append(store.display_name)
+            else:
+                affinities.append(f"{store.display_name}:{affinity.value}")
+        substitute = "、".join(s.display_name for s in profile.can_substitute_at) or "なし"
+        return "\n".join([
+            f"{profile.name}の店舗適性:",
+            f"  スキル: {profile.skill.value}",
+            f"  役職: {profile.role.value}",
+            f"  主担当: {home_store}",
+            f"  店舗適性: {'、'.join(affinities) or '指定なし'}",
+            f"  絶対配置不可: {'、'.join(forbidden) or 'なし'}",
+            f"  1名体制の代行候補: {substitute}",
+            f"  備考: {profile.notes or 'なし'}",
+        ])
+
     def _tool_swap_assignments(self, emp1: str, day1: int, emp2: str, day2: int) -> str:
         a1 = self._get_effective_assignment(emp1, day1)
         a2 = self._get_effective_assignment(emp2, day2)
@@ -325,8 +486,8 @@ class ShiftChatEngine:
             return f"エラー: 配属が見つかりません ({emp1}/{day1}: {a1}, {emp2}/{day2}: {a2})"
         # 入れ替え
         proposed = [
-            ShiftAssignment(employee=emp1, day=day1, store=a2.store),
-            ShiftAssignment(employee=emp2, day=day2, store=a1.store),
+            PendingShiftChange(employee=emp1, day=day1, store=a2.store),
+            PendingShiftChange(employee=emp2, day=day2, store=a1.store),
         ]
         violations = self._off_request_violation_messages(proposed)
         if violations:
@@ -344,12 +505,66 @@ class ShiftChatEngine:
             return f"エラー: 不明な店舗 {new_store}"
         before = self._get_effective_assignment(employee, day)
         before_str = before.store.display_name if before else "未配置"
-        proposed = ShiftAssignment(employee=employee, day=day, store=store)
+        proposed = PendingShiftChange(employee=employee, day=day, store=store)
         violations = self._off_request_violation_messages([proposed])
         if violations:
             return "変更できません: " + " / ".join(violations)
         self.pending_changes.append(proposed)
         return f"プレビュー: {employee} {self.shift.month}/{day} ({before_str} → {store.display_name})"
+
+    def _queue_proposal(self, proposal: AdjustmentProposal) -> str:
+        """Add a deterministic proposal to the shared preview queue."""
+        if not proposal.has_changes:
+            details = " / ".join(proposal.notes)
+            return proposal.summary + (f"\n{details}" if details else "")
+        proposed = [
+            PendingShiftChange(
+                employee=change.employee,
+                day=change.day,
+                store=change.after_store,
+                is_paid_leave=change.is_paid_leave,
+            )
+            for change in proposal.changes
+        ]
+        violations = self._off_request_violation_messages(proposed)
+        if violations:
+            return "変更できません: " + " / ".join(violations)
+        self.pending_changes.extend(proposed)
+
+        lines = [proposal.summary]
+        if proposal.before_metrics or proposal.after_metrics:
+            before = "、".join(
+                f"{key} {value}件" for key, value in proposal.before_metrics.items()
+            ) or "-"
+            after = "、".join(
+                f"{key} {value}件" for key, value in proposal.after_metrics.items()
+            ) or "-"
+            lines.append(f"再調整前: {before}")
+            lines.append(f"再調整後: {after}")
+        lines.extend(proposal.notes)
+        lines.append(
+            f"プレビュー {len(proposal.changes)}セル分を作成しました。"
+            "表と検証結果を確認してから「本シフトに反映」を押してください。"
+        )
+        return "\n".join(lines)
+
+    def _tool_optimize_tobishi(
+        self,
+        employees: Optional[list[str]] = None,
+        max_swaps: int = 2,
+    ) -> str:
+        proposal = propose_tobishi_reduction(
+            self._apply_pending_to_shift(),
+            validation_context=self.validation_inputs,
+            max_consec=self.max_consec,
+            employee_names=employees,
+            max_swaps=max_swaps,
+        )
+        return self._queue_proposal(proposal)
+
+    def _tool_cleanup_yamamoto(self) -> str:
+        proposal = propose_yamamoto_cleanup(self._apply_pending_to_shift())
+        return self._queue_proposal(proposal)
 
     def _tool_validate_current(self) -> str:
         copy = self._apply_pending_to_shift()
@@ -378,7 +593,13 @@ class ShiftChatEngine:
                 a for a in self.shift.assignments
                 if not (a.employee == p.employee and a.day == p.day)
             ]
-            self.shift.assignments.append(p)
+            if p.store is not None:
+                self.shift.assignments.append(ShiftAssignment(
+                    employee=p.employee,
+                    day=p.day,
+                    store=p.store,
+                    is_paid_leave=p.is_paid_leave,
+                ))
         self.pending_changes.clear()
         self.undo_stack.append((f"{n}件の変更", before))
         self.undo_stack = self.undo_stack[-20:]
@@ -399,6 +620,18 @@ class ShiftChatEngine:
     def discard_pending_changes(self) -> str:
         """画面ボタンからプレビュー変更を破棄する。"""
         return self._tool_discard_changes()
+
+    def propose_tobishi_adjustment(
+        self,
+        employees: Optional[list[str]] = None,
+        max_swaps: int = 2,
+    ) -> str:
+        """画面の簡単操作から飛び石再調整案を作る。"""
+        return self._tool_optimize_tobishi(employees, max_swaps)
+
+    def propose_yamamoto_adjustment(self) -> str:
+        """画面の簡単操作から山本の不要出勤整理案を作る。"""
+        return self._tool_cleanup_yamamoto()
 
     def undo_last_apply(self) -> str:
         """直近の確定変更を元に戻す。"""
@@ -431,6 +664,8 @@ class ShiftChatEngine:
             return self._tool_get_day_assignments(args["day"])
         elif name == "get_employee_schedule":
             return self._tool_get_employee_schedule(args["employee"])
+        elif name == "get_employee_profile":
+            return self._tool_get_employee_profile(args["employee"])
         elif name == "swap_assignments":
             return self._tool_swap_assignments(
                 args["emp1"], args["day1"], args["emp2"], args["day2"]
@@ -441,6 +676,13 @@ class ShiftChatEngine:
             )
         elif name == "validate_current":
             return self._tool_validate_current()
+        elif name == "optimize_tobishi":
+            return self._tool_optimize_tobishi(
+                employees=args.get("employees"),
+                max_swaps=args.get("max_swaps", 2),
+            )
+        elif name == "cleanup_yamamoto":
+            return self._tool_cleanup_yamamoto()
         elif name == "apply_changes":
             return self._tool_apply_changes()
         elif name == "discard_changes":
@@ -449,8 +691,8 @@ class ShiftChatEngine:
 
     # ========== チャットメイン ==========
 
-    def chat(self, user_message: str, max_iterations: int = 5) -> str:
-        """ユーザーメッセージに応答（ツール呼び出しを含む）"""
+    def _chat_anthropic(self, user_message: str, max_iterations: int) -> str:
+        """Anthropic tool-use loop."""
         self.message_history.append({"role": "user", "content": user_message})
 
         for _ in range(max_iterations):
@@ -491,6 +733,67 @@ class ShiftChatEngine:
 
         # max_iterations 超え
         return "（応答生成中にツール呼び出しが多すぎました）"
+
+    def _chat_openai(self, user_message: str, max_iterations: int) -> str:
+        """OpenAI Responses API function-calling loop."""
+        request: dict = {
+            "model": self.model,
+            "instructions": SYSTEM_PROMPT,
+            "input": user_message,
+            "tools": _openai_tools(),
+        }
+        if self.openai_previous_response_id:
+            request["previous_response_id"] = self.openai_previous_response_id
+
+        response = self.client.responses.create(**request)
+        for _ in range(max_iterations):
+            tool_calls = [
+                item for item in getattr(response, "output", [])
+                if getattr(item, "type", None) == "function_call"
+            ]
+            if not tool_calls:
+                self.openai_previous_response_id = getattr(response, "id", None)
+                output_text = str(getattr(response, "output_text", "") or "").strip()
+                return output_text or "内容を確認しました。追加の条件を教えてください。"
+
+            tool_outputs = []
+            for tool_call in tool_calls:
+                raw_arguments = getattr(tool_call, "arguments", "{}") or "{}"
+                try:
+                    arguments = json.loads(raw_arguments)
+                except (TypeError, json.JSONDecodeError):
+                    arguments = {}
+                result = self._execute_tool(
+                    str(getattr(tool_call, "name", "")), arguments
+                )
+                tool_outputs.append({
+                    "type": "function_call_output",
+                    "call_id": str(getattr(tool_call, "call_id", "")),
+                    "output": result,
+                })
+
+            response = self.client.responses.create(
+                model=self.model,
+                instructions=SYSTEM_PROMPT,
+                previous_response_id=response.id,
+                input=tool_outputs,
+                tools=_openai_tools(),
+            )
+
+        self.openai_previous_response_id = getattr(response, "id", None)
+        return "（応答生成中にツール呼び出しが多すぎました）"
+
+    def chat(self, user_message: str, max_iterations: int = 5) -> str:
+        """ユーザーメッセージに応答（ツール呼び出しを含む）。"""
+        if self.provider == "openai":
+            return self._chat_openai(user_message, max_iterations)
+        if self.provider == "local":
+            return (
+                "自由文の解釈にはOpenAIまたはClaudeのAPIキーが必要です。"
+                "キー未設定のままでも、上の「飛び石勤務」または「山本」の"
+                "機械的な再調整は利用できます。"
+            )
+        return self._chat_anthropic(user_message, max_iterations)
 
 
 if __name__ == "__main__":
