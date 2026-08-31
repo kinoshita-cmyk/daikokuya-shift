@@ -8532,41 +8532,104 @@ if mode == "📊 経営者ビュー":
 
                 st.markdown("##### よく使う再調整")
                 st.caption(
-                    "ここはAIの判断に任せず、既存ルールを検証しながら機械的に候補を探します。"
-                    "該当しない相談は下の自由入力を使ってください。"
+                    "代表的な目的を選び、必要なら人・日・店舗などを追加してください。"
+                    "AIは内容を整理し、変更案は既存ルールで検証してからプレビューします。"
                 )
-                quick_tobishi_col, quick_yamamoto_col = st.columns(2)
-                with quick_tobishi_col:
-                    if st.button(
-                        "飛び石勤務を減らす候補を探す",
-                        key="quick_readjust_tobishi",
-                        width="stretch",
-                        help=(
-                            "エコ主力を対象に、各日の店舗人数と月間勤務日数を変えない"
-                            "相互入れ替えを探します"
-                        ),
-                    ):
-                        with st.spinner("安全に入れ替えられる候補を確認中..."):
-                            msg = chat_engine.propose_tobishi_adjustment()
-                        st.session_state.chat_messages.append({
-                            "role": "assistant", "content": msg,
-                        })
-                        st.rerun()
-                with quick_yamamoto_col:
-                    if st.button(
-                        "山本の不要な出勤日を確認する",
-                        key="quick_readjust_yamamoto",
-                        width="stretch",
-                        help=(
-                            "通常スタッフで赤羽の必要人数を満たした後も残っている"
-                            "山本の出勤だけを空欄へ戻します"
-                        ),
-                    ):
-                        msg = chat_engine.propose_yamamoto_adjustment()
-                        st.session_state.chat_messages.append({
-                            "role": "assistant", "content": msg,
-                        })
-                        st.rerun()
+                readjustment_goal_prompts = {
+                    "飛び石勤務を減らす": (
+                        "飛び石勤務を減らしてください。対象の指定がなければ、"
+                        "エコ主力全体を対象にしてください。"
+                    ),
+                    "山本の出勤を見直す": (
+                        "山本の出勤日を確認し、赤羽の通常スタッフだけで必要人数を"
+                        "満たせる不要な出勤があれば減らしてください。"
+                    ),
+                    "店舗の人数不足を改善する": (
+                        "店舗の人数不足を確認し、本人の×休みと絶対条件を守ったまま"
+                        "改善案を作ってください。"
+                    ),
+                    "連勤を減らす": (
+                        "連勤が長い人を確認し、店舗運営を崩さずに連勤を減らす"
+                        "変更案を作ってください。"
+                    ),
+                    "店舗配分の偏りを改善する": (
+                        "従業員ごとの店舗配分を確認し、現在の店舗適性に沿って"
+                        "偏りを減らす変更案を作ってください。"
+                    ),
+                    "勤務日数の過不足を調整する": (
+                        "基準勤務日数に対する過不足を確認し、本人の希望と店舗人数を"
+                        "守りながら調整案を作ってください。"
+                    ),
+                    "研修・組み合わせを調整する": (
+                        "研修や一緒に勤務する組み合わせを確認し、指定条件を満たす"
+                        "変更案を作ってください。"
+                    ),
+                    "全体を再点検する": (
+                        "現在のシフトを、飛び石、連勤、勤務日数、店舗人数、店舗配分、"
+                        "研修・組み合わせの観点から再点検し、優先度の高い改善案を"
+                        "作ってください。"
+                    ),
+                }
+                selected_readjustment_goal = st.selectbox(
+                    "調整したいこと",
+                    list(readjustment_goal_prompts),
+                    key="quick_readjustment_goal",
+                )
+                quick_readjustment_detail = st.text_area(
+                    "追加条件（任意）",
+                    placeholder=(
+                        "例: 今津と春山を優先。大宮の人数は減らさない。\n"
+                        "例: 15日から20日の間を重点的に確認。"
+                    ),
+                    height=80,
+                    key="quick_readjustment_detail",
+                )
+                if st.button(
+                    "この条件で候補を探す",
+                    key="quick_readjustment_run",
+                    type="primary",
+                    width="stretch",
+                ):
+                    detail = quick_readjustment_detail.strip()
+                    with st.spinner("現在のシフトとルールを確認中..."):
+                        try:
+                            if (
+                                selected_readjustment_goal == "飛び石勤務を減らす"
+                                and not detail
+                            ):
+                                msg = chat_engine.propose_tobishi_adjustment()
+                            elif (
+                                selected_readjustment_goal == "山本の出勤を見直す"
+                                and not detail
+                            ):
+                                msg = chat_engine.propose_yamamoto_adjustment()
+                            elif ai_provider == "local":
+                                msg = (
+                                    "追加条件やこの調整目的を自然な言葉で扱うには、"
+                                    "OpenAIまたはClaudeのAPIキーが必要です。"
+                                    "飛び石全体と山本の不要出勤は、追加条件を空欄にすれば"
+                                    "AIなしでも確認できます。"
+                                )
+                            else:
+                                quick_prompt = readjustment_goal_prompts[
+                                    selected_readjustment_goal
+                                ]
+                                if detail:
+                                    quick_prompt += "\n追加条件: " + detail
+                                st.session_state.chat_messages.append({
+                                    "role": "user", "content": quick_prompt,
+                                })
+                                msg = chat_engine.chat(quick_prompt)
+                        except Exception as quick_err:
+                            msg = (
+                                "再調整中にエラーが発生しました。"
+                                "APIキー、利用残高、通信状態を確認してください。\n\n"
+                                f"詳細: {type(quick_err).__name__}: {quick_err}"
+                            )
+                    st.session_state.chat_messages.append({
+                        "role": "assistant", "content": msg,
+                    })
+                    st.rerun()
 
                 st.markdown("##### 📋 現在のシフト表")
                 st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
