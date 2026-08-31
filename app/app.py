@@ -132,6 +132,43 @@ def get_anthropic_api_key() -> Optional[str]:
     return None
 
 
+def get_openai_api_key_source() -> str:
+    """OpenAI API キーの取得元を返す。"""
+    try:
+        if "OPENAI_API_KEY" in st.secrets and str(st.secrets["OPENAI_API_KEY"]).strip():
+            return "secrets"
+    except Exception:
+        pass
+    if os.environ.get("OPENAI_API_KEY"):
+        return "environment"
+    if st.session_state.get("openai_api_key"):
+        return "session"
+    return ""
+
+
+def get_openai_api_key() -> Optional[str]:
+    """Secrets、環境変数、一時セッションの順で OpenAI API キーを取得する。"""
+    source = get_openai_api_key_source()
+    if source == "secrets":
+        return str(st.secrets["OPENAI_API_KEY"]).strip()
+    if source == "environment":
+        return os.environ.get("OPENAI_API_KEY")
+    if source == "session":
+        return st.session_state.get("openai_api_key")
+    return None
+
+
+def get_openai_model() -> str:
+    """OpenAI のシフト再調整に使うモデル名を返す。"""
+    try:
+        value = str(st.secrets.get("OPENAI_MODEL", "")).strip()
+        if value:
+            return value
+    except Exception:
+        pass
+    return str(os.environ.get("OPENAI_MODEL", "gpt-5-mini")).strip() or "gpt-5-mini"
+
+
 ADMIN_PAID_LEAVE_FILE = CONFIG_DIR / "admin_paid_leave_adjustments.json"
 NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
 RULE_LEDGER_FILE = CONFIG_DIR / "rule_ledger_v1_0.json"
@@ -7413,7 +7450,7 @@ if mode == "📊 経営者ビュー":
                 st.rerun()
     if shift is not None and int(shift.year) == int(target_year) and int(shift.month) == int(target_month):
         # Streamlit の tabs は送信後に先頭へ戻りやすいので、選択状態を保持するメニューで切り替える。
-        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力", "💬 AI相談"]
+        shift_view_options = ["📋 シフト表", "📊 統計", "📥 出力", "💬 再調整"]
         if st.session_state.get("manager_shift_view") not in shift_view_options:
             st.session_state["manager_shift_view"] = shift_view_options[0]
         selected_shift_view = st.radio(
@@ -8417,21 +8454,51 @@ if mode == "📊 経営者ビュー":
                 )
                 st.success(f"✅ バックアップ保存: {path.name}")
 
-        elif selected_shift_view == "💬 AI相談":
-            st.markdown("##### 💬 AI相談（補助機能）")
+        elif selected_shift_view == "💬 再調整":
+            st.markdown("##### 💬 自然言語でシフトを再調整")
             st.caption(
-                "基本の修正は「シフト修正」画面で行います。AIは、エラーの直し方や候補探しを相談する補助機能として使えます。"
+                "作成済みのシフトを対象に、目的や気になる点を普段の言葉で伝えられます。"
+                "変更はまずプレビューになり、確認してから本シフトへ反映します。"
             )
 
-            api_key = get_anthropic_api_key()
-            if not api_key:
+            openai_api_key = get_openai_api_key()
+            anthropic_api_key = get_anthropic_api_key()
+            available_ai_providers = []
+            if openai_api_key:
+                available_ai_providers.append(("OpenAI", "openai", openai_api_key))
+            if anthropic_api_key:
+                available_ai_providers.append(("Claude (Anthropic)", "anthropic", anthropic_api_key))
+            available_ai_providers.append(("ルールベースのみ（AIなし）", "local", None))
+
+            if not openai_api_key and not anthropic_api_key:
                 st.warning(
-                    "⚠ Claude API キーが設定されていません。"
-                    "Streamlit Cloud の Settings → Secrets に "
-                    "`ANTHROPIC_API_KEY` を登録してください。"
+                    "⚠ AI API キーが設定されていません。"
+                    "Streamlit Cloud の Settings → Secrets に `OPENAI_API_KEY` "
+                    "または `ANTHROPIC_API_KEY` を登録すると自由文を利用できます。"
+                    "飛び石と山本の機械的な再調整は、キーなしでも利用できます。"
                 )
-            else:
+            if available_ai_providers:
                 from prototype.shift_chat import ShiftChatEngine
+
+                provider_labels = [item[0] for item in available_ai_providers]
+                selected_provider_label = st.selectbox(
+                    "再調整に使うAI",
+                    provider_labels,
+                    index=0,
+                    key="shift_readjustment_ai_provider",
+                    help=(
+                        "OpenAIを設定している場合はOpenAIが最初に表示されます。"
+                        "AIなしでも2つの機械的な再調整は利用できます。"
+                    ),
+                )
+                selected_provider = next(
+                    item for item in available_ai_providers
+                    if item[0] == selected_provider_label
+                )
+                ai_provider = selected_provider[1]
+                api_key = selected_provider[2]
+                ai_model = get_openai_model() if ai_provider == "openai" else None
+                provider_engine_key = (id(shift), ai_provider, ai_model)
 
                 _chat_validation_inputs = st.session_state.get("last_validation_inputs", {})
                 _chat_validation_match = (
@@ -8441,14 +8508,20 @@ if mode == "📊 経営者ビュー":
                 if not _chat_validation_match:
                     _chat_validation_inputs = {}
                 _chat_max_consec = rule_cfg.parameters.get("max_consec_work", 5)
-                if "chat_engine" not in st.session_state or st.session_state.get("chat_shift_id") != id(shift):
+                if (
+                    "chat_engine" not in st.session_state
+                    or st.session_state.get("chat_engine_key") != provider_engine_key
+                ):
                     st.session_state.chat_engine = ShiftChatEngine(
                         shift,
                         api_key=api_key,
+                        provider=ai_provider,
+                        model=ai_model,
                         validation_inputs=_chat_validation_inputs,
                         max_consec=_chat_max_consec,
                     )
                     st.session_state.chat_shift_id = id(shift)
+                    st.session_state.chat_engine_key = provider_engine_key
                     st.session_state.chat_messages = []
 
                 chat_engine = st.session_state.chat_engine
@@ -8456,6 +8529,44 @@ if mode == "📊 経営者ビュー":
                     _chat_validation_inputs,
                     max_consec=_chat_max_consec,
                 )
+
+                st.markdown("##### よく使う再調整")
+                st.caption(
+                    "ここはAIの判断に任せず、既存ルールを検証しながら機械的に候補を探します。"
+                    "該当しない相談は下の自由入力を使ってください。"
+                )
+                quick_tobishi_col, quick_yamamoto_col = st.columns(2)
+                with quick_tobishi_col:
+                    if st.button(
+                        "飛び石勤務を減らす候補を探す",
+                        key="quick_readjust_tobishi",
+                        width="stretch",
+                        help=(
+                            "エコ主力を対象に、各日の店舗人数と月間勤務日数を変えない"
+                            "相互入れ替えを探します"
+                        ),
+                    ):
+                        with st.spinner("安全に入れ替えられる候補を確認中..."):
+                            msg = chat_engine.propose_tobishi_adjustment()
+                        st.session_state.chat_messages.append({
+                            "role": "assistant", "content": msg,
+                        })
+                        st.rerun()
+                with quick_yamamoto_col:
+                    if st.button(
+                        "山本の不要な出勤日を確認する",
+                        key="quick_readjust_yamamoto",
+                        width="stretch",
+                        help=(
+                            "通常スタッフで赤羽の必要人数を満たした後も残っている"
+                            "山本の出勤だけを空欄へ戻します"
+                        ),
+                    ):
+                        msg = chat_engine.propose_yamamoto_adjustment()
+                        st.session_state.chat_messages.append({
+                            "role": "assistant", "content": msg,
+                        })
+                        st.rerun()
 
                 st.markdown("##### 📋 現在のシフト表")
                 st.caption("AIが作ったプレビュー変更は、表ではオレンジ枠で表示します。")
@@ -8731,9 +8842,10 @@ if mode == "📊 経営者ビュー":
                     if not st.session_state.chat_messages:
                         with st.chat_message("assistant"):
                             st.write(
-                                "シフト表を見ながら相談できます。"
-                                f"たとえば「{shift.month}/15 の大宮に田中さんを入れたい」"
-                                "「鈴木さんと黒澤さんの20日を入れ替えるとどうなる？」のように送ってください。"
+                                "気になる点をそのまま書いてください。"
+                                "たとえば「今津と春山の飛び石を減らして」"
+                                f"「{shift.month}/15 の大宮を3人体制にできない？」"
+                                "「山本の出勤を減らせる日を探して」のように相談できます。"
                             )
                     for msg in st.session_state.chat_messages:
                         with st.chat_message(msg["role"]):
@@ -8747,8 +8859,9 @@ if mode == "📊 経営者ビュー":
                     prompt = st.text_area(
                         "メッセージ",
                         placeholder=(
-                            f"{shift.month}/15 の大宮に田中さんを入れたい\n"
-                            "鈴木さんと黒澤さんの20日を入れ替えるとどうなる？"
+                            "今津と春山の飛び石勤務をできるだけ減らして\n"
+                            f"{shift.month}/15 の大宮を3人体制にできない？\n"
+                            "この変更で何の条件が悪くなるかも教えて"
                         ),
                         height=100,
                         key=f"chat_prompt_text_{shift.year}_{shift.month}",
@@ -11625,11 +11738,45 @@ elif mode == "⚙️ 設定":
     # タブ4: APIキー
     # ============================================================
     with setting_tab4:
-        st.markdown("### 🔑 Claude API キー")
+        st.markdown("### 🔑 AI API キー")
         st.caption(
-            "自然言語の希望解析・AI対話に使用します。"
-            "https://console.anthropic.com/ で取得してください。"
+            "自然言語によるシフト再調整と希望解析に使用します。"
+            "キーはGitHubへ保存せず、Streamlit Secretsで管理してください。"
         )
+
+        st.markdown("#### OpenAI（再調整の推奨）")
+        openai_key_source = get_openai_api_key_source()
+        if openai_key_source == "secrets":
+            st.success("✅ Streamlit Secrets に `OPENAI_API_KEY` が設定済みです。")
+        elif openai_key_source == "environment":
+            st.info("✅ 環境変数 `OPENAI_API_KEY` から読み込んでいます。")
+        elif openai_key_source == "session":
+            st.warning(
+                "⚠ OpenAI APIキーは一時セッションだけに保存されています。"
+                "アプリを開き直すと再入力が必要です。"
+            )
+        else:
+            st.warning("OpenAI APIキーは未設定です。Claudeだけでも従来どおり利用できます。")
+
+        st.markdown("**Streamlit Cloud に追加する内容**")
+        st.code(
+            'OPENAI_API_KEY = "sk-..."\nOPENAI_MODEL = "gpt-5-mini"',
+            language="toml",
+        )
+        openai_api_key_input = st.text_input(
+            "OpenAIを一時的にこの画面で試す場合だけ入力",
+            type="password",
+            placeholder="sk-...",
+            help="本番運用では Streamlit Secrets へ登録してください。",
+            key="openai_api_key_input",
+        )
+        if openai_api_key_input:
+            os.environ["OPENAI_API_KEY"] = openai_api_key_input
+            st.session_state["openai_api_key"] = openai_api_key_input
+            st.success("✅ OpenAI APIキーを一時的にセッションへ登録しました")
+
+        st.markdown("---")
+        st.markdown("#### Claude（従来の希望解析・再調整）")
         api_key_source = get_anthropic_api_key_source()
         if api_key_source == "secrets":
             st.success(
@@ -11660,10 +11807,11 @@ elif mode == "⚙️ 設定":
         )
 
         api_key = st.text_input(
-            "一時的にこの画面で試す場合だけ入力",
+            "Claudeを一時的にこの画面で試す場合だけ入力",
             type="password",
             placeholder="sk-ant-...",
             help="本番運用では Streamlit Secrets への登録がおすすめです。",
+            key="anthropic_api_key_input",
         )
         if api_key:
             os.environ["ANTHROPIC_API_KEY"] = api_key
