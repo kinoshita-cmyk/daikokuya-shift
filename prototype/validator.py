@@ -406,7 +406,10 @@ def validate(
     _check_yamamoto_monthly_max(shift, result)
 
     # 25. 統計情報の集計
-    _compute_stats(shift, result, days_in_month)
+    _compute_stats(
+        shift, result, days_in_month,
+        paid_leave_days=paid_leave_days,
+    )
 
     # 全 Issue にシフトの月を埋め込む（表示時に "X/Y" 形式で出すため）
     for _issue in result.issues:
@@ -2262,7 +2265,12 @@ def _check_yamamoto_monthly_max(
         ))
 
 
-def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> None:
+def _compute_stats(
+    shift: MonthlyShift,
+    result: ValidationResult,
+    days: int,
+    paid_leave_days: Optional[dict[str, int]] = None,
+) -> None:
     """
     統計情報の集計（経営側可視化用）
 
@@ -2276,7 +2284,9 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
             emp.annual_target_days,
         )
 
-    # 各従業員の出勤日数・休日日数・目標達成度
+    paid_leave_days = paid_leave_days or {}
+
+    # 各従業員の実出勤・有給・基準算入日数・目標達成度
     for emp in _validation_employees():
         if emp.is_auxiliary:
             continue
@@ -2291,17 +2301,31 @@ def _compute_stats(shift: MonthlyShift, result: ValidationResult, days: int) -> 
             if (a := shift.get_assignment(emp.name, d)) is None or a.store == Store.OFF
         )
 
+        try:
+            paid_leave = max(
+                0, int(paid_leave_days.get(emp.name, 0) or 0)
+            )
+        except (TypeError, ValueError):
+            paid_leave = 0
+        credited_days = work_days + paid_leave
         target = get_monthly_target(emp)
         if target is not None:
-            diff = work_days - target
+            diff = credited_days - target
             if diff < 0:
                 diff_str = f"  📉 -{abs(diff)}日（不足）"
             elif diff > 0:
                 diff_str = f"  📈 +{diff}日（超過）"
             else:
                 diff_str = f"  ✓ ぴったり"
+            attendance_text = (
+                f"実出勤{work_days}日＋有給{paid_leave}日＝"
+                f"基準算入{credited_days}日"
+                if paid_leave > 0
+                else f"出勤{work_days}日"
+            )
             result.summary_stats[f"{emp.name}"] = (
-                f"出勤{work_days}日 / 休{off_days}日 / 目標{target}日{diff_str}"
+                f"{attendance_text} / シフト上の休み{off_days}日 / "
+                f"目標{target}日{diff_str}"
             )
         else:
             result.summary_stats[f"{emp.name}"] = (
