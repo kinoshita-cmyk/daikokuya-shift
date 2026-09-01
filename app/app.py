@@ -1273,14 +1273,29 @@ def render_shift_legend() -> None:
     st.markdown(html, unsafe_allow_html=True)
 
 
-def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
-    """シフト表ヘッダーに出す「実績/基準」表示を返す。"""
+def employee_workday_summary(
+    shift: MonthlyShift,
+    name: str,
+    paid_leave_days: Optional[dict[str, int]] = None,
+) -> dict[str, Optional[int]]:
+    """実出勤・有給・基準算入日数を画面表示用にまとめる。"""
     days_in_month = monthrange(shift.year, shift.month)[1]
     work_days = sum(
         1
         for d in range(1, days_in_month + 1)
         if (a := shift.get_assignment(name, d)) and a.store != Store.OFF
     )
+    if paid_leave_days is None:
+        try:
+            paid_leave_days = get_validation_context_for_shift(shift).get(
+                "paid_leave_days", {}
+            )
+        except Exception:
+            paid_leave_days = {}
+    try:
+        paid_leave = max(0, int((paid_leave_days or {}).get(name, 0) or 0))
+    except (TypeError, ValueError):
+        paid_leave = 0
     try:
         employee = get_employee(name)
         target = get_monthly_work_target(
@@ -1290,19 +1305,60 @@ def employee_work_target_text(shift: MonthlyShift, name: str) -> str:
         )
     except Exception:
         target = None
+    return {
+        "actual": work_days,
+        "paid_leave": paid_leave,
+        "credited": work_days + paid_leave,
+        "target": target,
+    }
+
+
+def employee_work_target_text(
+    shift: MonthlyShift,
+    name: str,
+    paid_leave_days: Optional[dict[str, int]] = None,
+) -> str:
+    """シフト表ヘッダーに出す「実出勤＋有給/基準」表示を返す。"""
+    summary = employee_workday_summary(shift, name, paid_leave_days)
+    work_days = int(summary["actual"] or 0)
+    paid_leave = int(summary["paid_leave"] or 0)
+    target = summary["target"]
     if target is None:
         return str(work_days) if work_days else ""
+    if paid_leave > 0:
+        return f"{work_days}+{paid_leave}/{int(target)}"
     return f"{work_days}/{target}"
 
 
-def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) -> str:
+def employee_header_label(
+    shift: MonthlyShift,
+    name: str,
+    html: bool = False,
+    paid_leave_days: Optional[dict[str, int]] = None,
+) -> str:
     """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
-    count_text = employee_work_target_text(shift, name)
+    summary = employee_workday_summary(shift, name, paid_leave_days)
+    count_text = employee_work_target_text(shift, name, paid_leave_days)
     nowrap_count_text = "\u2060".join(count_text) if count_text else ""
     if html:
         if count_text:
+            if summary["target"] is None:
+                detail = f"出勤{int(summary['actual'] or 0)}日 / 基準なし"
+            elif int(summary["paid_leave"] or 0) > 0:
+                detail = (
+                    f"実出勤{int(summary['actual'] or 0)}日＋"
+                    f"有給{int(summary['paid_leave'] or 0)}日＝"
+                    f"基準算入{int(summary['credited'] or 0)}日 / "
+                    f"基準{int(summary['target'] or 0)}日"
+                )
+            else:
+                detail = (
+                    f"出勤{int(summary['actual'] or 0)}日 / "
+                    f"基準{int(summary['target'] or 0)}日"
+                )
             return (
-                f'<span style="display:block; font-weight:800;">{escape(name)}</span>'
+                f'<span title="{escape(detail)}" style="display:block; font-weight:800;">'
+                f'{escape(name)}</span>'
                 f'<span style="display:block; font-size:11px; line-height:1.1; '
                 f'color:#dbeafe; white-space:nowrap;">{escape(nowrap_count_text)}</span>'
             )
@@ -1310,7 +1366,10 @@ def employee_header_label(shift: MonthlyShift, name: str, html: bool = False) ->
     return f"{name}\n{nowrap_count_text}" if count_text else name
 
 
-def render_shift_editor_fixed_header(shift: MonthlyShift) -> None:
+def render_shift_editor_fixed_header(
+    shift: MonthlyShift,
+    paid_leave_days: Optional[dict[str, int]] = None,
+) -> None:
     """直接編集グリッドの外側に、固定表示用の名前ヘッダーを描画する。"""
     employee_width = 48
     grid_columns = (
@@ -1325,7 +1384,7 @@ def render_shift_editor_fixed_header(shift: MonthlyShift) -> None:
     for name in EXPORT_COLUMN_ORDER:
         cells.append(
             '<div class="shift-editor-fixed-head-cell shift-editor-fixed-employee">'
-            f'{employee_header_label(shift, name, html=True)}'
+            f'{employee_header_label(shift, name, html=True, paid_leave_days=paid_leave_days)}'
             '</div>'
         )
     cells.append('<div class="shift-editor-fixed-head-cell">少</div>')
@@ -1352,6 +1411,7 @@ def render_shift_table(
     changed_cell_color: str = "#f97316",
     selectable_cells: bool = False,
     selected_cell: Optional[tuple[str, int]] = None,
+    paid_leave_days: Optional[dict[str, int]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
     days_in_month = monthrange(shift.year, shift.month)[1]
@@ -1369,6 +1429,13 @@ def render_shift_table(
     changed_cells = changed_cells or set()
     off_request_cells = off_request_cells or set()
     selected_cell = selected_cell or ("", 0)
+    if paid_leave_days is None:
+        try:
+            paid_leave_days = get_validation_context_for_shift(shift).get(
+                "paid_leave_days", {}
+            )
+        except Exception:
+            paid_leave_days = {}
 
     # ヘッダー
     column_count = 2 + len(EXPORT_COLUMN_ORDER) + 2
@@ -1424,7 +1491,9 @@ def render_shift_table(
         f'{header_style} {left_weekday_style}">曜</th>'
     )
     for name in EXPORT_COLUMN_ORDER:
-        header_label = employee_header_label(shift, name, html=True)
+        header_label = employee_header_label(
+            shift, name, html=True, paid_leave_days=paid_leave_days,
+        )
         html += (
             f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
             f'{header_style} {employee_header_style}">{header_label}</th>'
@@ -1533,6 +1602,10 @@ def render_shift_table(
         html += '</tr>'
 
     html += '</tbody></table></div>'
+    st.caption(
+        "氏名下の日数は「実出勤＋有給 / 基準勤務日数」です。"
+        "例: 19+3/22 は、実出勤19日＋有給3日で基準22日を満たします。"
+    )
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -1776,9 +1849,17 @@ def render_colored_shift_editor(
     off_request_cells: Optional[set[tuple[str, int]]] = None,
     changed_cells: Optional[set[tuple[str, int]]] = None,
     header_shift: Optional[MonthlyShift] = None,
+    paid_leave_days: Optional[dict[str, int]] = None,
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
     header_shift = header_shift or shift
+    if paid_leave_days is None:
+        try:
+            paid_leave_days = get_validation_context_for_shift(header_shift).get(
+                "paid_leave_days", {}
+            )
+        except Exception:
+            paid_leave_days = {}
     editor_df = editor_df.copy()
     editor_df["_土日祝"] = editor_df["日"].apply(
         lambda d: is_weekend_or_japanese_holiday(
@@ -1891,9 +1972,31 @@ def render_colored_shift_editor(
         },
     ]
     for name in EXPORT_COLUMN_ORDER:
+        workday_summary = employee_workday_summary(
+            header_shift, name, paid_leave_days,
+        )
+        if workday_summary["target"] is None:
+            header_tooltip = (
+                f"出勤{int(workday_summary['actual'] or 0)}日 / 基準なし"
+            )
+        elif int(workday_summary["paid_leave"] or 0) > 0:
+            header_tooltip = (
+                f"実出勤{int(workday_summary['actual'] or 0)}日＋"
+                f"有給{int(workday_summary['paid_leave'] or 0)}日＝"
+                f"基準算入{int(workday_summary['credited'] or 0)}日 / "
+                f"基準{int(workday_summary['target'] or 0)}日"
+            )
+        else:
+            header_tooltip = (
+                f"出勤{int(workday_summary['actual'] or 0)}日 / "
+                f"基準{int(workday_summary['target'] or 0)}日"
+            )
         column_defs.append({
             "field": name,
-            "headerName": employee_header_label(header_shift, name),
+            "headerName": employee_header_label(
+                header_shift, name, paid_leave_days=paid_leave_days,
+            ),
+            "headerTooltip": header_tooltip,
             "editable": not locked,
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
@@ -1998,6 +2101,10 @@ def render_colored_shift_editor(
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
+    st.caption(
+        "氏名下の日数は「実出勤＋有給 / 基準勤務日数」です。"
+        "例: 19+3/22 は、実出勤19日＋有給3日で基準22日を満たします。"
+    )
     return AgGrid(editor_df, **aggrid_kwargs)
 
 
@@ -8363,26 +8470,35 @@ if mode == "📊 経営者ビュー":
         elif selected_shift_view == "📊 統計":
             # 出勤日数統計
             data = []
+            stats_validation_context = get_validation_context_for_shift(shift)
+            stats_paid_leave_days = stats_validation_context.get(
+                "paid_leave_days", {}
+            )
             for e in shift_active_employees():
                 if e.is_auxiliary:
                     continue
                 days_in_month = monthrange(shift.year, shift.month)[1]
-                work = sum(1 for d in range(1, days_in_month+1)
-                           if (a := shift.get_assignment(e.name, d)) and a.store != Store.OFF)
-                off = days_in_month - work
-                target = get_monthly_work_target(
-                    e.name,
-                    shift.month,
-                    e.annual_target_days,
+                workday_summary = employee_workday_summary(
+                    shift, e.name, stats_paid_leave_days,
                 )
-                diff = (work - target) if target else None
+                work = int(workday_summary["actual"] or 0)
+                paid_leave = int(workday_summary["paid_leave"] or 0)
+                credited = int(workday_summary["credited"] or 0)
+                off = days_in_month - work
+                target = workday_summary["target"]
+                diff = (credited - int(target)) if target is not None else None
                 data.append({
                     "氏名": e.name,
-                    "出勤": work,
-                    "休": off,
+                    "実出勤": work,
+                    "有給": paid_leave,
+                    "基準算入": credited,
+                    "シフト上の休み": off,
                     "目標": str(target) if target else "-",
                     "差分": f"{diff:+d}" if diff is not None else "-",
                 })
+            st.caption(
+                "基準算入＝実出勤＋有給です。シフト上の休みには有給日を含みます。"
+            )
             st.dataframe(data, width="stretch", hide_index=True)
 
         elif selected_shift_view == "📥 出力":
