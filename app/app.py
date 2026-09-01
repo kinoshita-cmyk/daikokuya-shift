@@ -1339,7 +1339,16 @@ def employee_header_label(
     """従業員名と月間出勤日数をヘッダー表示用にまとめる。"""
     summary = employee_workday_summary(shift, name, paid_leave_days)
     count_text = employee_work_target_text(shift, name, paid_leave_days)
-    nowrap_count_text = "\u2060".join(count_text) if count_text else ""
+    actual = int(summary["actual"] or 0)
+    paid_leave = int(summary["paid_leave"] or 0)
+    target = summary["target"]
+    attendance_line = f"出{actual}"
+    if paid_leave > 0:
+        attendance_line += f"+有{paid_leave}"
+    target_line = (
+        f"{int(summary['credited'] or 0)}/{int(target)}"
+        if target is not None else "基-"
+    )
     if html:
         if count_text:
             if summary["target"] is None:
@@ -1359,11 +1368,13 @@ def employee_header_label(
             return (
                 f'<span title="{escape(detail)}" style="display:block; font-weight:800;">'
                 f'{escape(name)}</span>'
-                f'<span style="display:block; font-size:11px; line-height:1.1; '
-                f'color:#dbeafe; white-space:nowrap;">{escape(nowrap_count_text)}</span>'
+                f'<span style="display:block; font-size:10px; line-height:1.12; '
+                f'color:#dbeafe; white-space:nowrap;">{escape(attendance_line)}</span>'
+                f'<span style="display:block; font-size:10px; line-height:1.12; '
+                f'color:#dbeafe; white-space:nowrap;">{escape(target_line)}</span>'
             )
         return escape(name)
-    return f"{name}\n{nowrap_count_text}" if count_text else name
+    return f"{name}\n{attendance_line}\n{target_line}" if count_text else name
 
 
 def render_shift_editor_fixed_header(
@@ -1371,7 +1382,7 @@ def render_shift_editor_fixed_header(
     paid_leave_days: Optional[dict[str, int]] = None,
 ) -> None:
     """直接編集グリッドの外側に、固定表示用の名前ヘッダーを描画する。"""
-    employee_width = 48
+    employee_width = 56
     grid_columns = (
         "42px 30px "
         + " ".join([f"{employee_width}px"] * len(EXPORT_COLUMN_ORDER))
@@ -1466,7 +1477,10 @@ def render_shift_table(
         "position:sticky; left:58px; z-index:6; min-width:38px; width:38px;"
         if sticky else "min-width:38px; width:38px;"
     )
-    employee_header_style = "min-width:50px; width:50px; line-height:1.12; font-size:12px;"
+    employee_header_style = (
+        "min-width:56px; width:56px; max-width:56px; "
+        "line-height:1.08; font-size:11px;"
+    )
     short_header_style = "min-width:48px; width:48px; max-width:48px;"
     key_header_style = "min-width:86px; width:86px; max-width:86px;"
     html = (
@@ -1495,7 +1509,7 @@ def render_shift_table(
             shift, name, html=True, paid_leave_days=paid_leave_days,
         )
         html += (
-            f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
+            f'<th style="padding:5px 3px; border:1px solid #999; background:#1e3a8a; '
             f'{header_style} {employee_header_style}">{header_label}</th>'
         )
     html += (
@@ -1603,8 +1617,8 @@ def render_shift_table(
 
     html += '</tbody></table></div>'
     st.caption(
-        "氏名下の日数は「実出勤＋有給 / 基準勤務日数」です。"
-        "例: 19+3/22 は、実出勤19日＋有給3日で基準22日を満たします。"
+        "氏名の下は「出＝実出勤」「有＝有給」「合計 / 基準勤務日数」です。"
+        "例: 出19+有3 / 22/22 は、実出勤19日＋有給3日で基準22日を満たします。"
     )
     st.markdown(html, unsafe_allow_html=True)
 
@@ -1929,8 +1943,8 @@ def render_colored_shift_editor(
                 overflowWrap: 'normal',
                 overflow: 'visible',
                 textOverflow: 'clip',
-                fontSize: '13px',
-                lineHeight: '1.15'
+                fontSize: '11px',
+                lineHeight: '1.08'
             };
         }
         """
@@ -2001,8 +2015,8 @@ def render_colored_shift_editor(
             "cellEditor": "agSelectCellEditor",
             "cellEditorParams": {"values": STORE_SYMBOL_OPTIONS},
             "singleClickEdit": True,
-            "width": 48,
-            "minWidth": 46,
+            "width": 56,
+            "minWidth": 54,
             "cellStyle": cell_style,
             "headerClass": "shift-grid-header",
             "wrapHeaderText": False,
@@ -2058,7 +2072,7 @@ def render_colored_shift_editor(
         "suppressScrollOnNewData": True,
         "ensureDomOrder": True,
         "rowHeight": 32,
-        "headerHeight": 58,
+        "headerHeight": 70,
         "domLayout": "normal",
         "getRowStyle": JsCode(
             """
@@ -2094,16 +2108,16 @@ def render_colored_shift_editor(
                 "text-align": "center !important",
                 "color": "#374151 !important",
                 "font-weight": "800 !important",
-                "font-size": "11px !important",
-                "line-height": "1.12 !important",
+                "font-size": "10px !important",
+                "line-height": "1.08 !important",
             },
         },
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
     st.caption(
-        "氏名下の日数は「実出勤＋有給 / 基準勤務日数」です。"
-        "例: 19+3/22 は、実出勤19日＋有給3日で基準22日を満たします。"
+        "氏名の下は「出＝実出勤」「有＝有給」「合計 / 基準勤務日数」です。"
+        "例: 出19+有3 / 22/22 は、実出勤19日＋有給3日で基準22日を満たします。"
     )
     return AgGrid(editor_df, **aggrid_kwargs)
 
