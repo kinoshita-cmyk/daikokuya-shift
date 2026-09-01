@@ -1616,10 +1616,6 @@ def render_shift_table(
         html += '</tr>'
 
     html += '</tbody></table></div>'
-    st.caption(
-        "氏名の下は「出＝実出勤」「有＝有給」「合計 / 基準勤務日数」です。"
-        "例: 出19+有3 / 22/22 は、実出勤19日＋有給3日で基準22日を満たします。"
-    )
     st.markdown(html, unsafe_allow_html=True)
 
 
@@ -2115,10 +2111,6 @@ def render_colored_shift_editor(
     }
     if GridUpdateMode is not None:
         aggrid_kwargs["update_mode"] = GridUpdateMode.VALUE_CHANGED
-    st.caption(
-        "氏名の下は「出＝実出勤」「有＝有給」「合計 / 基準勤務日数」です。"
-        "例: 出19+有3 / 22/22 は、実出勤19日＋有給3日で基準22日を満たします。"
-    )
     return AgGrid(editor_df, **aggrid_kwargs)
 
 
