@@ -1324,7 +1324,7 @@ def employee_work_target_text(
     paid_leave = int(summary["paid_leave"] or 0)
     target = summary["target"]
     if target is None:
-        return str(work_days) if work_days else ""
+        return str(work_days)
     if paid_leave > 0:
         return f"{work_days}+{paid_leave}/{int(target)}"
     return f"{work_days}/{target}"
@@ -1347,7 +1347,7 @@ def employee_header_label(
         attendance_line += f"+有{paid_leave}"
     target_line = (
         f"{int(summary['credited'] or 0)}/{int(target)}"
-        if target is not None else "基-"
+        if target is not None else ""
     )
     if html:
         if count_text:
@@ -1365,16 +1365,24 @@ def employee_header_label(
                     f"出勤{int(summary['actual'] or 0)}日 / "
                     f"基準{int(summary['target'] or 0)}日"
                 )
-            return (
+            label_html = (
                 f'<span title="{escape(detail)}" style="display:block; font-weight:800;">'
                 f'{escape(name)}</span>'
                 f'<span style="display:block; font-size:10px; line-height:1.12; '
                 f'color:#dbeafe; white-space:nowrap;">{escape(attendance_line)}</span>'
-                f'<span style="display:block; font-size:10px; line-height:1.12; '
-                f'color:#dbeafe; white-space:nowrap;">{escape(target_line)}</span>'
             )
+            if target_line:
+                label_html += (
+                    f'<span style="display:block; font-size:10px; line-height:1.12; '
+                    f'color:#dbeafe; white-space:nowrap;">{escape(target_line)}</span>'
+                )
+            return label_html
         return escape(name)
-    return f"{name}\n{attendance_line}\n{target_line}" if count_text else name
+    if not count_text:
+        return name
+    if target_line:
+        return f"{name}\n{attendance_line}\n{target_line}"
+    return f"{name}\n{attendance_line}"
 
 
 def render_shift_editor_fixed_header(
