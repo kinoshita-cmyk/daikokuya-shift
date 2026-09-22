@@ -18,6 +18,7 @@ from .employees import get_employee
 from .models import MonthlyShift, Role, ShiftAssignment, Skill, Store
 from .rules import YamamotoLogic
 from .validator import ValidationResult, validate
+from .consecutive_counts import add_consecutive_count_constraints
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ def _validation_kwargs(context: Optional[dict], max_consec: int) -> dict:
         "employee_max_consecutive_off": ctx.get(
             "employee_max_consecutive_off", {}
         ),
+        "consecutive_count_rules": ctx.get("consecutive_count_rules", []),
         "monthly_store_count_rules": ctx.get("monthly_store_count_rules", []),
         "required_assignments": ctx.get("required_assignments", []),
         "allow_omiya_short": ctx.get("allow_omiya_short"),
@@ -150,12 +152,18 @@ def _issue_signature(issue) -> tuple:
         ),
         None,
     )
+    # 同じ人でも「2連休の回数」と「3連休の回数」は別の条件。
+    count_subject = (
+        message.partition(" / 実際")[0]
+        if issue.category in {"連休回数", "連勤回数"} else None
+    )
     return (
         issue.severity,
         issue.category,
         issue.day,
         issue.employee,
         store_subject,
+        count_subject,
     )
 
 
@@ -1100,6 +1108,15 @@ def _solve_tobishi_move_set(
     # result, including previous-month carryover and monthly exceptions.
     ctx = validation_context or {}
     employee_work_limits = ctx.get("employee_max_consecutive_work", {}) or {}
+    count_rules = [r for r in ctx.get("consecutive_count_rules", []) if r["employee"] in model_names]
+    if count_rules:
+        off_by_employee = {
+            name: {day: working[(name, day)].Not() for day in range(1, days + 1)}
+            for name in model_names
+        }
+        add_consecutive_count_constraints(
+            model, off_by_employee, count_rules, shift.year, shift.month, ctx.get("prev_month", []),
+        )
     employee_off_limits = ctx.get("employee_max_consecutive_off", {}) or {}
     off_requests = ctx.get("off_requests", {}) or {}
     for employee in requested:

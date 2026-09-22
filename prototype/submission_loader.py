@@ -19,6 +19,7 @@ from typing import Optional
 from .paths import BACKUP_DIR, CONFIG_DIR, PROJECT_ROOT
 from .models import Store
 from .submission_window import is_submission_in_window, timestamp_sort_key
+from .consecutive_counts import parse_consecutive_counts, merge_consecutive_count_rules
 
 
 @dataclass
@@ -37,6 +38,7 @@ class SubmissionData:
     max_consecutive_work_days: dict[str, int] = field(default_factory=dict)
     max_consecutive_off_days: dict[str, int] = field(default_factory=dict)
     preferred_consecutive_off: list[tuple[str, int]] = field(default_factory=list)
+    consecutive_count_rules: list[dict] = field(default_factory=list)
     parsed_note_summaries: dict[str, dict] = field(default_factory=dict)
     admin_note_adjustments: dict[str, str] = field(default_factory=dict)
     submitted_employees: list[str] = field(default_factory=list)
@@ -145,6 +147,8 @@ class ParsedNaturalLanguageNote:
     max_consecutive_work_days: Optional[int] = None
     max_consecutive_off_days: Optional[int] = None
     preferred_consecutive_off_days: Optional[int] = None
+    consecutive_count_rules: list[dict] = field(default_factory=list)
+    review_messages: list[str] = field(default_factory=list)
     ignored_optional_work_days: list[int] = field(default_factory=list)
 
     @property
@@ -159,6 +163,7 @@ class ParsedNaturalLanguageNote:
             or self.max_consecutive_work_days
             or self.max_consecutive_off_days
             or self.preferred_consecutive_off_days
+            or self.consecutive_count_rules
         )
 
 
@@ -472,6 +477,9 @@ def parse_natural_language_note(
         return result
     if not _strip_greeting_only_text(normalized):
         return result
+    result.consecutive_count_rules, result.review_messages, normalized = (
+        parse_consecutive_counts(normalized)
+    )
     days_in_month = monthrange(target_year, target_month)[1]
     sentences = [
         s.strip()
@@ -811,6 +819,28 @@ def _apply_parsed_note_to_submission_data(
         data.preferred_consecutive_off.append(
             (author, int(parsed_note.preferred_consecutive_off_days))
         )
+    _apply_consecutive_counts(data, author, parsed_note)
+
+
+def _apply_consecutive_counts(data, author, parsed_note):
+    rules = parsed_note.consecutive_count_rules
+    if not rules:
+        return
+    data.consecutive_count_rules = merge_consecutive_count_rules(
+        data.consecutive_count_rules,
+        [dict(rule, employee=author) for rule in rules],
+    )
+    summary = data.parsed_note_summaries.setdefault(author, {})
+    summary["consecutive_count_rules"] = merge_consecutive_count_rules(
+        summary.get("consecutive_count_rules", []), rules,
+    )
+    off_lengths = {rule["days"] for rule in rules if rule["kind"] == "off"}
+    data.preferred_consecutive_off = [
+        (name, length) for name, length in data.preferred_consecutive_off
+        if name != author or length not in off_lengths
+    ]
+    if summary.get("preferred_consecutive_off_days") in off_lengths:
+        summary["preferred_consecutive_off_days"] = None
 
 
 def load_submissions_for_month(
@@ -1033,6 +1063,8 @@ def load_submissions_for_month(
             data.preferred_consecutive_off.append(
                 (author, int(parsed_note.preferred_consecutive_off_days))
             )
+
+        _apply_consecutive_counts(data, author, parsed_note)
 
         if only_on_request:
             # 旧データでは「○」の日を work_requests に保存していなかった。

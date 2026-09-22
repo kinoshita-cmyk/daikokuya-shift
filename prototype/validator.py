@@ -15,6 +15,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from calendar import monthrange
 from typing import Optional
+from .consecutive_counts import (
+    consecutive_count_label, matching_block_ends, previous_run_length,
+)
 
 from .models import (
     MonthlyShift, Store, Skill, OperationMode,
@@ -245,6 +248,7 @@ def validate(
     required_assignments: Optional[list[dict]] = None,
     preferred_work_requests: Optional[list] = None,
     preferred_work_groups: Optional[list] = None,
+    consecutive_count_rules: Optional[list[dict]] = None,
 ) -> ValidationResult:
     """
     シフトを検証して問題リストを返す。
@@ -273,6 +277,7 @@ def validate(
     employee_max_consecutive_off = employee_max_consecutive_off or {}
     monthly_store_count_rules = monthly_store_count_rules or []
     required_assignments = required_assignments or []
+    consecutive_count_rules = consecutive_count_rules or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
     if allow_omiya_short is None:
@@ -318,7 +323,9 @@ def validate(
     _check_consecutive_off(
         shift, result, days_in_month, off_requests,
         employee_max_consecutive_off=employee_max_consecutive_off,
+        consecutive_count_rules=consecutive_count_rules,
     )
+    _check_consecutive_counts(shift, result, consecutive_count_rules, prev_month)
 
     # 6-2. 飛び石勤務はソフト条件。残った場合は管理者確認用に表示する。
     _check_tobishi_work_patterns(shift, result, days_in_month)
@@ -979,6 +986,7 @@ def _check_consecutive_off(
     shift: MonthlyShift, result: ValidationResult, days: int,
     off_requests: dict[str, list[int]],
     employee_max_consecutive_off: Optional[dict[str, int]] = None,
+    consecutive_count_rules: Optional[list[dict]] = None,
 ) -> None:
     """2連休回数（1〜2回）と3連休禁止の確認"""
     min_2off = HARD_CONSTRAINTS["min_two_day_off_per_month"]
@@ -1068,19 +1076,46 @@ def _check_consecutive_off(
         if emp.name in CONSTRAINT_EXCLUDED:
             continue
 
-        if two_off_count < min_2off:
+        personal_counts = [r for r in consecutive_count_rules or []
+                           if r["employee"] == emp.name and r["kind"] == "off" and r["days"] == 2]
+        if two_off_count < min_2off and not any(r["comparison"] in {"exact", "min"} for r in personal_counts):
             result.issues.append(Issue(
                 severity="WARNING",
                 category="2連休不足",
                 day=None, employee=emp.name,
                 message=f"2連休{two_off_count}回（最低{min_2off}回必要）",
             ))
-        if two_off_count > max_2off:
+        if two_off_count > max_2off and not any(r["comparison"] in {"exact", "max"} for r in personal_counts):
             result.issues.append(Issue(
                 severity="WARNING",
                 category="2連休過多",
                 day=None, employee=emp.name,
                 message=f"2連休{two_off_count}回（最大{max_2off}回）",
+            ))
+
+
+def _check_consecutive_counts(shift, result, rules, prev_month=None):
+    days = monthrange(shift.year, shift.month)[1]
+    for rule in rules:
+        employee = rule["employee"]
+        states = {}
+        for day in range(1, days + 1):
+            assignment = shift.get_assignment(employee, day)
+            is_off = assignment is None or assignment.store == Store.OFF
+            states[day] = is_off if rule["kind"] == "off" else not is_off
+        carry = previous_run_length(prev_month, shift.year, shift.month, employee, rule["kind"])
+        ends = matching_block_ends(states, rule["days"], carry)
+        actual, wanted = len(ends), rule["count"]
+        comparison = rule["comparison"]
+        satisfied = {"exact": actual == wanted, "max": actual <= wanted, "min": actual >= wanted}[comparison]
+        if not satisfied:
+            result.issues.append(Issue(
+                severity="ERROR",
+                category="連休回数" if rule["kind"] == "off" else "連勤回数",
+                day=None,
+                employee=employee,
+                message=(f"{consecutive_count_label(rule)} / 実際{actual}回"
+                         f"（最終日: {'・'.join(str(day) + '日' for day in ends) or 'なし'}）"),
             ))
 
 

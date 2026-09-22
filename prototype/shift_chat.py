@@ -516,6 +516,7 @@ class ShiftChatEngine:
             employee_max_consecutive_off=self.validation_inputs.get(
                 "employee_max_consecutive_off", {}
             ),
+            consecutive_count_rules=self.validation_inputs.get("consecutive_count_rules", []),
             monthly_store_count_rules=self.validation_inputs.get(
                 "monthly_store_count_rules", []
             ),

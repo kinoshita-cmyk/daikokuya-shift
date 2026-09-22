@@ -26,6 +26,7 @@ from datetime import date
 from typing import Optional
 
 from ortools.sat.python import cp_model
+from .consecutive_counts import add_consecutive_count_constraints
 
 from .models import (
     MonthlyShift, ShiftAssignment, Store, Skill, OperationMode, Affinity,
@@ -306,6 +307,7 @@ def generate_shift(
     verbose: bool = True,
     disable_month_edge_rules: bool = False,
     status_out: Optional[dict] = None,
+    consecutive_count_rules: Optional[list[dict]] = None,
 ) -> Optional[MonthlyShift]:
     """
     Args:
@@ -328,6 +330,7 @@ def generate_shift(
     preferred_work_requests = preferred_work_requests or []
     preferred_work_groups = preferred_work_groups or []
     preferred_consecutive_off = preferred_consecutive_off or []
+    consecutive_count_rules = consecutive_count_rules or []
     monthly_store_count_rules = monthly_store_count_rules or []
     required_assignments = required_assignments or []
     historical_actual_preferences = historical_actual_preferences or []
@@ -1283,6 +1286,9 @@ def generate_shift(
     # ============================================================
     # 制約 10.5: 2連休を月1回以上
     # ============================================================
+    add_consecutive_count_constraints(
+        model, off, consecutive_count_rules, year, month, prev_month,
+    )
     for e in main_employees:
         if e.constraint_check_excluded or e.name in CONSTRAINT_EXCLUDED or e.role == Role.ADVISOR:
             continue
@@ -1293,13 +1299,16 @@ def generate_shift(
             model.AddBoolOr([off[e.name][start].Not(), off[e.name][start + 1].Not()]).OnlyEnforceIf(block.Not())
             two_day_blocks.append(block)
         if two_day_blocks:
+            personal_counts = [r for r in consecutive_count_rules
+                               if r["employee"] == e.name and r["kind"] == "off" and r["days"] == 2]
             has_two_day_block = model.NewBoolVar(f"has_two_off_block_{e.name}")
             model.AddMaxEquality(has_two_day_block, two_day_blocks)
-            if strict_warning_constraints:
-                model.Add(has_two_day_block == 1)
-            two_off_goal_terms.append(has_two_day_block)
+            if not any(r["comparison"] in {"exact", "min"} for r in personal_counts):
+                if strict_warning_constraints:
+                    model.Add(has_two_day_block == 1)
+                two_off_goal_terms.append(has_two_day_block)
             max_two_off = int(HARD_CONSTRAINTS.get("max_two_day_off_per_month", 2) or 0)
-            if max_two_off > 0:
+            if max_two_off > 0 and not any(r["comparison"] in {"exact", "max"} for r in personal_counts):
                 two_off_count = sum(two_day_blocks)
                 over_two_off = model.NewIntVar(0, days_in_month, f"two_off_over_{e.name}")
                 model.Add(over_two_off >= two_off_count - max_two_off)
