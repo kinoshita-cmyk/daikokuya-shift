@@ -823,6 +823,7 @@ from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employ
 from prototype.backup import ShiftBackup
 from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
 from prototype.export_config import EXPORT_COLUMN_ORDER
+from prototype.consecutive_counts import consecutive_count_label
 from prototype.shift_lock import ShiftLockManager
 from prototype.rule_config import (
     CustomRule,
@@ -2230,6 +2231,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
             "paid_leave_days": {},
             "employee_max_consecutive_work": {},
             "employee_max_consecutive_off": {},
+            "consecutive_count_rules": [],
             "monthly_store_count_rules": [],
             "required_assignments": [],
             "default_holidays": 8,
@@ -2246,6 +2248,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         "paid_leave_days": inputs.get("paid_leave_days", {}),
         "employee_max_consecutive_work": inputs.get("employee_max_consecutive_work", {}),
         "employee_max_consecutive_off": inputs.get("employee_max_consecutive_off", {}),
+        "consecutive_count_rules": inputs.get("consecutive_count_rules", []),
         "monthly_store_count_rules": inputs.get("monthly_store_count_rules", []),
         "required_assignments": inputs.get("required_assignments", []),
         "default_holidays": inputs.get("default_holidays", 8),
@@ -2376,6 +2379,7 @@ def restore_validation_context_for_month(
         "employee_max_consecutive_off": dict(
             getattr(sub_data, "max_consecutive_off_days", {})
         ),
+        "consecutive_count_rules": list(sub_data.consecutive_count_rules),
         "monthly_store_count_rules": active_monthly_store_count_rules(
             rule_cfg, int(year), int(month),
         ),
@@ -2573,7 +2577,7 @@ def summarize_natural_language_note_for_review(
         }
 
     auto_labels: list[str] = []
-    review_labels: list[str] = []
+    review_labels: list[str] = list(parsed_note.review_messages)
 
     def _day_list_label(days: list[int]) -> str:
         return "、".join(f"{int(day)}日" for day in sorted(set(days))) if days else "なし"
@@ -2623,6 +2627,7 @@ def summarize_natural_language_note_for_review(
         auto_labels.append(f"連休上限: {int(parsed_note.max_consecutive_off_days)}連休まで")
     if parsed_note.preferred_consecutive_off_days is not None:
         auto_labels.append(f"連休希望: {int(parsed_note.preferred_consecutive_off_days)}連休を優先")
+    auto_labels.extend(consecutive_count_label(rule) for rule in parsed_note.consecutive_count_rules)
     if parsed_note.ignored_optional_work_days:
         auto_labels.append(
             f"任意出勤候補: {_day_list_label(parsed_note.ignored_optional_work_days)}"
@@ -2649,9 +2654,12 @@ def summarize_natural_language_note_for_review(
         "途中抜け": "勤務途中の不在時間は管理者確認が必要です",
         "研修": "研修・途中抜けは管理者確認が必要です",
     }
+    # 読み取れた「1回まで」の「まで」を、日付範囲の警告にしない。
+    from prototype.consecutive_counts import parse_consecutive_counts
+    _, _, review_text = parse_consecutive_counts(normalized_note)
     seen_review_reasons: set[str] = set()
     for keyword, reason in review_keywords.items():
-        if keyword in normalized_note and reason not in seen_review_reasons:
+        if keyword in review_text and reason not in seen_review_reasons:
             review_labels.append(reason)
             seen_review_reasons.add(reason)
 
@@ -2670,6 +2678,7 @@ def summarize_natural_language_note_for_review(
         "auto_labels": auto_labels,
         "review_labels": review_labels,
         "status": status,
+        "consecutive_count_rules": list(parsed_note.consecutive_count_rules),
     }
 
 
@@ -2711,6 +2720,13 @@ def build_note_reflection_review(
     notes: list[str] = []
 
     if status == "確認済み":
+        for rule in correction_summary.get("consecutive_count_rules", []):
+            kind = "連休" if rule["kind"] == "off" else "連勤"
+            prefix = f"{kind}回数: {rule['days']}{kind}"
+            preference = f"連休希望: {rule['days']}連休を優先"
+            original_labels = [label for label in original_labels
+                               if not label.startswith(prefix)
+                               and not (rule["kind"] == "off" and label == preference)]
         final_labels = _unique_label_list(original_labels + correction_labels)
         source_label = "自動反映 + 管理者補正"
         if corrected_text.strip() and not correction_labels:
@@ -2743,7 +2759,7 @@ def build_note_reflection_review(
     return {
         "status": status,
         "source_label": source_label,
-        "original_auto_labels": original_labels,
+        "original_auto_labels": list(original_summary.get("auto_labels", [])),
         "correction_auto_labels": correction_labels,
         "final_labels": final_labels,
         "notes": _unique_label_list(notes),
@@ -2828,6 +2844,7 @@ def parsed_note_summary_to_labels(summary: dict) -> list[str]:
         labels.append(f"連休上限: {int(summary['max_consecutive_off_days'])}連休まで")
     if summary.get("preferred_consecutive_off_days") is not None:
         labels.append(f"連休希望: {int(summary['preferred_consecutive_off_days'])}連休を優先")
+    labels.extend(consecutive_count_label(rule) for rule in summary.get("consecutive_count_rules", []))
     if summary.get("ignored_optional_work_days"):
         labels.append(f"任意出勤候補: {_day_list_label(summary.get('ignored_optional_work_days'))}")
 
@@ -3220,6 +3237,7 @@ def enrich_submission_days_from_files(
                 submitted["max_consecutive_off_days"] = parsed_note.max_consecutive_off_days
             if parsed_note.preferred_consecutive_off_days is not None:
                 submitted["preferred_consecutive_off_days"] = parsed_note.preferred_consecutive_off_days
+            submitted["consecutive_count_rules"] = list(parsed_note.consecutive_count_rules)
         except Exception:
             pass
         submitted["off_request_days"] = off_days
@@ -3422,6 +3440,8 @@ def render_generation_metadata_summary(metadata: dict, title: str = "保存済�
             st.write(f"- 休日日数の固定指定: {input_summary['exact_holiday_days']}")
         if input_summary.get("employee_max_consecutive_work"):
             st.write(f"- 個別の連勤上限: {input_summary['employee_max_consecutive_work']}")
+        for rule in input_summary.get("consecutive_count_rules", []):
+            st.write(f"- {rule['employee']}: {consecutive_count_label(rule)}")
         if input_summary.get("tobishi_definition"):
             st.write(
                 "- 飛び石勤務の定義: "
@@ -5642,6 +5662,8 @@ if mode == "📊 経営者ビュー":
                         st.write(f"- 自由記載の連休上限: {_isum['employee_max_consecutive_off']}")
                     if _isum.get("preferred_consecutive_off"):
                         st.write(f"- 自由記載の連休希望: {_isum['preferred_consecutive_off']}")
+                    for rule in _isum.get("consecutive_count_rules", []):
+                        st.write(f"- {rule['employee']}: {consecutive_count_label(rule)}")
                     if _isum.get("monthly_store_count_rules"):
                         st.write("- 月別ルール:")
                         for rule in _isum["monthly_store_count_rules"]:
@@ -6152,6 +6174,7 @@ if mode == "📊 経営者ビュー":
                     note_applied.append(f"{s['max_consecutive_off_days']}連休まで")
                 if s.get("preferred_consecutive_off_days"):
                     note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
+                note_applied.extend(consecutive_count_label(rule) for rule in s.get("consecutive_count_rules", []))
                 note_applied.extend(s.get("work_request_group_labels", []))
                 note_applied.extend(
                     label for label in s.get("note_auto_labels", [])
@@ -6702,6 +6725,7 @@ if mode == "📊 経営者ビュー":
                         use_preferred_consecutive_off = list(
                             getattr(sub_data, "preferred_consecutive_off", [])
                         )
+                        use_consecutive_count_rules = list(sub_data.consecutive_count_rules)
                         effective_paid_leave_days = combined_paid_leave_days(
                             sub_data.paid_leave_days,
                             _saved_target_year,
@@ -6787,6 +6811,7 @@ if mode == "📊 経営者ビュー":
                         use_employee_max_consecutive_work = {}
                         use_employee_max_consecutive_off = {}
                         use_preferred_consecutive_off = []
+                        use_consecutive_count_rules = []
                         use_prev_month = PREVIOUS_MONTH_CARRYOVER
                         use_consec_exceptions = ["野澤"]
                         data_source_msg = (
@@ -6804,6 +6829,7 @@ if mode == "📊 経営者ビュー":
                         use_employee_max_consecutive_work = {}
                         use_employee_max_consecutive_off = {}
                         use_preferred_consecutive_off = []
+                        use_consecutive_count_rules = []
                         use_prev_month = []
                         use_consec_exceptions = []
                         data_source_msg = (
@@ -6913,6 +6939,7 @@ if mode == "📊 経営者ビュー":
                         "time_limit_seconds": solver_limit_seconds,
                         "random_seed": rule_cfg.parameters.get("solver_seed", 42),
                         "verbose": False,
+                        "consecutive_count_rules": use_consecutive_count_rules,
                     }
                     generator_params = inspect.signature(generate_shift).parameters
                     if "preferred_work_requests" in generator_params:
@@ -6990,6 +7017,7 @@ if mode == "📊 経営者ビュー":
                                 "employee_max_consecutive_off": dict(
                                     use_employee_max_consecutive_off
                                 ),
+                                "consecutive_count_rules": list(use_consecutive_count_rules),
                                 "monthly_store_count_rules": list(
                                     use_monthly_store_count_rules
                                 ),
@@ -7070,6 +7098,7 @@ if mode == "📊 経営者ビュー":
                             paid_leave_days=effective_paid_leave_days,
                             employee_max_consecutive_work=use_employee_max_consecutive_work,
                             employee_max_consecutive_off=use_employee_max_consecutive_off,
+                            consecutive_count_rules=use_consecutive_count_rules,
                             default_holidays=rule_cfg.parameters.get("default_holiday_days", 8),
                             max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                             monthly_store_count_rules=use_monthly_store_count_rules,
@@ -7262,6 +7291,7 @@ if mode == "📊 経営者ビュー":
                     "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
                     "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
                     "preferred_consecutive_off": list(use_preferred_consecutive_off),
+                    "consecutive_count_rules": list(use_consecutive_count_rules),
                     "monthly_store_count_rules": list(use_monthly_store_count_rules),
                     "required_assignments": list(use_required_assignments),
                     "previous_month_carryover_count": len(use_prev_month),
@@ -7331,6 +7361,7 @@ if mode == "📊 経営者ビュー":
                         "paid_leave_days": dict(effective_paid_leave_days),
                         "employee_max_consecutive_work": dict(use_employee_max_consecutive_work),
                         "employee_max_consecutive_off": dict(use_employee_max_consecutive_off),
+                        "consecutive_count_rules": list(use_consecutive_count_rules),
                         "monthly_store_count_rules": list(use_monthly_store_count_rules),
                         "required_assignments": list(use_required_assignments),
                         "default_holidays": rule_cfg.parameters.get(
@@ -7909,6 +7940,7 @@ if mode == "📊 経営者ビュー":
                     paid_leave_days=_table_validation_context.get("paid_leave_days", {}),
                     employee_max_consecutive_work=_table_validation_context.get("employee_max_consecutive_work", {}),
                     employee_max_consecutive_off=_table_validation_context.get("employee_max_consecutive_off", {}),
+                    consecutive_count_rules=_table_validation_context.get("consecutive_count_rules", []),
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                     monthly_store_count_rules=_table_validation_context.get("monthly_store_count_rules", []),
                     required_assignments=_table_validation_context.get("required_assignments", []),
@@ -8256,6 +8288,7 @@ if mode == "📊 経営者ビュー":
                 paid_leave_days=validation_context.get("paid_leave_days", {}),
                 employee_max_consecutive_work=validation_context.get("employee_max_consecutive_work", {}),
                 employee_max_consecutive_off=validation_context.get("employee_max_consecutive_off", {}),
+                consecutive_count_rules=validation_context.get("consecutive_count_rules", []),
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                 monthly_store_count_rules=validation_context.get("monthly_store_count_rules", []),
                 required_assignments=validation_context.get("required_assignments", []),
@@ -8459,6 +8492,7 @@ if mode == "📊 経営者ビュー":
                 paid_leave_days=_v_paid_leave,
                 employee_max_consecutive_work=_v_max_work,
                 employee_max_consecutive_off=_v_max_off,
+                consecutive_count_rules=_validation_context.get("consecutive_count_rules", []),
                 max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                 monthly_store_count_rules=_validation_context.get("monthly_store_count_rules", []),
                 required_assignments=_validation_context.get("required_assignments", []),
@@ -9441,6 +9475,7 @@ if mode == "📊 経営者ビュー":
                     paid_leave_days=_cv_paid_leave,
                     employee_max_consecutive_work=_cv_max_work,
                     employee_max_consecutive_off=_cv_max_off,
+                    consecutive_count_rules=_cv_inputs.get("consecutive_count_rules", []) if _cv_match else [],
                     max_consec=rule_cfg.parameters.get("max_consec_work", 5),
                     monthly_store_count_rules=_cv_monthly_rules,
                     required_assignments=_cv_required_assignments,
