@@ -2700,6 +2700,12 @@ def summarize_natural_language_note_for_review(
     # 読み取れた「1回まで」の「まで」を、日付範囲の警告にしない。
     from prototype.consecutive_counts import parse_consecutive_counts
     _, _, review_text = parse_consecutive_counts(normalized_note)
+    for label, limit in (
+        ("連勤", parsed_note.max_consecutive_work_days),
+        ("連休", parsed_note.max_consecutive_off_days),
+    ):
+        if limit is not None:
+            review_text = re.sub(rf"{int(limit)}\s*{label}\s*まで", "", review_text)
     seen_review_reasons: set[str] = set()
     for keyword, reason in review_keywords.items():
         if keyword in review_text and reason not in seen_review_reasons:
@@ -2743,6 +2749,7 @@ def build_note_reflection_review(
     adjustment: dict,
     year: int,
     month: int,
+    off_days=(),
 ) -> dict:
     """自由記載が最終的に生成条件へどう入るかを表示用に整理する。"""
     original_summary = summarize_natural_language_note_for_review(
@@ -2763,36 +2770,32 @@ def build_note_reflection_review(
     notes: list[str] = []
 
     if status == "確認済み":
-        for rule in correction_summary.get("consecutive_count_rules", []):
-            kind = "連休" if rule["kind"] == "off" else "連勤"
-            prefix = f"{kind}回数: {rule['days']}{kind}"
-            preference = f"連休希望: {rule['days']}連休を優先"
-            original_labels = [label for label in original_labels
-                               if not label.startswith(prefix)
-                               and not (rule["kind"] == "off" and label == preference)]
-        final_labels = _unique_label_list(original_labels + correction_labels)
         source_label = "自動反映 + 管理者補正"
         if corrected_text.strip() and not correction_labels:
             notes.append("管理者補正メモが生成条件として読めていません")
     elif status == "補正のみ反映":
-        final_labels = _unique_label_list(correction_labels)
         source_label = "管理者補正のみ"
         if corrected_text.strip() and not correction_labels:
             notes.append("補正のみ反映ですが、補正メモが生成条件として読めていません")
         if not corrected_text.strip():
             notes.append("補正のみ反映にするには、補正メモが必要です")
     elif status == "反映しない":
-        final_labels = []
         source_label = "生成条件に入れない"
         if original_labels or correction_labels:
             notes.append("自動反映・管理者補正とも生成条件から外します")
     else:
-        final_labels = _unique_label_list(original_labels)
         source_label = "自動反映のみ"
         if corrected_text.strip():
             notes.append("補正メモは保存済みですが、確認済みではないため未反映です")
 
-    if original_summary.get("review_labels"):
+    # 「合計9日」を「合計10日」で補正した場合も、実際に使う10日だけを表示する。
+    from prototype.submission_loader import preview_note_adjustment
+    final_summary = preview_note_adjustment(original_note, adjustment, year, month, off_days)
+    final_labels = parsed_note_summary_to_labels(final_summary)
+    if final_summary.get("blocked_work_days"):
+        blocked_days = "、".join(f"{d}日" for d in final_summary["blocked_work_days"])
+        notes.append(f"{blocked_days}の出勤希望は×休みと重なるため反映しません。×休みを優先します。")
+    if status not in {"補正のみ反映", "反映しない"} and original_summary.get("review_labels"):
         notes.extend(str(x) for x in original_summary.get("review_labels", []))
     if status in {"確認済み", "補正のみ反映"} and correction_summary.get("review_labels"):
         notes.extend(
@@ -2808,6 +2811,136 @@ def build_note_reflection_review(
         "notes": _unique_label_list(notes),
         "correction_status": correction_summary.get("status", ""),
     }
+
+
+def format_note_adjustment_status(status: str) -> str:
+    return {
+        "確認済み": "自動反映に追記する",
+        "補正のみ反映": "補正だけに置き換える",
+        "要確認": "下書き保存（補正は未反映）",
+        "反映しない": "自由記載を反映しない",
+    }.get(status, status or "補正なし")
+
+
+def render_note_adjustment_editor(original_note, existing, year, month, employee, off_days=()):
+    """原文を保護し、手入力・AI整理のどちらも同じ保存前確認を通す。"""
+    import hashlib
+    from prototype.note_interpreter import interpret_note
+
+    revision = hashlib.sha256(json.dumps(
+        [original_note, existing, list(off_days)], ensure_ascii=False, sort_keys=True,
+    ).encode()).hexdigest()[:12]
+    suffix = f"{year}_{month}_{employee}_{revision}"
+    status_key, text_key, memo_key = (f"note_edit_{kind}_{suffix}" for kind in ("status", "text", "memo"))
+    providers = []
+    if get_openai_api_key():
+        providers.append("openai")
+    if get_anthropic_api_key():
+        providers.append("anthropic")
+    provider = st.selectbox(
+        "自由記載を整理するAI", providers or ["未設定"],
+        format_func=lambda p: {"openai": "OpenAI", "anthropic": "Claude"}.get(p, p),
+        key=f"note_ai_provider_{suffix}", disabled=not providers,
+    )
+    consent = st.checkbox(
+        "このスタッフの読取対象文を選択したAIに送信することに同意する（API利用料が発生）",
+        key=f"note_ai_consent_{suffix}", disabled=not providers,
+    )
+    with st.form(f"note_adjustment_form_{suffix}"):
+        status_options = ["確認済み", "補正のみ反映", "要確認", "反映しない"]
+        saved_status = existing.get("status", "確認済み")
+        status = st.selectbox(
+            "反映方法", status_options,
+            index=status_options.index(saved_status) if saved_status in status_options else 0,
+            format_func=format_note_adjustment_status, key=status_key,
+        )
+        corrected = st.text_area(
+            "管理者補正", value=existing.get("corrected_text", ""), height=160,
+            placeholder="例: 1,2,3,4日は出勤。原文をAIで整理する場合は空欄。",
+            key=text_key,
+        )
+        memo = st.text_input("補足メモ（生成条件には入りません）", value=existing.get("memo", ""), key=memo_key)
+        preview_clicked = st.form_submit_button("読取・最終条件を確認")
+        ai_clicked = st.form_submit_button("AIで文章を整理", disabled=not (providers and consent))
+        save_clicked = st.form_submit_button("管理者補正を保存")
+    adjustment = {"status": status, "corrected_text": corrected}
+    reflection = build_note_reflection_review(original_note, adjustment, year, month, off_days)
+    if preview_clicked or save_clicked or ai_clicked:
+        st.session_state.pop(f"note_ai_result_{suffix}", None)
+        st.session_state.pop(f"note_preview_{suffix}", None)
+    if preview_clicked or save_clicked:
+        st.session_state[f"note_preview_{suffix}"] = reflection
+    if ai_clicked:
+        st.session_state.pop(f"note_ai_mode_{suffix}", None)
+        st.session_state[f"note_ai_checked_{suffix}"] = False
+        # 空欄時は原文を全文翻訳。入力済みなら追記/置換用の補正文だけを翻訳する。
+        source_text = corrected.strip() or original_note
+        try:
+            with st.spinner("自由記載の意味と条件を整理しています…"):
+                model = get_openai_model() if provider == "openai" else os.environ.get("ANTHROPIC_SHIFT_MODEL", "claude-opus-4-7")
+                proposal = interpret_note(
+                    source_text, year, month, provider=provider, model=model,
+                    api_key=get_openai_api_key() if provider == "openai" else get_anthropic_api_key(),
+                )
+            st.session_state[f"note_ai_result_{suffix}"] = {
+                "proposal": proposal, "source": source_text,
+                "status": status if corrected.strip() else "補正のみ反映",
+                "provider": provider, "model": model,
+            }
+        except ValueError as exc:
+            st.error(str(exc))
+    proposal_info = st.session_state.get(f"note_ai_result_{suffix}")
+    if proposal_info:
+        proposal = proposal_info["proposal"]
+        st.markdown("**AIの整理案（まだ保存されていません）**")
+        st.text(proposal.corrected_text or "条件化できる希望はありませんでした。")
+        for message in proposal.review_messages:
+            st.warning(message)
+        with st.expander("読取対象と根拠を確認"):
+            st.text(proposal_info["source"])
+            for quote in proposal.evidence:
+                st.text(quote)
+        adoption_status = st.selectbox(
+            "AI案の反映方法", ["確認済み", "補正のみ反映"],
+            index=0 if proposal_info["status"] == "確認済み" else 1,
+            format_func=format_note_adjustment_status, key=f"note_ai_mode_{suffix}",
+        )
+        ai_reflection = build_note_reflection_review(original_note, {
+            "status": adoption_status, "corrected_text": proposal.corrected_text,
+        }, year, month, off_days)
+        st.write("保存した場合の最終条件: " + (" / ".join(ai_reflection["final_labels"]) or "なし"))
+        for note in ai_reflection["notes"]:
+            st.warning(note)
+        checked = st.checkbox("原文との対応・確認事項・最終条件を確認しました", key=f"note_ai_checked_{suffix}")
+        def adopt_proposal():
+            # コールバックで、フォームが再描画される前にウィジェット値を更新する。
+            provenance = f"AI整理: {proposal_info['provider']} / {proposal_info['model']}"
+            st.session_state[text_key] = proposal.corrected_text
+            st.session_state[status_key] = adoption_status
+            st.session_state[memo_key] = " / ".join(x for x in [memo, provenance, *proposal.review_messages] if x)
+            st.session_state.pop(f"note_ai_result_{suffix}", None)
+            st.session_state.pop(f"note_preview_{suffix}", None)
+        st.button(
+            "この案を補正欄に入れる", key=f"note_ai_adopt_{suffix}",
+            disabled=not (checked and proposal.corrected_text), on_click=adopt_proposal,
+        )
+    preview = st.session_state.get(f"note_preview_{suffix}")
+    if preview:
+        st.markdown("**保存前の読取確認**")
+        st.write("補正から読めた条件: " + (" / ".join(preview["correction_auto_labels"]) or "なし"))
+        st.write("原文と補正を合わせた最終条件: " + (" / ".join(preview["final_labels"]) or "なし"))
+        for note in preview["notes"]:
+            st.warning(note)
+    st.caption("出勤希望は従来どおり希望条件です。本人の×休み・絶対条件を優先します。保存済みシフトは自動変更しません。")
+    if save_clicked:
+        if status in {"確認済み", "補正のみ反映"} and (not corrected.strip() or not reflection["correction_auto_labels"]):
+            st.error("補正から条件を読み取れません。AIで整理するか、下書きとして保存してください。")
+        else:
+            upsert_note_adjustment(year, month, employee, status, corrected.strip(), memo.strip())
+            st.rerun()
+    if existing and st.button("管理者補正を削除・リセット", key=f"delete_note_adjustment_{suffix}"):
+        delete_note_adjustment(year, month, employee)
+        st.rerun()
 
 
 def parsed_note_summary_to_labels(summary: dict) -> list[str]:
@@ -5875,6 +6008,7 @@ if mode == "📊 経営者ビュー":
                     adj,
                     int(target_year),
                     int(target_month),
+                    s.get("off_request_days", []),
                 )
                 actual_final_labels = parsed_note_summary_to_labels(
                     actual_note_summaries.get(employee_name, {})
@@ -5915,7 +6049,7 @@ if mode == "📊 経営者ビュー":
                     "最終反映条件": " / ".join(actual_final_labels) or "-",
                     "反映方式": reflection.get("source_label", "-"),
                     "確認メモ": " / ".join(_unique_label_list(reflection_notes)) or "-",
-                    "補正状態": adj.get("status", "") or "-",
+                    "補正状態": format_note_adjustment_status(adj.get("status", "")),
                     "原文": s.get("note", "") or s.get("note_excerpt", ""),
                 })
             st.markdown("##### 自由記載の反映チェック（生成に入る最終条件）")
@@ -5968,17 +6102,16 @@ if mode == "📊 経営者ビュー":
                     "最終反映条件": 380,
                     "反映方式": 180,
                     "確認メモ": 340,
-                    "補正状態": 120,
+                    "補正状態": 230,
                     "原文": 520,
                 },
                 empty_message="自由記載の詳細はありません",
                 max_height=460,
             )
             st.caption(
-                "補正状態が「確認済み」の場合は自動反映に管理者補正を追加します。"
-                "「補正のみ反映」は自動反映を外して管理者補正だけを使います。"
-                "「反映しない」は自由記載由来の条件を生成に入れません。"
-                "反映内容はシフト保存時の生成条件にも記録します。"
+                "追記は原文の条件を残し、日付などを追加します。休日数・連勤上限などは補正の値を優先します。"
+                "置き換えは原文の自動読取を使わず補正だけを使います。下書きは補正をまだ反映しません。"
+                "本人が選択した×休みは、自由記載を置き換えても削除されません。"
             )
             note_employee_options = [s.get("employee", "") for s in all_note_items]
             selected_note_employee = st.selectbox(
@@ -6008,6 +6141,8 @@ if mode == "📊 経営者ビュー":
                 existing_adjustment,
                 int(target_year),
                 int(target_month),
+                next((s.get("off_request_days", []) for s in all_note_items
+                      if s.get("employee") == selected_note_employee), []),
             )
             st.markdown("**現在の最終反映条件**")
             st.dataframe(
@@ -6020,77 +6155,12 @@ if mode == "📊 経営者ビュー":
                 width="stretch",
                 hide_index=True,
             )
-            note_widget_suffix = (
-                f"{int(target_year)}_{int(target_month)}_{selected_note_employee}"
+            render_note_adjustment_editor(
+                original_note, existing_adjustment,
+                int(target_year), int(target_month), selected_note_employee,
+                next((s.get("off_request_days", []) for s in all_note_items
+                      if s.get("employee") == selected_note_employee), []),
             )
-            with st.form(
-                f"note_adjustment_form_{note_widget_suffix}",
-                clear_on_submit=False,
-            ):
-                correction_status = st.selectbox(
-                    "補正状態",
-                    NOTE_ADJUSTMENT_STATUS_OPTIONS,
-                    index=NOTE_ADJUSTMENT_STATUS_OPTIONS.index(
-                        existing_adjustment.get("status", "要確認")
-                        if existing_adjustment.get("status", "要確認") in NOTE_ADJUSTMENT_STATUS_OPTIONS
-                        else "要確認"
-                    ),
-                    key=f"note_adjust_status_{note_widget_suffix}",
-                    help=(
-                        "確認済み: 自動反映 + 補正 / "
-                        "補正のみ反映: 自動反映を外して補正だけ / "
-                        "反映しない: 自由記載由来の条件を入れない"
-                    ),
-                )
-                corrected_text = st.text_area(
-                    "管理者補正メモ",
-                    value=existing_adjustment.get("corrected_text", ""),
-                    placeholder="例: 1日は休み希望として扱う / 13日勤務希望として扱う / 4日は研修途中抜けのため手動確認",
-                    height=90,
-                    key=f"note_adjust_text_{note_widget_suffix}",
-                )
-                correction_memo = st.text_input(
-                    "補足メモ",
-                    value=existing_adjustment.get("memo", ""),
-                    placeholder="例: 本人確認済み、今回は手動調整で対応",
-                    key=f"note_adjust_memo_{note_widget_suffix}",
-                )
-                if st.form_submit_button("管理者補正を保存"):
-                    if not selected_note_employee:
-                        st.error("スタッフを選択してください。")
-                    elif (
-                        correction_status in {"確認済み", "補正のみ反映"}
-                        and not corrected_text.strip()
-                    ):
-                        st.error("管理者補正メモを入力してください。")
-                    else:
-                        upsert_note_adjustment(
-                            int(target_year),
-                            int(target_month),
-                            selected_note_employee,
-                            correction_status,
-                            corrected_text.strip(),
-                            correction_memo.strip(),
-                        )
-                        st.success("管理者補正を保存しました。")
-                        st.rerun()
-            if existing_adjustment:
-                st.caption(
-                    "削除・リセットすると、この管理者補正だけを生成条件から外します。"
-                    "従業員が提出した原文は残ります。"
-                )
-                if st.button(
-                    "管理者補正を削除・リセット",
-                    key=f"delete_note_adjustment_{note_widget_suffix}",
-                    type="secondary",
-                ):
-                    delete_note_adjustment(
-                        int(target_year),
-                        int(target_month),
-                        selected_note_employee,
-                    )
-                    st.success("管理者補正を削除・リセットしました。")
-                    st.rerun()
 
     # 詳細表示（折りたたみ式）
     with st.expander(
