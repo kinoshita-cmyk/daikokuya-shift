@@ -349,6 +349,8 @@ def build_effective_rule_visibility_rows(
     """生成・検証が実際に参照する主要ルールを表示用にまとめる。"""
     from prototype.rules import (
         HARD_CONSTRAINTS,
+        IMAZU_MONDAY_EMPLOYEE, IMAZU_MONDAY_CATEGORY, IMAZU_MONDAY_DESCRIPTION,
+        IMAZU_WEEKEND_CATEGORY, IMAZU_WEEKEND_DESCRIPTION,
         MONTH_EDGE_FIXED_EMPLOYEES,
         MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
         OMIYA_TWO_PERSON_EXCLUDED_STAFF,
@@ -407,6 +409,22 @@ def build_effective_rule_visibility_rows(
     )
 
     rows = [
+        {
+            "対象": IMAZU_MONDAY_EMPLOYEE,
+            "ルール": IMAZU_MONDAY_CATEGORY,
+            "適用範囲": "全月固定",
+            "強さ": "強い目標 / WARNING",
+            "現在有効な内容": IMAZU_MONDAY_DESCRIPTION,
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": IMAZU_MONDAY_EMPLOYEE,
+            "ルール": IMAZU_WEEKEND_CATEGORY,
+            "適用範囲": "全月固定",
+            "強さ": "強い目標 / WARNING",
+            "現在有効な内容": IMAZU_WEEKEND_DESCRIPTION,
+            "変更場所": "固定ルール",
+        },
         {
             "対象": "大宮駅前店",
             "ルール": "大宮駅前の最大人数",
