@@ -48,6 +48,8 @@ from .shift_readjuster import (
     propose_yamamoto_cleanup,
 )
 from .validator import validate
+from .rules import STORE_STAFFING_LIMITS
+from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
 
 SYSTEM_PROMPT = """\
@@ -92,6 +94,13 @@ SYSTEM_PROMPT = """\
 4. validate_current で違反チェック
 5. 結果を経営者に報告し、画面の「本シフトに反映」または「プレビューを破棄」ボタンを案内する
 """
+SYSTEM_PROMPT += (
+    "\n# 共通の現行ルール\n"
+    f"- 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名。"
+    "4名に増やす案で不足を解消しない。\n"
+    "- " + CLOSE_LONG_WORK_DESCRIPTION + "\n"
+    "- 既存のエラー・重要な警告を増やす変更は検証で差し戻す。\n"
+)
 
 
 # ============================================================

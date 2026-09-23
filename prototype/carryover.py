@@ -17,6 +17,7 @@ from .backup import ShiftBackup
 from .employees import shift_active_employees
 from .models import MonthlyShift, PreviousMonthCarryover, Store
 from .shift_lock import ShiftLockManager
+from .work_recovery import LONG_WORK_RUN_DAYS
 
 
 @dataclass(frozen=True)
@@ -66,10 +67,18 @@ def build_previous_month_carryover(
                 break
 
         if last_working_days or last_off_days:
+            recent_working_days, recent_off_days = [], []
+            for day in range(max(1, last_day - 2 * LONG_WORK_RUN_DAYS + 1), last_day + 1):
+                assignment = previous_shift.get_assignment(name, day)
+                if assignment is not None:
+                    target = recent_off_days if assignment.store == Store.OFF else recent_working_days
+                    target.append(day)
             carryover.append(PreviousMonthCarryover(
                 employee=name,
                 last_working_days=sorted(last_working_days),
                 last_off_days=sorted(last_off_days),
+                recent_working_days=recent_working_days,
+                recent_off_days=recent_off_days,
             ))
     return carryover
 

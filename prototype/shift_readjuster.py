@@ -19,6 +19,10 @@ from .models import MonthlyShift, Role, ShiftAssignment, Skill, Store
 from .rules import YamamotoLogic
 from .validator import ValidationResult, validate
 from .consecutive_counts import add_consecutive_count_constraints
+from .work_recovery import (
+    add_close_long_work_indicators, close_long_work_rest_days,
+    previous_working_map, work_recovery_applies,
+)
 
 
 @dataclass(frozen=True)
@@ -1107,6 +1111,25 @@ def _solve_tobishi_move_set(
     # windows are left untouched and the full validator still checks the final
     # result, including previous-month carryover and monthly exceptions.
     ctx = validation_context or {}
+    # 完成案の検証と同じ窓で、近接する5連勤の警告を新たに作る交換を避ける。
+    for employee in model_names:
+        if not work_recovery_applies(get_employee(employee), shift.year, shift.month):
+            continue
+        previous = previous_working_map(
+            ctx.get("prev_month", []), employee, shift.year, shift.month,
+        )
+        initial = {**previous, **{
+            day: initial_working[(employee, day)] for day in range(1, days + 1)
+        }}
+        allowed = set(close_long_work_rest_days(initial, days))
+        proposed = {**previous, **{
+            day: working[(employee, day)] for day in range(1, days + 1)
+        }}
+        for rest, indicator in add_close_long_work_indicators(
+            model, proposed, days, f"repair_{employee}",
+        ).items():
+            if rest not in allowed:
+                model.Add(indicator == 0)
     employee_work_limits = ctx.get("employee_max_consecutive_work", {}) or {}
     count_rules = [r for r in ctx.get("consecutive_count_rules", []) if r["employee"] in model_names]
     if count_rules:

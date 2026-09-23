@@ -22,6 +22,7 @@ from typing import Optional
 from .models import Affinity, Store, Skill, OperationMode
 from .paths import CONFIG_DIR
 from .submission_window import now_jst
+from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
 # ============================================================
 # 店舗別の必要人数（営業モードごと）
@@ -99,18 +100,17 @@ NORMAL_CAPACITY: dict[Store, StoreCapacity] = {
 STORE_OVERAGE_PRIORITY: tuple[Store, ...] = (
     Store.SUZURAN,
     Store.NISHIGUCHI,
-    Store.OMIYA,
     Store.AKABANE,
 )
 
 STORE_STAFFING_LIMITS: dict[Store, StoreStaffingLimit] = {
-    # 増員優先順位は すずらん → 西口 → 大宮 → 赤羽。
+    # 増員優先順位は すずらん → 西口 → 赤羽。大宮は標準・上限とも3名。
     # 赤羽は標準3名、4名は必要時のみ。
     Store.AKABANE: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1400),
     # 赤羽東口店は原則1名のみ。
     Store.HIGASHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=1, over_standard_penalty=3000),
-    # 大宮駅前店は3名を標準にし、4名は赤羽より優先して許容。
-    Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=4, over_standard_penalty=1100),
+    # 大宮駅前店は標準・最大とも3名。需給調整時の2名許容は別条件。
+    Store.OMIYA: StoreStaffingLimit(standard_total=3, max_total=3, over_standard_penalty=1100),
     # 大宮西口店は原則1名、研修などで2名まで。
     Store.NISHIGUCHI: StoreStaffingLimit(standard_total=1, max_total=2, over_standard_penalty=800),
     # すずらんは3名標準、状況により4名まで。
@@ -825,6 +825,10 @@ def yamamoto_monthly_max_consecutive(year: int, month: int) -> int:
 def active_code_managed_monthly_rules(year: int, month: int) -> list:
     """設定ファイルで管理している月限定ルールの説明文を返す。"""
     notes = []
+    notes.append(
+        f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
+    )
+    notes.append("固定の強い目標: " + CLOSE_LONG_WORK_DESCRIPTION)
     if is_omiya_two_person_allowed_month(year, month):
         notes.append(
             "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"

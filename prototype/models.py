@@ -266,3 +266,6 @@ class PreviousMonthCarryover:
     employee: str
     last_working_days: list[int]   # 前月の最後の出勤日（例：[28,29,30]）
     last_off_days: list[int]       # 前月末の休み（例：[30]）
+    # Noneは旧形式。直近10日の明示的な記録で、月境界の「5勤・休・5勤」も判定する。
+    recent_working_days: Optional[list[int]] = None
+    recent_off_days: Optional[list[int]] = None

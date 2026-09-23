@@ -12,11 +12,15 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from calendar import monthrange
 from typing import Optional
 from .consecutive_counts import (
     consecutive_count_label, matching_block_ends, previous_run_length,
+)
+from .work_recovery import (
+    CLOSE_LONG_WORK_CATEGORY, LONG_WORK_RUN_DAYS,
+    close_long_work_rest_days, previous_working_map, work_recovery_applies,
 )
 
 from .models import (
@@ -227,6 +231,37 @@ class ValidationResult:
         print("=" * 60)
 
 
+def _check_close_long_work(shift, result, days_in_month, prev_month) -> None:
+    count = 0
+    month_start = date(shift.year, shift.month, 1)
+
+    def label(day):
+        value = month_start + timedelta(days=day - 1)
+        return f"{value.month}/{value.day}"
+
+    for employee in _validation_employees():
+        if not work_recovery_applies(employee, shift.year, shift.month):
+            continue
+        working = previous_working_map(prev_month, employee.name, shift.year, shift.month)
+        working.update({
+            a.day: a.store != Store.OFF for a in shift.assignments
+            if a.employee == employee.name and 1 <= a.day <= days_in_month
+        })
+        for rest in close_long_work_rest_days(working, days_in_month):
+            count += 1
+            result.issues.append(Issue(
+                severity="WARNING", category=CLOSE_LONG_WORK_CATEGORY,
+                day=rest + LONG_WORK_RUN_DAYS, employee=employee.name,
+                message=(
+                    f"{label(rest - LONG_WORK_RUN_DAYS)}〜{label(rest - 1)}勤務 → "
+                    f"{label(rest)}休み → {label(rest + 1)}〜{label(rest + LONG_WORK_RUN_DAYS)}勤務。"
+                    "5日以上の連勤が休み1日だけを挟んで続いています。"
+                    "絶対条件を守った範囲で回避する強い目標です。"
+                ),
+            ))
+    result.summary_stats[CLOSE_LONG_WORK_CATEGORY + "（件）"] = count
+
+
 # ============================================================
 # 検証ロジック本体
 # ============================================================
@@ -306,6 +341,7 @@ def validate(
         max_consec=max_consec,
         employee_max_consecutive_work=employee_max_consecutive_work,
     )
+    _check_close_long_work(shift, result, days_in_month, prev_month)
 
     # 4-2. 月初固定勤務者は月末最大4連勤
     _check_month_end_fixed_staff_consecutive_limit(

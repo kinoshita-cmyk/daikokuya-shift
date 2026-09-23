@@ -27,6 +27,10 @@ from typing import Optional
 
 from ortools.sat.python import cp_model
 from .consecutive_counts import add_consecutive_count_constraints
+from .work_recovery import (
+    CLOSE_LONG_WORK_DESCRIPTION, CLOSE_LONG_WORK_PENALTY,
+    add_close_long_work_indicators, previous_working_map, work_recovery_applies,
+)
 
 from .models import (
     MonthlyShift, ShiftAssignment, Store, Skill, OperationMode, Affinity,
@@ -1255,6 +1259,17 @@ def generate_shift(
                         sum(1 - off[e.name][d] for d in window) <= allowed_work
                     )
 
+    # 単発の5連勤より強く回避するが、絶対条件にはしない。
+    close_long_work_terms = []
+    for e in main_employees:
+        if not work_recovery_applies(e, year, month):
+            continue
+        working = previous_working_map(prev_month, e.name, year, month)
+        working.update({d: 1 - off[e.name][d] for d in days})
+        close_long_work_terms.extend(add_close_long_work_indicators(
+            model, working, days_in_month, e.name,
+        ).values())
+
     # ============================================================
     # 制約 10: 休日日数の最低ライン
     # ============================================================
@@ -1758,6 +1773,8 @@ def generate_shift(
     if over_4_indicators:
         # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
         obj = obj - 50 * sum(over_4_indicators)
+    if close_long_work_terms:
+        obj = obj - CLOSE_LONG_WORK_PENALTY * sum(close_long_work_terms)
     if two_off_goal_terms:
         # 2連休不足の警告が出ないよう、緩和時でも強く優先する。
         obj = obj + 260 * sum(two_off_goal_terms)
@@ -1879,10 +1896,15 @@ def generate_shift(
         status_out["status"] = solver.StatusName(status)
         status_out["wall_time_seconds"] = round(float(solver.WallTime()), 1)
         status_out["omiya_staffing_rule"] = {
-            "normal": "エコ対応1名以上・合計3名以上",
+            "normal": "エコ対応1名以上・合計3名",
             "reduced": "エコ対応1名以上・合計2名",
+            "max_total": STORE_STAFFING_LIMITS[Store.OMIYA].max_total,
         }
+        status_out["close_long_work_rule"] = CLOSE_LONG_WORK_DESCRIPTION
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["close_long_work_count"] = sum(
+                solver.Value(term) for term in close_long_work_terms
+            )
             status_out["omiya_shortage_actual_days"] = sum(
                 solver.Value(omiya_short[d])
                 for d in days
