@@ -256,6 +256,20 @@ def build_employee_suitability_rows_from_master() -> list[dict]:
 
 def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
     """台帳の数値基準欄が空の場合、現在の本設定から表示用に作る。"""
+    from prototype.models import Store
+    from prototype.rules import STORE_STAFFING_LIMITS, STORE_OVERAGE_PRIORITY
+    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+
+    store_labels = {
+        Store.AKABANE: "赤羽", Store.HIGASHIGUCHI: "東口", Store.OMIYA: "大宮",
+        Store.SUZURAN: "すずらん", Store.NISHIGUCHI: "西口",
+    }
+    def staffing_values(field):
+        return " / ".join(
+            f"{label}{getattr(STORE_STAFFING_LIMITS[store], field)}"
+            for store, label in store_labels.items()
+        )
+
     return [
         {
             "分類": "絶対条件",
@@ -290,20 +304,27 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
         {
             "分類": "強い目標",
             "項目": "店舗標準人数",
-            "現在値": "赤羽3 / 東口1 / 大宮3 / すずらん3 / 西口1",
+            "現在値": staffing_values("standard_total"),
             "備考": "生成時は標準人数に寄せる。研修や不足時は例外あり。",
         },
         {
             "分類": "絶対条件",
             "項目": "店舗最大人数",
-            "現在値": "赤羽4 / 東口1 / 大宮4 / すずらん4 / 西口2",
-            "備考": "赤羽・大宮の5名は原則NG。4月3日などの特殊日は月別例外で扱う。",
+            "現在値": staffing_values("max_total"),
+            "備考": "大宮駅前は最大3名。4名以上は生成不可、手動調整後もERROR。",
         },
         {
             "分類": "絶対条件",
             "項目": "1日全体人数上限",
             "現在値": "最大15名",
-            "備考": "通常は11名体制。増員優先順位はすずらん、西口、大宮、赤羽。",
+            "備考": "通常は11名体制。増員優先順位は"
+                    + "、".join(store_labels[store] for store in STORE_OVERAGE_PRIORITY) + "。",
+        },
+        {
+            "分類": "強い目標",
+            "項目": "5連勤の近接回避",
+            "現在値": "5連勤以上 → 休み1日 → 5連勤以上を回避",
+            "備考": CLOSE_LONG_WORK_DESCRIPTION,
         },
         {
             "分類": "運用設定",
@@ -331,10 +352,13 @@ def build_effective_rule_visibility_rows(
         MONTH_EDGE_FIXED_EMPLOYEES,
         MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
         OMIYA_TWO_PERSON_EXCLUDED_STAFF,
+        STORE_STAFFING_LIMITS,
         fixed_suzuran_core_presence_rules,
         load_monthly_exceptions_raw,
         yamamoto_monthly_policy,
     )
+    from prototype.models import Store
+    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
     year = int(year)
     month = int(month)
@@ -383,6 +407,25 @@ def build_effective_rule_visibility_rows(
     )
 
     rows = [
+        {
+            "対象": "大宮駅前店",
+            "ルール": "大宮駅前の最大人数",
+            "適用範囲": "全月固定",
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": (
+                f"最大{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名。"
+                "需給調整時の2名体制の条件は従来どおり。4名以上はERROR。"
+            ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "通常のシフト対象者（顧問・補助要員・試用期間中を除く）",
+            "ルール": "5連勤の近接回避",
+            "適用範囲": "全月固定",
+            "強さ": "強い目標 / WARNING",
+            "現在有効な内容": CLOSE_LONG_WORK_DESCRIPTION,
+            "変更場所": "固定ルール",
+        },
         {
             "対象": "・".join(OMIYA_TWO_PERSON_EXCLUDED_STAFF),
             "ルール": "大宮駅前2名体制の構成員",
