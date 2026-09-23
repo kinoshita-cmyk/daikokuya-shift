@@ -46,6 +46,9 @@ from .rules import (
     YamamotoLogic, MAY_2026_HOLIDAY_OVERRIDES, DEFAULT_HOLIDAY_DAYS_MAY,
     CONSTRAINT_EXCLUDED, STORE_ROTATION_MINIMUMS,
     STORE_ASSIGNMENT_EXTRA_WEIGHTS,
+    IMAZU_MONDAY_EMPLOYEE, IMAZU_MONDAY_STORE, IMAZU_MONDAY_WEIGHT,
+    IMAZU_MONDAY_DESCRIPTION, imazu_monday_preferred_days,
+    IMAZU_WEEKEND_STORE, IMAZU_WEEKEND_DESCRIPTION, imazu_weekend_preferred_days,
     MAKINO_NISHIGUCHI_TRAINING_PARTNER, STORE_STAFFING_LIMITS,
     GLOBAL_DAILY_STAFFING_LIMIT, get_monthly_work_target,
     get_monthly_required_holiday_days,
@@ -194,6 +197,18 @@ ONLY_ON_REQUEST_SHORTFALL_PENALTY = 2600
 # 弱い目標に留める。「出勤・休み・出勤」は飛び石として評価しない。
 TOBISHI_ECO_CORE_PENALTY = 240
 TOBISHI_OTHER_EMPLOYEE_PENALTY = 20
+
+
+def _imazu_weekday_preference_terms(
+    x: dict, target_days: list[int], target_store: Optional[Store],
+) -> dict:
+    """月曜・土日とも赤羽勤務に加点する。勤務や休日の固定制約にはしない。"""
+    assignments = x.get(IMAZU_MONDAY_EMPLOYEE, {})
+    return {
+        day: sum(variable for store, variable in assignments[day].items()
+                 if store != Store.OFF and (target_store is None or store == target_store))
+        for day in target_days if day in assignments
+    }
 
 
 def _add_eco_support_pairing_constraints(
@@ -1575,6 +1590,21 @@ def generate_shift(
             ]).OnlyEnforceIf(both_absent.Not())
             suzuran_core_absence_terms.append(both_absent)
 
+    imazu_monday_days = (
+        imazu_monday_preferred_days(year, month, off_requests, operation_modes)
+        if IMAZU_MONDAY_EMPLOYEE in main_employee_names else []
+    )
+    imazu_weekend_days = (
+        imazu_weekend_preferred_days(year, month, off_requests, operation_modes)
+        if IMAZU_MONDAY_EMPLOYEE in main_employee_names else []
+    )
+    imazu_monday_terms = _imazu_weekday_preference_terms(x, imazu_monday_days, IMAZU_MONDAY_STORE)
+    imazu_weekend_terms = _imazu_weekday_preference_terms(x, imazu_weekend_days, IMAZU_WEEKEND_STORE)
+    objective_terms.extend(
+        IMAZU_MONDAY_WEIGHT * term
+        for term in [*imazu_monday_terms.values(), *imazu_weekend_terms.values()]
+    )
+
     # 各従業員 × 各店舗の在勤数を勘定し、Affinity に応じた重み付けで最適化
     AFFINITY_WEIGHT = {
         Affinity.STRONG: 10,    # 強：是非ここに配置したい
@@ -1901,7 +1931,22 @@ def generate_shift(
             "max_total": STORE_STAFFING_LIMITS[Store.OMIYA].max_total,
         }
         status_out["close_long_work_rule"] = CLOSE_LONG_WORK_DESCRIPTION
+        status_out["imazu_monday_preference"] = {
+            "rule": IMAZU_MONDAY_DESCRIPTION,
+            "target_days": imazu_monday_days,
+        }
+        status_out["imazu_weekend_preference"] = {
+            "rule": IMAZU_WEEKEND_DESCRIPTION,
+            "target_days": imazu_weekend_days,
+        }
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["imazu_monday_preference"]["assigned_days"] = [
+                day for day in imazu_monday_days
+                if solver.Value(imazu_monday_terms[day])
+            ]
+            status_out["imazu_weekend_preference"]["assigned_days"] = [
+                day for day in imazu_weekend_days if solver.Value(imazu_weekend_terms[day])
+            ]
             status_out["close_long_work_count"] = sum(
                 solver.Value(term) for term in close_long_work_terms
             )

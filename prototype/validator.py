@@ -62,6 +62,9 @@ from .rules import (
     effective_employee_store_affinities,
     monthly_employee_store_override,
     yamamoto_monthly_policy,
+    IMAZU_MONDAY_EMPLOYEE, IMAZU_MONDAY_STORE, IMAZU_MONDAY_CATEGORY,
+    imazu_monday_preferred_days,
+    IMAZU_WEEKEND_STORE, IMAZU_WEEKEND_CATEGORY, imazu_weekend_preferred_days,
 )
 
 
@@ -406,6 +409,8 @@ def validate(
 
     # 15. 東口の月曜休店チェック
     _check_higashiguchi_monday_closed(shift, result, days_in_month)
+    _check_imazu_monday_preference(shift, result, off_requests)
+    _check_imazu_weekend_preference(shift, result, off_requests)
 
     # 16. 月内の最低巡回条件チェック
     _check_store_rotation_minimums(shift, result)
@@ -1812,6 +1817,48 @@ def _check_higashiguchi_monday_closed(
                 day=day, employee=None,
                 message=f"東口に{higashi_workers}が配置（月曜休店）",
             ))
+
+
+def _check_imazu_monday_preference(
+    shift: MonthlyShift, result: ValidationResult, off_requests: Optional[dict] = None,
+) -> None:
+    """未達は確認用WARNING。本人×休みには警告を出さない。"""
+    for day in imazu_monday_preferred_days(
+        shift.year, shift.month, off_requests, shift.operation_modes,
+    ):
+        assignment = shift.get_assignment(IMAZU_MONDAY_EMPLOYEE, day)
+        if assignment is None or assignment.store == IMAZU_MONDAY_STORE:
+            continue
+        result.issues.append(Issue(
+            severity="WARNING", category=IMAZU_MONDAY_CATEGORY,
+            day=day, employee=IMAZU_MONDAY_EMPLOYEE,
+            message=(
+                f"月曜日は可能な限り{IMAZU_MONDAY_STORE.display_name}勤務を優先します。"
+                f"現在: {assignment.store.display_name}。"
+                "店舗体制・勤務日数・連勤などの条件で難しい場合は許容します（絶対条件ではありません）。"
+            ),
+        ))
+
+
+def _check_imazu_weekend_preference(
+    shift: MonthlyShift, result: ValidationResult, off_requests: Optional[dict] = None,
+) -> None:
+    """土日の赤羽勤務を優先。×休み以外の休み・他店舗勤務は確認対象にする。"""
+    for day in imazu_weekend_preferred_days(
+        shift.year, shift.month, off_requests, shift.operation_modes,
+    ):
+        assignment = shift.get_assignment(IMAZU_MONDAY_EMPLOYEE, day)
+        if assignment is None or assignment.store == IMAZU_WEEKEND_STORE:
+            continue
+        result.issues.append(Issue(
+            severity="WARNING", category=IMAZU_WEEKEND_CATEGORY,
+            day=day, employee=IMAZU_MONDAY_EMPLOYEE,
+            message=(
+                f"土日は出品作業のため可能な限り{IMAZU_WEEKEND_STORE.display_name}勤務を優先します。"
+                f"現在: {assignment.store.display_name}。"
+                "勤務日数・連勤・店舗体制などの条件で難しい場合は許容します（絶対条件ではありません）。"
+            ),
+        ))
 
 
 def _check_store_rotation_minimums(

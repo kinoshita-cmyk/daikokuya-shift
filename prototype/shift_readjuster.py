@@ -16,7 +16,10 @@ from ortools.sat.python import cp_model
 
 from .employees import get_employee
 from .models import MonthlyShift, Role, ShiftAssignment, Skill, Store
-from .rules import YamamotoLogic
+from .rules import (
+    YamamotoLogic, IMAZU_MONDAY_EMPLOYEE, IMAZU_MONDAY_STORE, IMAZU_WEEKEND_STORE,
+    imazu_monday_preferred_days, imazu_weekend_preferred_days,
+)
 from .validator import ValidationResult, validate
 from .consecutive_counts import add_consecutive_count_constraints
 from .work_recovery import (
@@ -1111,6 +1114,26 @@ def _solve_tobishi_move_set(
     # windows are left untouched and the full validator still checks the final
     # result, including previous-month carryover and monthly exceptions.
     ctx = validation_context or {}
+    # 既に守れている月曜・土日の赤羽配置を、飛び石改善だけのために崩さない。
+    # 他目的の明示的なAI調整は、共通検証の新規WARNINGとして確認できる。
+    for day in imazu_monday_preferred_days(
+        shift.year, shift.month, ctx.get("off_requests"), shift.operation_modes,
+    ):
+        initial = shift.get_assignment(IMAZU_MONDAY_EMPLOYEE, day)
+        if initial is None or initial.store != IMAZU_MONDAY_STORE:
+            continue
+        for index in cell_moves.get((IMAZU_MONDAY_EMPLOYEE, day), []):
+            if move_changes[index][(IMAZU_MONDAY_EMPLOYEE, day)] != IMAZU_MONDAY_STORE:
+                model.Add(selected[index] == 0)
+    for day in imazu_weekend_preferred_days(
+        shift.year, shift.month, ctx.get("off_requests"), shift.operation_modes,
+    ):
+        initial = shift.get_assignment(IMAZU_MONDAY_EMPLOYEE, day)
+        if initial is None or initial.store != IMAZU_WEEKEND_STORE:
+            continue
+        for index in cell_moves.get((IMAZU_MONDAY_EMPLOYEE, day), []):
+            if move_changes[index][(IMAZU_MONDAY_EMPLOYEE, day)] != IMAZU_WEEKEND_STORE:
+                model.Add(selected[index] == 0)
     # 完成案の検証と同じ窓で、近接する5連勤の警告を新たに作る交換を避ける。
     for employee in model_names:
         if not work_recovery_applies(get_employee(employee), shift.year, shift.month):

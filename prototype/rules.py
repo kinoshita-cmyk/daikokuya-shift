@@ -829,6 +829,8 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
         f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
     )
     notes.append("固定の強い目標: " + CLOSE_LONG_WORK_DESCRIPTION)
+    notes.append("固定の強い目標: " + IMAZU_MONDAY_DESCRIPTION)
+    notes.append("固定の強い目標: " + IMAZU_WEEKEND_DESCRIPTION)
     if is_omiya_two_person_allowed_month(year, month):
         notes.append(
             "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"
@@ -1686,6 +1688,66 @@ def month_edge_forced_assignments(
 STORE_ASSIGNMENT_EXTRA_WEIGHTS: dict[tuple[str, Store], int] = {
     ("今津", Store.AKABANE): 6,
 }
+
+# 曜日を指定した原則。本人×休み・店舗必要人数などの絶対条件は変更しない。
+IMAZU_MONDAY_EMPLOYEE = "今津"
+IMAZU_MONDAY_STORE = Store.AKABANE
+IMAZU_MONDAY_CATEGORY = "今津の月曜赤羽優先"
+# 通常の店舗嗜好より強く、店舗体制・月間勤務日数・月別の明示指示より弱く扱う。
+IMAZU_MONDAY_WEIGHT = 200
+IMAZU_MONDAY_DESCRIPTION = (
+    "今津は月曜日、可能な限り赤羽駅前店で勤務する（全月共通の強い目標）。"
+    "本人の×休み希望日・赤羽休業日は対象外。店舗の必要人数・技能構成・"
+    "月間勤務日数・連勤上限・月別の絶対条件を優先し、他店舗勤務や休みも許容する。"
+    "火曜日から金曜日の赤羽優先は従来どおり。"
+)
+IMAZU_WEEKEND_STORE = Store.AKABANE
+IMAZU_WEEKEND_CATEGORY = "今津の土日赤羽優先"
+IMAZU_WEEKEND_DESCRIPTION = (
+    "今津は出品作業のため、土曜日・日曜日は可能な限り赤羽駅前店で勤務する"
+    "（全月共通の強い目標。月曜赤羽優先と同じ強さ）。"
+    "本人の×休み希望日・赤羽休業日は対象外。店舗の必要人数・技能構成・"
+    "月間勤務日数・連勤上限・月別の絶対条件を優先し、他店舗勤務や休みも許容する。"
+    "土日の赤羽勤務のために月間勤務日数を増やすルールではない。"
+)
+
+
+def imazu_monday_preferred_days(
+    year: int, month: int,
+    off_requests: Optional[dict] = None,
+    operation_modes: Optional[dict] = None,
+) -> list[int]:
+    """生成・検証・再調整で共通の、月曜赤羽優先の対象日。"""
+    requested_off = set((off_requests or {}).get(IMAZU_MONDAY_EMPLOYEE, []))
+    modes = operation_modes or {}
+    return [
+        day for day in range(1, monthrange(year, month)[1] + 1)
+        if date(year, month, day).weekday() == 0
+        and day not in requested_off
+        and is_store_open_on_day(
+            year, month, day, IMAZU_MONDAY_STORE,
+            modes.get(day, OperationMode.NORMAL),
+        )
+    ]
+
+
+def imazu_weekend_preferred_days(
+    year: int, month: int,
+    off_requests: Optional[dict] = None,
+    operation_modes: Optional[dict] = None,
+) -> list[int]:
+    """土曜・日曜の赤羽勤務優先の対象日。本人の×休み・赤羽休業日を除外する。"""
+    requested_off = set((off_requests or {}).get(IMAZU_MONDAY_EMPLOYEE, []))
+    modes = operation_modes or {}
+    return [
+        day for day in range(1, monthrange(year, month)[1] + 1)
+        if date(year, month, day).weekday() in (5, 6)
+        and day not in requested_off
+        and is_store_open_on_day(
+            year, month, day, IMAZU_WEEKEND_STORE,
+            modes.get(day, OperationMode.NORMAL),
+        )
+    ]
 
 # 出勤希望日を必ず勤務にする従業員。
 # 希望していない日まで無条件に配置するのではなく、提出された出勤希望を絶対扱いにする。
