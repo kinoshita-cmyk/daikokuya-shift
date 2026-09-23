@@ -158,8 +158,8 @@ class ParsedNaturalLanguageNote:
             or self.work_requests
             or self.work_groups
             or self.flexible_off
-            or self.paid_leave_days
-            or self.requested_holiday_days
+            or self.paid_leave_days is not None
+            or self.requested_holiday_days is not None
             or self.max_consecutive_work_days
             or self.max_consecutive_off_days
             or self.preferred_consecutive_off_days
@@ -235,13 +235,22 @@ def _extract_days_from_text(text: str, target_month: int, days_in_month: int) ->
             if day is not None:
                 days.append(day)
 
-    for month_str, day_str in re.findall(r"(\d{1,2})\s*月\s*(\d{1,2})\s*日", normalized):
+    month_dates = r"(\d{1,2})\s*月\s*(\d{1,2}\s*(?:日?\s*[,\.・と]\s*\d{1,2}\s*)*日)"
+    for month_str, candidate in re.findall(month_dates, normalized):
         if int(month_str) == int(target_month):
-            day = _safe_day(day_str, days_in_month)
-            if day is not None:
-                days.append(day)
+            days.extend(int(d) for d in re.findall(r"\d{1,2}", candidate)
+                        if _safe_day(d, days_in_month) is not None)
 
-    for day_str in re.findall(r"(?<!月)(\d{1,2})\s*日", normalized):
+    # 他の月の日付を「2日」等として拾い直さない。
+    remaining = re.sub(month_dates, "", normalized)
+    remaining = re.sub(r"\d{1,2}\s*/\s*\d{1,2}\s*日?", "", remaining)
+    for candidate in re.findall(
+        r"(?<![\d-])(\d{1,2}\s*日?(?:\s*[,\.・と]\s*\d{1,2}\s*日?)+)\s*日",
+        remaining,
+    ):
+        days.extend(int(d) for d in re.findall(r"\d{1,2}", candidate)
+                    if _safe_day(d, days_in_month) is not None)
+    for day_str in re.findall(r"(?<!\d)(\d{1,2})\s*日", remaining):
         day = _safe_day(day_str, days_in_month)
         if day is not None:
             days.append(day)
@@ -257,6 +266,8 @@ def _strip_total_count_phrases(text: str) -> str:
         r"\d{1,2}\s*日(?:分)?\s*(?:有給|有休)",
         r"出勤(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日(?:間)?",
         r"出勤\s*\d{1,2}\s*日(?:間)?",
+        r"(?:合計|計|月に|月間)\s*\d{1,2}\s*日(?:間)?\s*(?:勤務|出勤)",
+        r"\d{1,2}\s*日間\s*(?:勤務|出勤)",
         r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日",
         r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:お)?(?:休み|休日|休暇)",
         r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:希望|お願い|いただきたい|ください)",
@@ -333,14 +344,16 @@ def _extract_number(patterns: list[str], text: str) -> Optional[int]:
 def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
     """「3連勤NG」「3連休は避けたい」なら上限2として返す。"""
     normalized = _normalize_note_text(text)
+    # この誤字だけは意味が一意な「二連休憩不可」として扱う。
+    normalized = re.sub(r"(\d+連休)憩(?=\s*(?:は)?\s*(?:不可|NG|禁止))", r"\1", normalized)
     negative_words = (
         r"(?:NG|不可|禁止|だめ|ダメ|避けたい|避けて|なし|無し|無理|"
         r"不要|いらない|いりません|要らない|要りません|必要ない|"
         r"必要ありません|なくていい|なくてもいい)"
     )
     patterns = [
-        rf"(\d{{1,2}})\s*{label}[^。\n]{{0,24}}?{negative_words}",
-        rf"{negative_words}[^。\n]{{0,24}}?(\d{{1,2}})\s*{label}",
+        rf"(\d{{1,2}})\s*{label}\s*(?:は|を|が)?\s*{negative_words}",
+        rf"{negative_words}\s*[:：]?\s*(\d{{1,2}})\s*{label}",
     ]
     for pattern in patterns:
         match = re.search(pattern, normalized, flags=re.IGNORECASE)
@@ -359,8 +372,10 @@ def _extract_allowed_consecutive_limit(text: str, label: str) -> Optional[int]:
     normalized = _normalize_note_text(text)
     allowed_words = r"(?:可|可能|許容|大丈夫|OK|お?っ?けー|いけます|出勤可能)"
     patterns = [
-        rf"(?:最大|最長)?\s*(\d{{1,2}})\s*{label}\s*(?:まで)?[^。\n]{{0,16}}?{allowed_words}",
-        rf"{allowed_words}[^。\n]{{0,16}}?(?:最大|最長)?\s*(\d{{1,2}})\s*{label}",
+        rf"{label}上限\s*:\s*(\d{{1,2}})\s*{label}(?:まで)?",
+        rf"(?:最大|最長)\s*(\d{{1,2}})\s*{label}\s*まで",
+        rf"(\d{{1,2}})\s*{label}\s*(?:まで)?\s*(?:は|なら)?\s*{allowed_words}",
+        rf"{allowed_words}\s*[:：]?\s*(?:最大|最長)?\s*(\d{{1,2}})\s*{label}",
     ]
     for pattern in patterns:
         match = re.search(pattern, normalized, flags=re.IGNORECASE)
@@ -481,9 +496,13 @@ def parse_natural_language_note(
         parse_consecutive_counts(normalized)
     )
     days_in_month = monthrange(target_year, target_month)[1]
+    sentence_text = re.sub(
+        r"((?:休み|休日|休暇|出勤|勤務)(?:希望|します|する)?)[,\s]+(?=\d{1,2}(?:日|[,\.・]))",
+        r"\1。", normalized,
+    )
     sentences = [
         s.strip()
-        for s in re.split(r"[。\n]+", normalized)
+        for s in re.split(r"[。\n]+", sentence_text)
         if s.strip()
     ]
 
@@ -522,15 +541,23 @@ def parse_natural_language_note(
         )
         if public_holidays is not None:
             requested_holidays = public_holidays + paid
+    # 日付の列挙や「6日は出勤」を月間勤務日数に読み替えない。
+    work_count_text = re.sub(
+        r"\d{1,2}\s*日?(?:\s*[,\.・と]\s*\d{1,2}\s*日?)+\s*日",
+        "", normalized,
+    )
     requested_work_days = _extract_number(
         [
             r"出勤(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
             r"出勤\s*(\d{1,2})\s*日(?:間)?",
             r"勤務(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
             r"勤務\s*(\d{1,2})\s*日(?:間)?",
-            r"(\d{1,2})\s*日(?:間)?\s*(?:勤務|出勤)(?:希望|でお願い|お願いします|したい)",
+            r"(?:合計|計|月に|月間)\s*(\d{1,2})\s*日(?:間)?\s*(?:勤務|出勤)",
+            r"(\d{1,2})\s*日間\s*(?:勤務|出勤)(?:希望|でお願い|お願いします|したい)",
+            # 従来の「12日勤務希望」は月間勤務日数として維持。日付は「12日は出勤」。
+            r"^\s*(\d{1,2})\s*日\s*勤務希望\s*[。\s]*$",
         ],
-        normalized,
+        work_count_text,
     )
     if requested_work_days is not None:
         requested_holidays = days_in_month - requested_work_days
@@ -569,21 +596,6 @@ def parse_natural_language_note(
     ):
         # 「連休がほしい」のように日数指定がない場合は、最低限の2連休希望として扱う。
         result.preferred_consecutive_off_days = 2
-
-    whole_note_work_request = any(
-        word in normalized
-        for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "出勤確定")
-    )
-    is_choice_note = any(word in normalized for word in ("いずれか", "どちらか", "どれか"))
-    if whole_note_work_request and not is_choice_note:
-        optional = any(word in normalized for word in ("不要であれば", "必要であれば", "可能なら", "できれば"))
-        work_days = _extract_work_days_from_sentence(normalized, target_month, days_in_month)
-        store = _extract_store_from_text(normalized)
-        if optional:
-            result.ignored_optional_work_days.extend(work_days)
-        else:
-            for day in work_days:
-                result.work_requests.append((day, store))
 
     for sentence in sentences:
         for flex in _extract_flexible_off_from_sentence(sentence, days_in_month):
@@ -629,10 +641,21 @@ def parse_natural_language_note(
             and "希望" in sentence
             and "休み" not in sentence
         )
+        direct_work_request = bool(re.search(
+            r"日\s*(?:は|に|全て|すべて|全部|すべての|全ての)*\s*"
+            r"(?:(?:赤羽駅前|赤羽東口|大宮駅前|大宮西口|大宮すずらん通り|赤羽|大宮|東口|西口|すずらん)(?:店)?(?:に|で)?\s*)?"
+            r"(?:出勤|勤務)(?:希望|する|します)?(?:[。\s]|$)", sentence,
+        ))
         is_work_request = any(
             word in sentence
             for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "出勤確定")
-        ) or is_store_request
+        ) or is_store_request or direct_work_request
+        if re.search(r"(?:出勤|勤務)(?:は)?\s*(?:不可|しない|できない|しません|希望しない)", sentence):
+            is_work_request = False
+        if requested_work_days is not None and re.fullmatch(
+            r"\s*\d{1,2}\s*日\s*勤務希望\s*", sentence,
+        ):
+            is_work_request = False
         if is_work_request:
             optional = any(word in sentence for word in ("不要であれば", "必要であれば", "可能なら", "できれば"))
             work_days = _extract_work_days_from_sentence(sentence, target_month, days_in_month)
@@ -740,7 +763,9 @@ def _apply_parsed_note_to_submission_data(
                 })
                 existing_summary_flex.add(key)
         if parsed_note.paid_leave_days is not None:
-            summary["paid_leave_days"] = parsed_note.paid_leave_days
+            summary["paid_leave_days"] = max(
+                int(summary.get("paid_leave_days") or 0), parsed_note.paid_leave_days,
+            )
         if parsed_note.requested_holiday_days is not None:
             summary["requested_holiday_days"] = parsed_note.requested_holiday_days
         if parsed_note.max_consecutive_work_days is not None:
@@ -841,6 +866,39 @@ def _apply_consecutive_counts(data, author, parsed_note):
     ]
     if summary.get("preferred_consecutive_off_days") in off_lengths:
         summary["preferred_consecutive_off_days"] = None
+
+
+def _exclude_off_days_from_note_work(data: SubmissionData) -> None:
+    """補正後も×休みを優先し、表示からも採用されない出勤希望を分離する。"""
+    data.preferred_work_requests = [
+        (employee, day, store) for employee, day, store in data.preferred_work_requests
+        if day not in data.off_requests.get(employee, [])
+    ]
+    for employee, summary in data.parsed_note_summaries.items():
+        off_days = set(data.off_requests.get(employee, []))
+        blocked = sorted({item["day"] for item in summary.get("work_requests", []) if item["day"] in off_days})
+        if blocked:
+            summary["blocked_work_days"] = blocked
+            summary["work_requests"] = [item for item in summary["work_requests"] if item["day"] not in off_days]
+
+
+def preview_note_adjustment(original_note: str, adjustment: dict, year: int, month: int, off_days=()) -> dict:
+    """保存前の表示にも、生成入力と同じ合算・上書き処理を使う。"""
+    data = SubmissionData(year, month)
+    data.off_requests["preview"] = list(off_days)
+    status = adjustment.get("status", "")
+    if status not in {"補正のみ反映", "反映しない"}:
+        _apply_parsed_note_to_submission_data(
+            data, "preview", parse_natural_language_note(original_note, year, month),
+        )
+    if status in {"確認済み", "補正のみ反映"}:
+        _apply_parsed_note_to_submission_data(
+            data, "preview", parse_natural_language_note(
+                adjustment.get("corrected_text", ""), year, month,
+            ), "管理者補正",
+        )
+    _exclude_off_days_from_note_work(data)
+    return data.parsed_note_summaries.get("preview", {})
 
 
 def load_submissions_for_month(
@@ -1105,6 +1163,8 @@ def load_submissions_for_month(
                 parsed_adjustment,
                 source_label="管理者補正",
             )
+
+    _exclude_off_days_from_note_work(data)
 
     # 未提出者の判定
     if expected_employees:
