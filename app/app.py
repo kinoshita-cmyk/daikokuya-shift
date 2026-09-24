@@ -2670,18 +2670,11 @@ def summarize_natural_language_note_for_review(
                 f"{int(required_count)}日出勤{store_text}"
             )
 
-    if (
-        parsed_note.requested_holiday_days is not None
-        and parsed_note.paid_leave_days is not None
-    ):
-        auto_labels.append(
-            f"希望休日数: 合計{int(parsed_note.requested_holiday_days)}日"
-            f"（うち有給{int(parsed_note.paid_leave_days)}日）"
-        )
-    elif parsed_note.requested_holiday_days is not None:
-        auto_labels.append(f"希望休日数: 合計{int(parsed_note.requested_holiday_days)}日")
-    elif parsed_note.paid_leave_days is not None:
-        auto_labels.append(f"希望有給日数: {int(parsed_note.paid_leave_days)}日")
+    from prototype.submission_loader import note_day_count_labels
+    auto_labels.extend(note_day_count_labels(
+        parsed_note.requested_holiday_days, parsed_note.paid_leave_days,
+        parsed_note.requested_work_days,
+    ))
     if parsed_note.max_consecutive_work_days is not None:
         auto_labels.append(f"連勤上限: {int(parsed_note.max_consecutive_work_days)}連勤まで")
     if parsed_note.max_consecutive_off_days is not None:
@@ -3023,14 +3016,11 @@ def parsed_note_summary_to_labels(summary: dict) -> list[str]:
             f"{('（' + store_text + '希望）') if store_text else ''}"
         )
 
-    requested = summary.get("requested_holiday_days")
-    paid = summary.get("paid_leave_days")
-    if requested is not None and paid is not None:
-        labels.append(f"希望休日数: 合計{int(requested)}日（うち有給{int(paid)}日）")
-    elif requested is not None:
-        labels.append(f"希望休日数: 合計{int(requested)}日")
-    elif paid is not None:
-        labels.append(f"希望有給日数: {int(paid)}日")
+    from prototype.submission_loader import note_day_count_labels
+    labels.extend(note_day_count_labels(
+        summary.get("requested_holiday_days"), summary.get("paid_leave_days"),
+        summary.get("requested_work_days"),
+    ))
 
     if summary.get("max_consecutive_work_days") is not None:
         labels.append(f"連勤上限: {int(summary['max_consecutive_work_days'])}連勤まで")
@@ -3425,6 +3415,7 @@ def enrich_submission_days_from_files(
                 )
             if parsed_note.requested_holiday_days is not None:
                 submitted["requested_holiday_days"] = parsed_note.requested_holiday_days
+            submitted["requested_work_days"] = parsed_note.requested_work_days
             if parsed_note.max_consecutive_work_days is not None:
                 submitted["max_consecutive_work_days"] = parsed_note.max_consecutive_work_days
             if parsed_note.max_consecutive_off_days is not None:
@@ -6291,7 +6282,13 @@ if mode == "📊 経営者ビュー":
                 if admin_leave:
                     leave_label += f"（管理者+{admin_leave}日）"
                 note_applied = []
-                if s.get("requested_holiday_days"):
+                if s.get("requested_work_days") is not None:
+                    from prototype.submission_loader import note_day_count_labels
+                    note_applied.extend(note_day_count_labels(
+                        s.get("requested_holiday_days"), submitted_leave or None,
+                        s["requested_work_days"],
+                    ))
+                elif s.get("requested_holiday_days"):
                     if submitted_leave:
                         note_applied.append(
                             f"休み計{s['requested_holiday_days']}日"
@@ -6309,7 +6306,7 @@ if mode == "📊 経営者ビュー":
                 note_applied.extend(s.get("work_request_group_labels", []))
                 note_applied.extend(
                     label for label in s.get("note_auto_labels", [])
-                    if not str(label).startswith(("希望休日数:", "希望有給日数:"))
+                    if not str(label).startswith(("希望出勤日数:", "希望休日数:", "希望有給日数:"))
                 )
                 note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
                 note_adjustment = note_adjustments_by_employee.get(emp_name)
