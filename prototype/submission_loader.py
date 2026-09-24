@@ -144,6 +144,7 @@ class ParsedNaturalLanguageNote:
     flexible_off: list[tuple[list[int], int]] = field(default_factory=list)
     paid_leave_days: Optional[int] = None
     requested_holiday_days: Optional[int] = None
+    requested_work_days: Optional[int] = None
     max_consecutive_work_days: Optional[int] = None
     max_consecutive_off_days: Optional[int] = None
     preferred_consecutive_off_days: Optional[int] = None
@@ -189,6 +190,53 @@ _FULLWIDTH_TRANS = str.maketrans(
 
 def _normalize_note_text(text: str) -> str:
     return (text or "").translate(_FULLWIDTH_TRANS)
+
+
+# 月間日数と具体日を区別し、読取と日付抽出除外で同じ表現を使う。
+_WORK_DAY_COUNT_PATTERNS = (
+    r"(?:出勤|勤務)(?:日数)?[\s,]*(?:は|を|:)?[\s,]*(?:計|合計)?[\s,]*(\d{1,2})\s*日(?:間)?",
+    r"(?<!\d)(?:合計|計|月に|月間|月)[\s,]*(\d{1,2})\s*日(?:間)?[\s,]*(?:の)?[\s,]*(?:勤務|出勤)",
+    r"(?<![\d/\-])(\d{1,2})\s*日間[\s,]*(?:の)?[\s,]*(?:勤務|出勤)",
+    # 従来の「12日勤務希望」は月間日数として維持。「12日は出勤」は具体日。
+    r"^\s*(\d{1,2})\s*日\s*勤務希望\s*[。\s]*$",
+)
+
+
+def _extract_requested_work_days(text: str) -> Optional[int]:
+    work_count_text = re.sub(
+        r"\d{1,2}\s*日?(?:\s*[,\.・と]\s*\d{1,2}\s*日?)+\s*日",
+        "", text,
+    )
+    for pattern in _WORK_DAY_COUNT_PATTERNS:
+        for match in re.finditer(pattern, work_count_text):
+            tail = work_count_text[match.end():].lstrip(" ,")
+            if re.match(
+                r"(?:は|を)?\s*(?:できない|できません|不可|しない|しません|"
+                r"希望しない|希望しません|では(?:ない|ありません)|可能|未定|"
+                r"くらい|ぐらい|程度|ほど|前後|以上|以下|以内|まで)", tail,
+            ):
+                continue
+            return int(match.group(1))
+    return None
+
+
+def note_day_count_labels(requested_holiday_days=None, paid_leave_days=None,
+                          requested_work_days=None) -> list[str]:
+    """計算上は休日数を使っても、表示には本人が指定した出勤日数を残す。"""
+    if requested_work_days is not None:
+        details = []
+        if requested_holiday_days is not None:
+            details.append(f"休日換算{int(requested_holiday_days)}日")
+        if paid_leave_days is not None:
+            details.append(f"うち有給{int(paid_leave_days)}日")
+        suffix = f"（{'・'.join(details)}）" if details else ""
+        return [f"希望出勤日数: 月{int(requested_work_days)}日{suffix}"]
+    if requested_holiday_days is not None:
+        suffix = f"（うち有給{int(paid_leave_days)}日）" if paid_leave_days is not None else ""
+        return [f"希望休日数: 合計{int(requested_holiday_days)}日{suffix}"]
+    if paid_leave_days is not None:
+        return [f"希望有給日数: {int(paid_leave_days)}日"]
+    return []
 
 
 def _strip_greeting_only_text(text: str) -> str:
@@ -264,10 +312,7 @@ def _strip_total_count_phrases(text: str) -> str:
     patterns = [
         r"(?:有給|有休)\D{0,6}\d{1,2}\s*日",
         r"\d{1,2}\s*日(?:分)?\s*(?:有給|有休)",
-        r"出勤(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日(?:間)?",
-        r"出勤\s*\d{1,2}\s*日(?:間)?",
-        r"(?:合計|計|月に|月間)\s*\d{1,2}\s*日(?:間)?\s*(?:勤務|出勤)",
-        r"\d{1,2}\s*日間\s*(?:勤務|出勤)",
+        *_WORK_DAY_COUNT_PATTERNS,
         r"(?:休み|休日|休暇)(?:は|を)?\s*(?:計|合計)\s*\d{1,2}\s*日",
         r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:お)?(?:休み|休日|休暇)",
         r"(?:計|合計|総計|トータル|平均)\s*\d{1,2}\s*日(?:間)?\s*(?:希望|お願い|いただきたい|ください)",
@@ -541,26 +586,13 @@ def parse_natural_language_note(
         )
         if public_holidays is not None:
             requested_holidays = public_holidays + paid
-    # 日付の列挙や「6日は出勤」を月間勤務日数に読み替えない。
-    work_count_text = re.sub(
-        r"\d{1,2}\s*日?(?:\s*[,\.・と]\s*\d{1,2}\s*日?)+\s*日",
-        "", normalized,
-    )
-    requested_work_days = _extract_number(
-        [
-            r"出勤(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
-            r"出勤\s*(\d{1,2})\s*日(?:間)?",
-            r"勤務(?:は|を)?\s*(?:計|合計)\s*(\d{1,2})\s*日(?:間)?",
-            r"勤務\s*(\d{1,2})\s*日(?:間)?",
-            r"(?:合計|計|月に|月間)\s*(\d{1,2})\s*日(?:間)?\s*(?:勤務|出勤)",
-            r"(\d{1,2})\s*日間\s*(?:勤務|出勤)(?:希望|でお願い|お願いします|したい)",
-            # 従来の「12日勤務希望」は月間勤務日数として維持。日付は「12日は出勤」。
-            r"^\s*(\d{1,2})\s*日\s*勤務希望\s*[。\s]*$",
-        ],
-        work_count_text,
-    )
+    requested_work_days = _extract_requested_work_days(normalized)
     if requested_work_days is not None:
-        requested_holidays = days_in_month - requested_work_days
+        if 0 <= requested_work_days <= days_in_month:
+            result.requested_work_days = requested_work_days
+            requested_holidays = days_in_month - requested_work_days
+        else:
+            result.review_messages.append("希望出勤日数が対象月の日数を超えています。")
     if requested_holidays is not None and 0 <= requested_holidays <= days_in_month:
         result.requested_holiday_days = requested_holidays
 
@@ -701,6 +733,7 @@ def _apply_parsed_note_to_submission_data(
             "flexible_off": [],
             "paid_leave_days": None,
             "requested_holiday_days": None,
+            "requested_work_days": None,
             "max_consecutive_work_days": None,
             "max_consecutive_off_days": None,
             "preferred_consecutive_off_days": None,
@@ -768,6 +801,8 @@ def _apply_parsed_note_to_submission_data(
             )
         if parsed_note.requested_holiday_days is not None:
             summary["requested_holiday_days"] = parsed_note.requested_holiday_days
+            # 管理者が休日数を上書きした場合、以前の出勤日数表示を残さない。
+            summary["requested_work_days"] = parsed_note.requested_work_days
         if parsed_note.max_consecutive_work_days is not None:
             summary["max_consecutive_work_days"] = parsed_note.max_consecutive_work_days
         if parsed_note.max_consecutive_off_days is not None:
@@ -1050,6 +1085,7 @@ def load_submissions_for_month(
                 ],
                 "paid_leave_days": parsed_note.paid_leave_days,
                 "requested_holiday_days": parsed_note.requested_holiday_days,
+                "requested_work_days": parsed_note.requested_work_days,
                 "max_consecutive_work_days": parsed_note.max_consecutive_work_days,
                 "max_consecutive_off_days": parsed_note.max_consecutive_off_days,
                 "preferred_consecutive_off_days": parsed_note.preferred_consecutive_off_days,

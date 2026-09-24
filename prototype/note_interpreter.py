@@ -47,7 +47,9 @@ SYSTEM_PROMPT = """あなたはシフト希望の翻訳・整理係です。決�
 希望休以外にあと2日、などの追加日数も合計休日2日に変換しないでください。
 「二連休憩不可」は誤字として2連休不可と読む場合も、その訂正をreview_messagesで説明してください。
 「1.2.3.4日全て出勤」は1,2,3,4日のwork_dates。「どれか1日」はchoiceであり全日指定ではありません。
-「月12日勤務」「合計12日勤務」はwork_day_count。日数に有給を勝手に加減しないでください。
+「月12日勤務」「合計12日勤務」「12日間、出勤でお願い致します」はwork_day_count(value=12)。
+月内の出勤日数はholiday_daysへ換算せず、work_day_countのまま返してください。
+「12日は出勤」は日付のwork_dates(days=[12])です。日数に有給を勝手に加減しないでください。
 元の条件を省略しないこと。判断できない箇所もreview_messagesで必ず知らせること。
 各条件のevidenceは入力textからの完全一致引用。推測した根拠を捏造しないでください。
 conditionsの仕様:
@@ -157,7 +159,7 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
             field, line = {
                 "paid_leave_days": ("paid_leave_days", f"有給{value}日。"),
                 "holiday_days": ("requested_holiday_days", f"休み合計{value}日。"),
-                "work_day_count": ("requested_holiday_days", f"休み合計{days_in_month - value}日。"),
+                "work_day_count": ("requested_holiday_days", f"合計{value}日勤務希望。"),
                 "max_work_streak": ("max_consecutive_work_days", f"連勤上限: {value}連勤まで。"),
                 "max_off_streak": ("max_consecutive_off_days", f"連休上限: {value}連休まで。"),
                 "preferred_off_streak": ("preferred_consecutive_off_days", f"{value}連休希望。"),
@@ -167,6 +169,8 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
                 raise ValueError("AIの案に矛盾する日数があります。原文の確認が必要です。")
             scalars[field] = actual_value
             setattr(expected, field, actual_value)
+            if kind == "work_day_count":
+                expected.requested_work_days = value
             lines.append(line)
     expected.off_requests = sorted(set(expected.off_requests))
     expected.work_requests = sorted(set(expected.work_requests), key=lambda x: x[0])

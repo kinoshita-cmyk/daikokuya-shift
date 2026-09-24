@@ -4,6 +4,7 @@ import ast
 import json
 import tempfile
 import unittest
+from calendar import monthrange
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from prototype.note_interpreter import (
 )
 from prototype.submission_loader import (
     _load_latest_note_adjustments, load_submissions_for_month,
-    parse_natural_language_note, preview_note_adjustment,
+    note_day_count_labels, parse_natural_language_note, preview_note_adjustment,
 )
 
 
@@ -83,7 +84,134 @@ class NoteParsingTest(unittest.TestCase):
         for text in ("合計12日勤務希望です。", "12日間勤務希望", "12日勤務希望"):
             p = parse_natural_language_note(text, 2026, 10)
             self.assertEqual(p.requested_holiday_days, 19)
+            self.assertEqual(p.requested_work_days, 12)
             self.assertEqual(p.work_requests, [])
+
+    def test_monthly_work_count_punctuation_and_wording_variants(self):
+        for text in (
+            "12日間、出勤でお願い致します。", "１２日間，出勤でお願いします。",
+            "１2日間、勤務でお願いいたします。", "12日間 出勤でお願い致します。",
+            "12日間、\n出勤でお願い致します。", "12日間の勤務を希望します。",
+            "合計12日、勤務でお願い致します。", "月12日勤務希望です。",
+            "月に12日、出勤をお願いします。", "出勤日数は12日でお願いします。",
+            "勤務日数：１２日", "勤務は合計12日でお願いします。",
+        ):
+            with self.subTest(text=text):
+                parsed = parse_natural_language_note(text, 2026, 10)
+                self.assertEqual(parsed.requested_work_days, 12)
+                self.assertEqual(parsed.requested_holiday_days, 19)
+                self.assertEqual(parsed.work_requests, [])
+                self.assertEqual(parsed.off_requests, [])
+
+    def test_month_length_paid_leave_and_date_requests_stay_distinct(self):
+        for year, month in ((2026, 10), (2026, 9), (2027, 2), (2028, 2)):
+            with self.subTest(year=year, month=month):
+                parsed = parse_natural_language_note(
+                    "12日間、出勤でお願い致します。有給1日利用。5日は出勤。6日は休み希望。", year, month,
+                )
+                self.assertEqual(parsed.requested_work_days, 12)
+                self.assertEqual(parsed.requested_holiday_days, monthrange(year, month)[1] - 12)
+                self.assertEqual(parsed.paid_leave_days, 1)
+                self.assertEqual(parsed.work_requests, [(5, None)])
+                self.assertEqual(parsed.off_requests, [6])
+        for text, days in (("12日は出勤", [12]), ("10月12日は出勤", [12]),
+                           ("1,2,3,4日は出勤", [1, 2, 3, 4])):
+            parsed = parse_natural_language_note(text, 2026, 10)
+            self.assertIsNone(parsed.requested_work_days)
+            self.assertIsNone(parsed.requested_holiday_days)
+            self.assertEqual(parsed.work_requests, [(d, None) for d in days])
+
+    def test_negative_range_and_uncertain_work_counts_are_not_exact(self):
+        for text in ("12日間、出勤できません。", "12日間、勤務不可。", "12日間くらい出勤希望。",
+                     "出勤12日以内", "出勤12日程度", "12-13日間、出勤希望。"):
+            with self.subTest(text=text):
+                parsed = parse_natural_language_note(text, 2026, 10)
+                self.assertIsNone(parsed.requested_work_days)
+                self.assertIsNone(parsed.requested_holiday_days)
+        invalid = parse_natural_language_note("合計32日勤務希望。", 2026, 10)
+        self.assertIsNone(invalid.requested_work_days)
+        self.assertTrue(invalid.review_messages)
+
+    def test_count_metadata_is_preserved_or_cleared_by_correction(self):
+        original = "12日間、出勤でお願い致します。"
+        for status, text, expected_work, expected_off in (
+            ("確認済み", "5日は出勤。", 12, 19),
+            ("確認済み", "合計13日勤務希望。", 13, 18),
+            ("確認済み", "休み合計10日。", None, 10),
+            ("補正のみ反映", "休み合計19日。", None, 19),
+            ("要確認", "合計13日勤務希望。", 12, 19),
+        ):
+            with self.subTest(status=status, text=text):
+                summary = preview_note_adjustment(original, {"status": status, "corrected_text": text}, 2026, 10)
+                self.assertEqual(summary.get("requested_work_days"), expected_work)
+                self.assertEqual(summary.get("requested_holiday_days"), expected_off)
+
+    def test_loaded_original_and_restored_generation_context_use_twelve_workdays(self):
+        from prototype.employees import get_employee
+        from prototype.rules import get_monthly_work_target
+
+        path = Path(__file__).resolve().parents[1] / "app" / "app.py"
+        node = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
+                    if isinstance(n, ast.FunctionDef) and n.name == "restore_validation_context_for_month")
+        scope = dict(RuleConfig=SimpleNamespace, monthrange=monthrange,
+                     shift_submission_employee_names=lambda: ["大塚"],
+                     combined_paid_leave_days=lambda paid, year, month: paid,
+                     get_employee=get_employee, get_monthly_work_target=get_monthly_work_target,
+                     system_monthly_preferred_work_requests=lambda *args: [],
+                     load_locked_previous_month_carryover=lambda *args: SimpleNamespace(carryover=[]),
+                     active_monthly_store_count_rules=lambda *args: [],
+                     active_monthly_required_assignment_rules=lambda *args: [],
+                     save_validation_context=lambda *args: None)
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(path), "exec"), scope)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for year, month in ((2026, 10), (2026, 9), (2027, 2), (2028, 2)):
+                month_dir = root / "backups" / f"{year}-{month:02d}"
+                month_dir.mkdir(parents=True)
+                (month_dir / "preferences_test.json").write_text(json.dumps({
+                    "author": "大塚", "saved_at": "2026-09-24T10:00:00+09:00",
+                    "off_requests": {"大塚": [2]}, "paid_leave_days": 1,
+                    "natural_language_notes": {"大塚": "12日間、出勤でお願い致します。"},
+                }, ensure_ascii=False), encoding="utf-8")
+            with patch("prototype.submission_loader.BACKUP_DIR", root / "backups"), \
+                 patch("prototype.submission_loader.PROJECT_ROOT", root), \
+                 patch("prototype.submission_loader._load_latest_note_adjustments", return_value={}), \
+                 patch("prototype.github_backup.sync_preferences_from_github"), \
+                 patch("prototype.submission_loader.is_submission_in_window", return_value=True):
+                for year, month in ((2026, 10), (2026, 9), (2027, 2), (2028, 2)):
+                    data = load_submissions_for_month(year, month, ["大塚"])
+                    self.assertEqual(data.parsed_note_summaries["大塚"]["requested_work_days"], 12)
+                    expected_off = monthrange(year, month)[1] - 12
+                    self.assertEqual(data.requested_holiday_days, {"大塚": expected_off})
+                    self.assertEqual(data.preferred_work_requests, [])
+                    context = scope["restore_validation_context_for_month"](year, month, SimpleNamespace(parameters={}))
+                    self.assertEqual(context["exact_holiday_days"], {"大塚": expected_off})
+                    self.assertEqual(context["paid_leave_days"], {"大塚": 1})
+                    self.assertEqual(context["off_requests"], {"大塚": [2]})
+
+    def test_production_solver_enforces_read_count_not_the_twelfth_date(self):
+        from prototype.employees import get_employee
+        from prototype.generator import generate_shift
+        from prototype.models import OperationMode
+
+        parsed = parse_natural_language_note("12日間、出勤でお願い致します。", 2026, 10)
+        # 日数条件の実装に絞った最小構成。本番の店舗人数や社員設定は変更しない。
+        employee = get_employee("大塚")
+        with patch("prototype.generator.shift_active_employees", return_value=[employee]), \
+             patch("prototype.generator.ALL_EMPLOYEES", [employee]), \
+             patch("prototype.generator.NORMAL_CAPACITY", {}), \
+             patch("prototype.generator.is_omiya_anchor_relaxed_month", return_value=True):
+            status = {}
+            shift = generate_shift(
+                2026, 10, {"大塚": [12]}, [], [],
+                exact_holiday_days={"大塚": parsed.requested_holiday_days},
+                operation_modes={d: OperationMode.NORMAL for d in range(1, 32)},
+                disable_month_edge_rules=True, strict_warning_constraints=False,
+                time_limit_seconds=3, verbose=False, status_out=status,
+            )
+        self.assertIsNotNone(shift, status)
+        self.assertEqual(sum(a.store != Store.OFF for a in shift.assignments if a.employee == "大塚"), 12)
+        self.assertEqual(shift.get_assignment("大塚", 12).store, Store.OFF)
 
     def test_preview_and_real_loader_use_same_correction(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -161,6 +289,20 @@ class NoteParsingTest(unittest.TestCase):
 
 
 class NoteAITest(unittest.TestCase):
+    def test_ai_work_count_keeps_original_intent_in_correction_and_display(self):
+        text = "12日間、出勤でお願い致します。"
+        for month, expected_off in ((10, 19), (9, 18), (2, 16)):
+            result = validate_note_interpretation({
+                "conditions": [condition("work_day_count", text, value=12)], "review_messages": [],
+            }, text, 2026, month)
+            self.assertEqual(result.corrected_text, "合計12日勤務希望。")
+            parsed = parse_natural_language_note(result.corrected_text, 2026, month)
+            self.assertEqual(parsed.requested_work_days, 12)
+            self.assertEqual(parsed.requested_holiday_days, expected_off)
+            self.assertEqual(note_day_count_labels(expected_off, None, 12), [
+                f"希望出勤日数: 月12日（休日換算{expected_off}日）",
+            ])
+
     def test_ai_reported_example_round_trip(self):
         result = validate_note_interpretation({"conditions": [
             condition("max_work_streak", "五連勤可能", value=5),
@@ -306,6 +448,23 @@ render_note_adjustment_editor({ORIGINAL!r}, st.session_state.get("existing", {{}
         self.assertFalse(app.session_state["existing"])
         self.assertEqual(app.text_area[0].value, "")
         self.assertFalse(app.exception)
+
+    def test_original_and_correction_show_work_count_not_only_holidays(self):
+        original = "12日間、出勤でお願い致します。"
+        script = self.script.replace(repr(ORIGINAL), repr(original))
+        script += f'\nst.write(summarize_natural_language_note_for_review({original!r}, 2026, 10))\n'
+        app = self.AppTest.from_string(script).run()
+        self.button(app, "読取・最終条件を確認").click().run()
+        self.assertFalse(app.exception)
+        final = next(m.value for m in app.markdown if "原文と補正を合わせた最終条件:" in m.value)
+        self.assertIn("希望出勤日数: 月12日（休日換算19日）", final)
+        self.assertNotIn("希望休日数:", final)
+        self.assertFalse(app.warning)
+        app.text_area[0].set_value("合計13日勤務希望。")
+        self.button(app, "読取・最終条件を確認").click().run()
+        final = next(m.value for m in app.markdown if "原文と補正を合わせた最終条件:" in m.value)
+        self.assertIn("希望出勤日数: 月13日（休日換算18日）", final)
+        self.assertNotIn("月12日", final)
 
     def test_unread_active_correction_rejected_but_draft_allowed(self):
         app = self.app()
