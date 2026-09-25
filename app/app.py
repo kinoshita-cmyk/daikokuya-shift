@@ -932,23 +932,41 @@ def _restore_monthly_exceptions_on_boot() -> str:
     try:
         from prototype.github_backup import fetch_config_from_github
         from prototype import rules as _rules_mod
+        from prototype.monthly_store_update import prepare_store_update, push_verified_monthly_settings
         success, remote_data, msg = fetch_config_from_github("monthly_exceptions")
         if not success:
-            return f"復元スキップ（{msg}）"
+            return f"復元スキップ・10月店舗区分の自動追加は保留（{msg}）"
         remote_at = str(remote_data.get("updated_at", ""))
         local_at = str(_rules_mod.load_monthly_exceptions_raw().get("updated_at", ""))
+        restore_status = "ローカルの設定が最新（復元不要）"
         if remote_at and timestamp_sort_key(remote_at) > timestamp_sort_key(local_at):
             ok, status = _rules_mod.save_monthly_exceptions(
                 remote_data,
                 actor=str(remote_data.get("updated_by", "バックアップ復元")),
             )
             if ok:
-                return (
+                restore_status = (
                     "バックアップから復元しました"
                     f"（{format_timestamp_jst(remote_at)} 時点）"
                 )
-            return f"復元失敗（{status}）"
-        return "ローカルの設定が最新（復元不要）"
+            else:
+                return f"復元失敗（{status}）"
+        updated, changed = prepare_store_update(
+            _rules_mod.load_monthly_exceptions_raw(), get_all_employees_including_retired(),
+        )
+        if changed:
+            ok, status = _rules_mod.save_monthly_exceptions(
+                updated, actor="管理者依頼", action="2026年10月の鈴木・田中・牧野の店舗区分を追加",
+            )
+            if not ok:
+                return f"10月店舗区分の追加失敗（{status}）"
+        # 適用済みの印も同期する。削除・編集後の再起動で元の指定を復活させない。
+        from prototype.monthly_store_update import UPDATE_ID
+        if UPDATE_ID not in remote_data.get("applied_updates", []):
+            pushed, push_msg = push_verified_monthly_settings(_rules_mod.load_monthly_exceptions_raw())
+            if not pushed:
+                return f"10月店舗区分はローカルに追加済み・バックアップ未保存（{push_msg}）"
+        return restore_status + " ／ 10月店舗区分の初期追加は適用済み"
     except Exception as exc:
         return f"復元エラー（{type(exc).__name__}）"
 
@@ -956,54 +974,7 @@ def _restore_monthly_exceptions_on_boot() -> str:
 MONTHLY_EXCEPTIONS_RESTORE_STATUS = _restore_monthly_exceptions_on_boot()
 
 
-# ============================================================
-# 社労士提出用CSVの月初自動保存（月が替わって最初のアクセス時に1回）
-# 例: 8月分は8月1日以降の最初のアクセスで自動保存される。
-# 保存先は GitHub バックアップの exports/paid_leave/ で、
-# 出勤簿システム（GAS）が定期取得して Google ドライブへ配置する。
-# ============================================================
-@st.cache_resource
-def _auto_export_paid_leave_csv(ym_key: str) -> str:
-    try:
-        from prototype.github_backup import (
-            backup_file_exists,
-            is_github_backup_enabled,
-            push_export_to_github,
-        )
-        if not is_github_backup_enabled():
-            return "GitHub未設定のためスキップ"
-        from prototype.sharoushi_export import (
-            build_paid_leave_rows,
-            paid_leave_csv_repo_path,
-            rows_to_csv_bytes,
-        )
-        _y, _m = int(ym_key[:4]), int(ym_key[5:])
-        repo_path = paid_leave_csv_repo_path(_y, _m)
-        if backup_file_exists(repo_path):
-            return f"{ym_key} 分は保存済み"
-        expected = [
-            e.name for e in shift_active_employees() if not e.is_auxiliary
-        ]
-        rows = build_paid_leave_rows(
-            _y, _m, expected,
-            admin_days=admin_paid_leave_days_for_month(_y, _m),
-            admin_dates=admin_paid_leave_dates_for_month(_y, _m),
-        )
-        ok, msg = push_export_to_github(
-            repo_path,
-            rows_to_csv_bytes(rows),
-            f"Paid leave export {ym_key} (auto)",
-        )
-        if ok:
-            return f"{ym_key} 分を自動保存しました"
-        return f"自動保存に失敗（{msg}）"
-    except Exception as exc:
-        return f"自動保存エラー（{type(exc).__name__}）"
-
-
-st.session_state["paid_leave_auto_export_status"] = _auto_export_paid_leave_csv(
-    now_jst().date().strftime("%Y-%m")
-)
+# 有給の月初連携は GitHub Actions が担当する。アプリ起動・ロック操作では送信しない。
 
 
 # CSS カスタマイズ（高齢者にも見やすい大きさ）
@@ -2848,15 +2819,16 @@ def render_note_adjustment_editor(original_note, existing, year, month, employee
         providers.append("openai")
     if get_anthropic_api_key():
         providers.append("anthropic")
-    provider = st.selectbox(
-        "自由記載を整理するAI", providers or ["未設定"],
-        format_func=lambda p: {"openai": "OpenAI", "anthropic": "Claude"}.get(p, p),
-        key=f"note_ai_provider_{suffix}", disabled=not providers,
-    )
-    consent = st.checkbox(
-        "このスタッフの読取対象文を選択したAIに送信することに同意する（API利用料が発生）",
-        key=f"note_ai_consent_{suffix}", disabled=not providers,
-    )
+    with st.expander("AIによる文章整理（任意）", expanded=False):
+        provider = st.selectbox(
+            "自由記載を整理するAI", providers or ["未設定"],
+            format_func=lambda p: {"openai": "OpenAI", "anthropic": "Claude"}.get(p, p),
+            key=f"note_ai_provider_{suffix}", disabled=not providers,
+        )
+        consent = st.checkbox(
+            "このスタッフの読取対象文を選択したAIに送信することに同意する（API利用料が発生）",
+            key=f"note_ai_consent_{suffix}", disabled=not providers,
+        )
     with st.form(f"note_adjustment_form_{suffix}"):
         status_options = ["確認済み", "補正のみ反映", "要確認", "反映しない"]
         saved_status = existing.get("status", "確認済み")
@@ -4204,19 +4176,30 @@ def format_monthly_rule_condition(rule: dict) -> str:
 # 経営者ビュー
 # ============================================================
 
-def render_monthly_exceptions_panel() -> None:
+def render_monthly_exceptions_panel(year=None, month=None, section=None) -> None:
     """月例外（店舗区分・研修・連勤・同時休み等）の管理パネル。
 
     経営者ビューの「2. 今月の条件を整える」と、⚙️ 設定タブの両方から呼ばれる。
     （表示モードは同時に1つなので、ウィジェットキーは衝突しない）
     """
-    st.markdown("### 📅 月ごとの例外ルール")
-    st.caption(
-        "2026年7月のようなイレギュラーな月に、**その月だけ**基本ルールを"
-        "緩めたり特例を認めたりする画面です。プログラムやファイルの編集は不要で、"
-        "ここで保存するとすぐにシフト生成へ反映されます。"
-        "他の月には一切影響しません。"
-    )
+    if year is None or month is None:
+        default_year = int(st.session_state.get("target_year", now_jst().year))
+        default_month = int(st.session_state.get("target_month", now_jst().month))
+        month_columns = st.columns(2)
+        year = month_columns[0].number_input(
+            "対象年", min_value=2024, max_value=2099, value=default_year, key="mx_target_year",
+        )
+        month = month_columns[1].selectbox(
+            "対象月", list(range(1, 13)), index=default_month - 1, key="mx_target_month",
+        )
+    _mx_ym = f"{int(year):04d}-{int(month):02d}"
+    st.markdown(f"#### {int(year)}年{int(month)}月だけの設定")
+    if section is None:
+        section = st.radio("設定する内容", ["店舗区分・研修など", "営業体制"], horizontal=True, key="mx_section")
+    context_key = f"mx_{_mx_ym}_"
+    flash = st.session_state.pop("monthly_exception_flash", None)
+    if flash:
+        getattr(st, flash[0])(flash[1])
 
     from prototype.rules import (
         load_monthly_exceptions_raw,
@@ -4261,26 +4244,17 @@ def render_monthly_exceptions_panel() -> None:
             return
         # GitHub バックアップ（失敗しても画面に明示する）
         try:
-            from prototype.github_backup import push_config_to_github
-            pushed, push_msg = push_config_to_github(
-                "monthly_exceptions", load_monthly_exceptions_raw(),
-            )
+            from prototype.monthly_store_update import push_verified_monthly_settings
+            pushed, push_msg = push_verified_monthly_settings(load_monthly_exceptions_raw())
             if pushed:
-                st.success(
-                    "✅ 保存しました（すぐに反映されます）。"
-                    "GitHubバックアップにも保存済みなので、"
-                    "サーバー再起動後も設定は維持されます。"
-                )
+                st.session_state["monthly_exception_flash"] = ("success", "保存しました。GitHubバックアップにも保存済みです。")
             else:
-                st.warning(
-                    f"保存は完了しましたが、GitHubバックアップに失敗しました（{push_msg}）。"
-                    "サーバーが再起動するとこの設定が消える可能性があります。"
-                    "時間をおいてもう一度保存してください。"
+                st.session_state["monthly_exception_flash"] = (
+                    "warning", f"ローカル保存済み・GitHubバックアップ未保存（{push_msg}）。再起動前に再保存してください。",
                 )
         except Exception as _push_exc:
-            st.warning(
-                "保存は完了しましたが、GitHubバックアップでエラーが発生しました"
-                f"（{type(_push_exc).__name__}）。時間をおいてもう一度保存してください。"
+            st.session_state["monthly_exception_flash"] = (
+                "warning", f"ローカル保存済み・GitHubバックアップエラー（{type(_push_exc).__name__}）。再保存してください。",
             )
         st.session_state.pop("monthly_exception_pending", None)
         st.rerun()
@@ -4294,6 +4268,7 @@ def render_monthly_exceptions_panel() -> None:
         errors, warnings = validate_monthly_exceptions_data(new_data)
         st.session_state["monthly_exception_pending"] = {
             "data": new_data,
+            "target_month": _mx_ym,
             "actor": actor,
             "action": action,
             "changed_sections": summarize_monthly_exceptions_change(
@@ -4305,7 +4280,7 @@ def render_monthly_exceptions_panel() -> None:
         st.rerun()
 
     _mx_pending = st.session_state.get("monthly_exception_pending")
-    if isinstance(_mx_pending, dict):
+    if isinstance(_mx_pending, dict) and _mx_pending.get("target_month") == _mx_ym:
         st.warning("保存前の確認です。まだ本設定には反映されていません。")
         st.markdown(
             "**変更する項目:** "
@@ -4314,6 +4289,21 @@ def render_monthly_exceptions_panel() -> None:
         st.write(f"操作内容: {_mx_pending.get('action', '月例外を変更')}")
         _pending_data = dict(_mx_pending.get("data") or {})
         _pending_lines = []
+        for employee, override in sorted((_pending_data.get("employee_store_overrides", {}).get(_mx_ym, {}) or {}).items()):
+            _pending_lines.append(
+                f"{_mx_ym}: {employee} ／ "
+                + " ／ ".join(
+                    label + ": " + (
+                        "・".join(Store[value].display_name for value in values) or "なし"
+                    )
+                    for label, values in [
+                        ("主担当", [override["primary_store"]] if override.get("primary_store") else []),
+                        ("通常担当", override.get("normal_stores", [])),
+                        ("応援・巡回担当", override.get("support_stores", [])),
+                        ("応援・巡回から外す", override.get("remove_support_stores", [])),
+                    ]
+                )
+            )
         _pending_store_labels = {
             "AKABANE": "赤羽",
             "HIGASHIGUCHI": "東口",
@@ -4356,7 +4346,7 @@ def render_monthly_exceptions_panel() -> None:
         _pc1, _pc2 = st.columns(2)
         if _pc1.button(
             "✅ 内容を確認して保存",
-            key="mx_confirm_pending",
+            key=context_key + "mx_confirm_pending",
             type="primary",
             disabled=bool(_mx_pending.get("errors")),
         ):
@@ -4365,13 +4355,13 @@ def render_monthly_exceptions_panel() -> None:
                 str(_mx_pending.get("actor") or _mx_actor),
                 str(_mx_pending.get("action") or "月例外を変更"),
             )
-        if _pc2.button("キャンセル", key="mx_cancel_pending"):
+        if _pc2.button("キャンセル", key=context_key + "mx_cancel_pending"):
             st.session_state.pop("monthly_exception_pending", None)
             st.rerun()
         st.markdown("---")
 
     # ---- 現在の設定一覧 ----------------------------------------
-    st.markdown("#### 現在設定されている例外")
+    st.markdown("#### この月の登録済み条件")
 
     _anchor_list = list(_mx_raw.get("omiya_anchor_relaxed_months", []) or [])
     _training_map = dict(_mx_raw.get("tanaka_training", {}) or {})
@@ -4406,990 +4396,990 @@ def render_monthly_exceptions_panel() -> None:
         raw_text = str(raw_store or "").strip()
         return store_labels.get(raw_text.upper(), raw_text or "なし")
 
-    _has_any = bool(
-        _anchor_list
-        or _training_map
-        or _training_plans_map
-        or _employee_override_map
-        or _carry_map
-        or _avoid_map
-        or _yamamoto_policy_map
-        or (_mx_raw.get("operation_modes", {}) or {})
-    )
-    if not _has_any:
-        st.info("現在、月例外は設定されていません（すべての月が通常ルールで動きます）。")
+    if section == "店舗区分・研修など":
+        _has_any = _mx_ym in _anchor_list or any(
+            mapping.get(_mx_ym) for mapping in [
+                _training_map, _training_plans_map, _employee_override_map,
+                _carry_map, _avoid_map, _yamamoto_policy_map,
+            ]
+        )
+        if not _has_any:
+            st.info("この月の店舗区分・研修などの追加条件はありません。")
 
-    if _anchor_list:
-        st.markdown("**🏬 大宮アンカー緩和**（「大宮に春山・下地のどちらか必須」をその月だけ外す）")
-        for _ym in sorted(_anchor_list):
-            _c1, _c2 = st.columns([4, 1])
-            _c1.write(f"　- {_ym_jp(_ym)}")
-            if _c2.button("🗑 削除", key=f"mx_del_anchor_{_ym}"):
-                _new = dict(_mx_raw)
-                _new["omiya_anchor_relaxed_months"] = [
-                    t for t in _anchor_list if t != _ym
-                ]
-                _mx_save_and_push(_new, actor=_mx_actor)
-
-    if _training_map:
-        st.markdown("**🎓 従来型の研修組み合わせ**（既存月との互換用）")
-        for _ym, _rule in sorted(_training_map.items()):
-            _training_employee = str(_rule.get("employee") or "田中")
-            _third = "または".join(
-                str(name)
-                for name in (_rule.get("akabane_third_candidates") or [])
-            )
-            _c1, _c2 = st.columns([4, 1])
-            _c1.write(
-                f"　- {_ym_jp(_ym)} ／ {_training_employee}: "
-                f"西口{int(_rule.get('nishiguchi_count', 0))}回、"
-                f"赤羽{int(_rule.get('akabane_count', 0))}回"
-                f"（3人目は{_third}）、"
-                f"東口{int(_rule.get('higashiguchi_count', 0))}回"
-                f"（{int(_rule.get('higashiguchi_from_day', 1))}日以降）"
-            )
-            if _c2.button("🗑 削除", key=f"mx_del_training_{_ym}"):
-                _new = dict(_mx_raw)
-                _new_training = {
-                    key: dict(value)
-                    for key, value in _training_map.items()
-                    if key != _ym
-                }
-                _new["tanaka_training"] = _new_training
-                _mx_save_and_push(
-                    _new,
-                    actor=_mx_actor,
-                    action=f"{_ym_jp(_ym)}の従来型研修を削除",
-                )
-
-    if _training_plans_map:
-        st.markdown("**🧑‍🏫 段階別研修計画**（対象者・期間・店舗・指導担当）")
-        for _ym, _plans in sorted(_training_plans_map.items()):
-            for _idx, _plan in enumerate(list(_plans or [])):
-                _phase_texts = []
-                for _phase in list(_plan.get("phases") or []):
-                    _comparison = (
-                        "ちょうど"
-                        if _phase.get("comparison") == "exact"
-                        else "以上"
-                    )
-                    _phase_texts.append(
-                        f"{int(_phase.get('start_day', 1))}〜"
-                        f"{int(_phase.get('end_day', 31))}日 "
-                        f"{_store_jp(_phase.get('store'))} "
-                        f"{'・'.join(_phase.get('mentors') or [])}と"
-                        f"{int(_phase.get('target_count', 0))}回{_comparison}"
-                    )
-                _tc1, _tc2 = st.columns([4, 1])
-                _importance = (
-                    "絶対条件"
-                    if str(_plan.get("severity")).upper() == "ERROR"
-                    else "強い目標"
-                )
-                _tc1.write(
-                    f"　- {_ym_jp(_ym)} ／ "
-                    f"{_plan.get('name') or str(_plan.get('trainee')) + '研修'} "
-                    f"（{_importance}）: "
-                    + " ／ ".join(_phase_texts)
-                )
-                if _tc2.button(
-                    "🗑 削除",
-                    key=f"mx_del_training_plan_{_ym}_{_idx}",
-                ):
+        if _mx_ym in _anchor_list:
+            st.markdown("**🏬 大宮アンカー緩和**（「大宮に春山・下地のどちらか必須」をその月だけ外す）")
+            for _ym in sorted(_anchor_list):
+                if _ym != _mx_ym:
+                    continue
+                _c1, _c2 = st.columns([4, 1])
+                _c1.write(f"　- {_ym_jp(_ym)}")
+                if _c2.button("🗑 削除", key=f"mx_del_anchor_{_ym}"):
                     _new = dict(_mx_raw)
-                    _new_plans = {
-                        key: [dict(value) for value in list(values or [])]
-                        for key, values in _training_plans_map.items()
+                    _new["omiya_anchor_relaxed_months"] = [
+                        t for t in _anchor_list if t != _ym
+                    ]
+                    _mx_save_and_push(_new, actor=_mx_actor)
+
+        if _training_map.get(_mx_ym):
+            st.markdown("**🎓 従来型の研修組み合わせ**（既存月との互換用）")
+            for _ym, _rule in sorted(_training_map.items()):
+                if _ym != _mx_ym:
+                    continue
+                _training_employee = str(_rule.get("employee") or "田中")
+                _third = "または".join(
+                    str(name)
+                    for name in (_rule.get("akabane_third_candidates") or [])
+                )
+                _c1, _c2 = st.columns([4, 1])
+                _c1.write(
+                    f"　- {_ym_jp(_ym)} ／ {_training_employee}: "
+                    f"西口{int(_rule.get('nishiguchi_count', 0))}回、"
+                    f"赤羽{int(_rule.get('akabane_count', 0))}回"
+                    f"（3人目は{_third}）、"
+                    f"東口{int(_rule.get('higashiguchi_count', 0))}回"
+                    f"（{int(_rule.get('higashiguchi_from_day', 1))}日以降）"
+                )
+                if _c2.button("🗑 削除", key=f"mx_del_training_{_ym}"):
+                    _new = dict(_mx_raw)
+                    _new_training = {
+                        key: dict(value)
+                        for key, value in _training_map.items()
+                        if key != _ym
                     }
-                    _new_plans[_ym].pop(_idx)
-                    if not _new_plans[_ym]:
-                        _new_plans.pop(_ym)
-                    _new["training_plans"] = _new_plans
+                    _new["tanaka_training"] = _new_training
                     _mx_save_and_push(
                         _new,
                         actor=_mx_actor,
-                        action=f"{_ym_jp(_ym)}の段階別研修計画を削除",
+                        action=f"{_ym_jp(_ym)}の従来型研修を削除",
                     )
 
-    if _employee_override_map:
-        st.markdown("**👤 月限定の店舗区分**")
-        for _ym, _employees in sorted(_employee_override_map.items()):
-            for _employee, _rule in sorted(dict(_employees or {}).items()):
-                _has_full_categories = (
-                    "normal_stores" in _rule or "support_stores" in _rule
-                )
-                _primary = (
-                    _store_jp(_rule.get("primary_store"))
-                    if _rule.get("primary_store")
-                    else ("なし" if _has_full_categories else "基本設定のまま")
-                )
-                _normal = (
-                    "、".join(
+        if _training_plans_map.get(_mx_ym):
+            st.markdown("**🧑‍🏫 段階別研修計画**（対象者・期間・店舗・指導担当）")
+            for _ym, _plans in sorted(_training_plans_map.items()):
+                if _ym != _mx_ym:
+                    continue
+                for _idx, _plan in enumerate(list(_plans or [])):
+                    _phase_texts = []
+                    for _phase in list(_plan.get("phases") or []):
+                        _comparison = (
+                            "ちょうど"
+                            if _phase.get("comparison") == "exact"
+                            else "以上"
+                        )
+                        _phase_texts.append(
+                            f"{int(_phase.get('start_day', 1))}〜"
+                            f"{int(_phase.get('end_day', 31))}日 "
+                            f"{_store_jp(_phase.get('store'))} "
+                            f"{'・'.join(_phase.get('mentors') or [])}と"
+                            f"{int(_phase.get('target_count', 0))}回{_comparison}"
+                        )
+                    _tc1, _tc2 = st.columns([4, 1])
+                    _importance = (
+                        "絶対条件"
+                        if str(_plan.get("severity")).upper() == "ERROR"
+                        else "強い目標"
+                    )
+                    _tc1.write(
+                        f"　- {_ym_jp(_ym)} ／ "
+                        f"{_plan.get('name') or str(_plan.get('trainee')) + '研修'} "
+                        f"（{_importance}）: "
+                        + " ／ ".join(_phase_texts)
+                    )
+                    if _tc2.button(
+                        "🗑 削除",
+                        key=f"mx_del_training_plan_{_ym}_{_idx}",
+                    ):
+                        _new = dict(_mx_raw)
+                        _new_plans = {
+                            key: [dict(value) for value in list(values or [])]
+                            for key, values in _training_plans_map.items()
+                        }
+                        _new_plans[_ym].pop(_idx)
+                        if not _new_plans[_ym]:
+                            _new_plans.pop(_ym)
+                        _new["training_plans"] = _new_plans
+                        _mx_save_and_push(
+                            _new,
+                            actor=_mx_actor,
+                            action=f"{_ym_jp(_ym)}の段階別研修計画を削除",
+                        )
+
+        if _employee_override_map.get(_mx_ym):
+            st.markdown("**👤 月限定の店舗区分**")
+            for _ym, _employees in sorted(_employee_override_map.items()):
+                if _ym != _mx_ym:
+                    continue
+                for _employee, _rule in sorted(dict(_employees or {}).items()):
+                    _has_full_categories = (
+                        "normal_stores" in _rule or "support_stores" in _rule
+                    )
+                    _primary = (
+                        _store_jp(_rule.get("primary_store"))
+                        if _rule.get("primary_store")
+                        else ("なし" if _has_full_categories else "基本設定のまま")
+                    )
+                    _normal = (
+                        "、".join(
+                            _store_jp(store)
+                            for store in (_rule.get("normal_stores") or [])
+                        ) or "なし"
+                        if "normal_stores" in _rule
+                        else "基本設定のまま"
+                    )
+                    _support = (
+                        "、".join(
+                            _store_jp(store)
+                            for store in (_rule.get("support_stores") or [])
+                        ) or "なし"
+                        if "support_stores" in _rule
+                        else "基本設定のまま"
+                    )
+                    _removed = "、".join(
                         _store_jp(store)
-                        for store in (_rule.get("normal_stores") or [])
+                        for store in (_rule.get("remove_support_stores") or [])
                     ) or "なし"
-                    if "normal_stores" in _rule
-                    else "基本設定のまま"
+                    _c1, _c2 = st.columns([4, 1])
+                    _c1.write(
+                        f"　- {_ym_jp(_ym)} ／ {_employee}: "
+                        f"主担当 {_primary}、通常担当 {_normal}、"
+                        f"応援・巡回担当 {_support}、"
+                        f"応援・巡回から外す {_removed}"
+                    )
+                    if _c2.button(
+                        "🗑 削除",
+                        key=f"mx_del_employee_override_{_ym}_{_employee}",
+                    ):
+                        _new = dict(_mx_raw)
+                        _new_overrides = {
+                            key: {
+                                name: dict(value)
+                                for name, value in dict(employees or {}).items()
+                            }
+                            for key, employees in _employee_override_map.items()
+                        }
+                        _new_overrides[_ym].pop(_employee, None)
+                        if not _new_overrides[_ym]:
+                            _new_overrides.pop(_ym)
+                        _new["employee_store_overrides"] = _new_overrides
+                        _mx_save_and_push(_new, actor=_mx_actor)
+
+        if _carry_map.get(_mx_ym):
+            st.markdown("**🔗 境界連勤の延長**（前月から続く連勤に限り、月初の連勤上限を延長）")
+            for _ym in sorted(_carry_map):
+                if _ym != _mx_ym:
+                    continue
+                for _emp, _days in sorted(dict(_carry_map[_ym] or {}).items()):
+                    _c1, _c2 = st.columns([4, 1])
+                    _c1.write(f"　- {_ym_jp(_ym)} ／ {_emp}さん ＋{int(_days)}日")
+                    if _c2.button("🗑 削除", key=f"mx_del_carry_{_ym}_{_emp}"):
+                        _new = dict(_mx_raw)
+                        _new_carry = {
+                            k: dict(v) for k, v in _carry_map.items()
+                        }
+                        _new_carry[_ym].pop(_emp, None)
+                        if not _new_carry[_ym]:
+                            _new_carry.pop(_ym)
+                        _new["carryover_consecutive_allowances"] = _new_carry
+                        _mx_save_and_push(_new, actor=_mx_actor)
+
+        if _avoid_map.get(_mx_ym):
+            st.markdown("**🚫 同時休みの回避**（指定した2人が同じ日に休むのをなるべく避ける）")
+            for _ym in sorted(_avoid_map):
+                if _ym != _mx_ym:
+                    continue
+                for _idx, _rule in enumerate(list(_avoid_map[_ym] or [])):
+                    _a = str(_rule.get("a", ""))
+                    _b = str(_rule.get("b", ""))
+                    _note = str(_rule.get("note", ""))
+                    _c1, _c2 = st.columns([4, 1])
+                    _label = f"　- {_ym_jp(_ym)} ／ {_a}さん × {_b}さん"
+                    if _note:
+                        _label += f"（{_note}）"
+                    _c1.write(_label)
+                    if _c2.button("🗑 削除", key=f"mx_del_avoid_{_ym}_{_idx}"):
+                        _new = dict(_mx_raw)
+                        _new_avoid = {
+                            k: list(v) for k, v in _avoid_map.items()
+                        }
+                        _new_avoid[_ym].pop(_idx)
+                        if not _new_avoid[_ym]:
+                            _new_avoid.pop(_ym)
+                        _new["avoid_same_off"] = _new_avoid
+                        _mx_save_and_push(_new, actor=_mx_actor)
+
+        if _yamamoto_policy_map.get(_mx_ym):
+            st.markdown("**🧓 山本の補助勤務方針**")
+            for _ym, _policy in sorted(_yamamoto_policy_map.items()):
+                if _ym != _mx_ym:
+                    continue
+                _yc1, _yc2 = st.columns([4, 1])
+                _yc1.write(
+                    f"　- {_ym_jp(_ym)} ／ 赤羽で必要な日だけ自動投入、"
+                    f"月間上限{int(_policy.get('max_days', 15))}日、"
+                    f"連続{int(_policy.get('max_consecutive', 2))}日まで。"
+                    "追加勤務は完成後に手動調整"
                 )
-                _support = (
-                    "、".join(
-                        _store_jp(store)
-                        for store in (_rule.get("support_stores") or [])
-                    ) or "なし"
-                    if "support_stores" in _rule
-                    else "基本設定のまま"
-                )
-                _removed = "、".join(
-                    _store_jp(store)
-                    for store in (_rule.get("remove_support_stores") or [])
-                ) or "なし"
-                _c1, _c2 = st.columns([4, 1])
-                _c1.write(
-                    f"　- {_ym_jp(_ym)} ／ {_employee}: "
-                    f"主担当 {_primary}、通常担当 {_normal}、"
-                    f"応援・巡回担当 {_support}、"
-                    f"応援・巡回から外す {_removed}"
-                )
-                if _c2.button(
-                    "🗑 削除",
-                    key=f"mx_del_employee_override_{_ym}_{_employee}",
+                if _yc2.button(
+                    "🗑 標準に戻す",
+                    key=f"mx_del_yamamoto_policy_{_ym}",
                 ):
+                    _new = dict(_mx_raw)
+                    _new_policy = {
+                        key: dict(value)
+                        for key, value in _yamamoto_policy_map.items()
+                        if key != _ym
+                    }
+                    _new["yamamoto_policy"] = _new_policy
+                    _mx_save_and_push(
+                        _new,
+                        actor=_mx_actor,
+                        action=f"{_ym_jp(_ym)}の山本補助勤務方針を標準に戻す",
+                    )
+
+        st.markdown("---")
+
+        # ---- 追加フォーム ------------------------------------------
+        st.markdown("#### 条件を追加・変更する")
+
+        _mx_type = st.selectbox(
+            "追加・変更する条件",
+            [
+                "👤 月限定の店舗区分（主担当・通常担当・応援巡回担当）",
+                "🏬 大宮アンカー緩和（大宮の春山・下地必須ルールをその月だけ外す）",
+                "🧑‍🏫 段階別研修計画（期間・店舗・指導担当・回数）",
+                "🎓 従来型の研修組み合わせ（西口・赤羽・東口の回数指定）",
+                "🧓 山本の補助勤務方針（月上限・連続勤務上限）",
+                "🔗 境界連勤の延長（前月から続く連勤の上限をその月初だけ延長）",
+                "🚫 同時休みの回避（2人が同じ日に休むのをなるべく避ける）",
+            ],
+            key=context_key + "mx_add_type",
+            help=(
+                "例: 2026年7月のように主力メンバーが連休を取る月は"
+                "「大宮アンカー緩和」を設定します。"
+                "解なしの原因調査で「境界連勤の延長を許可してください」と"
+                "案内された場合は「境界連勤の延長」を設定します。"
+            ),
+        )
+
+        _mx_emp_names = [
+            e.name for e in shift_active_employees() if not e.is_auxiliary
+        ]
+        _mx_store_options = [s.name for s in Store if s != Store.OFF]
+        _mx_store_labels = {
+            s.name: s.display_name for s in Store if s != Store.OFF
+        }
+
+        _mx_new_data = None
+        if _mx_type.startswith("🏬"):
+            st.caption(
+                f"{_ym_jp(_mx_ym)}は、大宮駅前店に春山さん・下地さんの"
+                "どちらかが必ずいなくてもよい月になります。"
+            )
+            if st.button("この内容で追加", key=context_key + "mx_add_anchor", type="primary"):
+                _new = dict(_mx_raw)
+                _lst = list(_new.get("omiya_anchor_relaxed_months", []) or [])
+                if _mx_ym not in _lst:
+                    _lst.append(_mx_ym)
+                _new["omiya_anchor_relaxed_months"] = sorted(_lst)
+                _mx_new_data = _new
+        elif _mx_type.startswith("👤"):
+            st.caption(
+                "従業員マスタの現在区分を初期値として表示します。ここで保存した"
+                "区分は対象月だけに適用され、翌月は基本設定へ戻ります。"
+                "基本設定の絶対配置不可は変更されません。3区分に含めなかった"
+                "配置可能店舗も禁止にはせず、人員不足時の緊急候補として残します。"
+            )
+            _mx_override_employee = st.selectbox(
+                "対象の従業員",
+                _mx_emp_names,
+                key=context_key + "mx_add_override_employee",
+            )
+            _mx_override_emp = get_employee(_mx_override_employee)
+            _mx_existing_rule = dict(
+                (_employee_override_map.get(_mx_ym, {}) or {}).get(
+                    _mx_override_employee, {}
+                ) or {}
+            )
+            import hashlib
+            _mx_override_revision = hashlib.sha256(json.dumps(
+                [_mx_existing_rule, {s.name: a.value for s, a in _mx_override_emp.affinities.items()}],
+                ensure_ascii=False, sort_keys=True,
+            ).encode()).hexdigest()[:12]
+
+            def _mx_store_name(raw_value) -> str:
+                raw_text = str(raw_value or "").strip()
+                for store in Store:
+                    if store == Store.OFF:
+                        continue
+                    if raw_text in (store.name, store.value, store.display_name):
+                        return store.name
+                return ""
+
+            _mx_allowed_store_options = [
+                store.name for store in Store
+                if store != Store.OFF
+                and _mx_override_emp.affinities.get(store, Affinity.NONE)
+                != Affinity.NONE
+            ]
+            _mx_base_primary = next((
+                store.name for store in Store
+                if store != Store.OFF
+                and _mx_override_emp.affinities.get(store) == Affinity.STRONG
+            ), "")
+            _mx_base_normal = [
+                store.name for store in Store
+                if store != Store.OFF
+                and _mx_override_emp.affinities.get(store) == Affinity.MEDIUM
+            ]
+            _mx_base_support = [
+                store.name for store in Store
+                if store != Store.OFF
+                and _mx_override_emp.affinities.get(store) == Affinity.WEAK
+            ]
+            _mx_existing_full = (
+                "normal_stores" in _mx_existing_rule
+                or "support_stores" in _mx_existing_rule
+            )
+            _mx_default_primary = (
+                _mx_store_name(_mx_existing_rule.get("primary_store"))
+                if _mx_existing_full or _mx_existing_rule.get("primary_store")
+                else _mx_base_primary
+            )
+            _mx_default_removed = [
+                name for name in (
+                    _mx_store_name(value)
+                    for value in (
+                        _mx_existing_rule.get("remove_support_stores") or []
+                    )
+                )
+                if name in _mx_allowed_store_options
+            ]
+            _mx_default_normal = (
+                [
+                    name for name in (
+                        _mx_store_name(value)
+                        for value in (_mx_existing_rule.get("normal_stores") or [])
+                    )
+                    if name in _mx_allowed_store_options
+                ]
+                if "normal_stores" in _mx_existing_rule
+                else list(_mx_base_normal)
+            )
+            _mx_default_support = (
+                [
+                    name for name in (
+                        _mx_store_name(value)
+                        for value in (_mx_existing_rule.get("support_stores") or [])
+                    )
+                    if name in _mx_allowed_store_options
+                ]
+                if "support_stores" in _mx_existing_rule
+                else list(_mx_base_support)
+            )
+            _mx_default_normal = [
+                value for value in _mx_default_normal
+                if value != _mx_default_primary and value not in _mx_default_removed
+            ]
+            _mx_default_support = [
+                value for value in _mx_default_support
+                if value != _mx_default_primary
+                and value not in _mx_default_normal
+                and value not in _mx_default_removed
+            ]
+
+            _mso1, _mso2 = st.columns(2)
+            with _mso1:
+                _mx_primary_store = st.selectbox(
+                    "この月の主担当",
+                    options=[""] + _mx_allowed_store_options,
+                    index=(
+                        ([""] + _mx_allowed_store_options).index(_mx_default_primary)
+                        if _mx_default_primary in _mx_allowed_store_options
+                        else 0
+                    ),
+                    format_func=lambda value: (
+                        "主担当なし"
+                        if not value
+                        else _mx_store_labels.get(value, value)
+                    ),
+                    key=f"mx_add_override_primary_{_mx_ym}_{_mx_override_employee}_{_mx_override_revision}",
+                    help="主担当を最優先、通常担当を次の候補、応援・巡回担当を補助候補とします。絶対条件ではありません。",
+                )
+                _mx_normal_stores = st.multiselect(
+                    "この月の通常担当",
+                    options=_mx_allowed_store_options,
+                    default=_mx_default_normal,
+                    format_func=lambda value: _mx_store_labels.get(value, value),
+                    key=f"mx_add_override_normal_{_mx_ym}_{_mx_override_employee}_{_mx_override_revision}",
+                )
+            with _mso2:
+                _mx_support_stores = st.multiselect(
+                    "この月の応援・巡回担当",
+                    options=_mx_allowed_store_options,
+                    default=_mx_default_support,
+                    format_func=lambda value: _mx_store_labels.get(value, value),
+                    key=f"mx_add_override_support_{_mx_ym}_{_mx_override_employee}_{_mx_override_revision}",
+                )
+                _mx_removed_support = st.multiselect(
+                    "この月だけ応援・巡回先から外す店舗（任意）",
+                    options=_mx_allowed_store_options,
+                    default=_mx_default_removed,
+                    format_func=lambda value: _mx_store_labels.get(value, value),
+                    key=f"mx_add_override_removed_{_mx_ym}_{_mx_override_employee}_{_mx_override_revision}",
+                    help=(
+                        "特になければ空欄のままで大丈夫です。絶対配置不可にはせず、"
+                        "通常の自動配置候補から外します。人員不足時の緊急配置は許容します。"
+                    ),
+                )
+            _override_parts = []
+            if _mx_primary_store:
+                _override_parts.append(
+                    f"主担当 {_mx_store_labels[_mx_primary_store]}"
+                )
+            else:
+                _override_parts.append("主担当なし")
+            _override_parts.append(
+                "通常担当 "
+                + (
+                    "・".join(_mx_store_labels[s] for s in _mx_normal_stores)
+                    or "なし"
+                )
+            )
+            _override_parts.append(
+                "応援・巡回担当 "
+                + (
+                    "・".join(_mx_store_labels[s] for s in _mx_support_stores)
+                    or "なし"
+                )
+            )
+            if _mx_removed_support:
+                _override_parts.append(
+                    "応援・巡回先から"
+                    + "・".join(_mx_store_labels[s] for s in _mx_removed_support)
+                    + "を外す"
+                )
+            else:
+                _override_parts.append("応援・巡回から外す店舗なし")
+            st.caption(
+                f"{_ym_jp(_mx_ym)}の{_mx_override_employee}さん: "
+                + ("、".join(_override_parts) if _override_parts else "変更内容を選択してください。")
+            )
+            if st.button(
+                "この内容で追加・上書き",
+                key=context_key + "mx_add_employee_override",
+                type="primary",
+            ):
+                _category_sets = {
+                    "主担当": {_mx_primary_store} if _mx_primary_store else set(),
+                    "通常担当": set(_mx_normal_stores),
+                    "応援・巡回担当": set(_mx_support_stores),
+                    "応援・巡回から外す店舗": set(_mx_removed_support),
+                }
+                _overlap_messages = []
+                _category_labels = list(_category_sets)
+                for _idx, _first_label in enumerate(_category_labels):
+                    for _second_label in _category_labels[_idx + 1:]:
+                        _overlap = (
+                            _category_sets[_first_label]
+                            & _category_sets[_second_label]
+                        )
+                        if _overlap:
+                            _overlap_messages.append(
+                                "・".join(_mx_store_labels[s] for s in sorted(_overlap))
+                                + f"が「{_first_label}」と「{_second_label}」で重複"
+                            )
+                if (
+                    not _mx_primary_store
+                    and not _mx_normal_stores
+                    and not _mx_support_stores
+                ):
+                    st.error(
+                        "主担当・通常担当・応援巡回担当のいずれかを、"
+                        "少なくとも1店舗設定してください。"
+                    )
+                elif _overlap_messages:
+                    st.error("店舗区分が重複しています: " + " / ".join(_overlap_messages))
+                else:
                     _new = dict(_mx_raw)
                     _new_overrides = {
                         key: {
                             name: dict(value)
                             for name, value in dict(employees or {}).items()
                         }
-                        for key, employees in _employee_override_map.items()
+                        for key, employees in (
+                            _new.get("employee_store_overrides", {}) or {}
+                        ).items()
                     }
-                    _new_overrides[_ym].pop(_employee, None)
-                    if not _new_overrides[_ym]:
-                        _new_overrides.pop(_ym)
+                    _new_overrides.setdefault(_mx_ym, {})[
+                        _mx_override_employee
+                    ] = {
+                        "primary_store": _mx_primary_store or None,
+                        "normal_stores": list(_mx_normal_stores),
+                        "support_stores": list(_mx_support_stores),
+                        "remove_support_stores": list(_mx_removed_support),
+                    }
                     _new["employee_store_overrides"] = _new_overrides
-                    _mx_save_and_push(_new, actor=_mx_actor)
-
-    if _carry_map:
-        st.markdown("**🔗 境界連勤の延長**（前月から続く連勤に限り、月初の連勤上限を延長）")
-        for _ym in sorted(_carry_map):
-            for _emp, _days in sorted(dict(_carry_map[_ym] or {}).items()):
-                _c1, _c2 = st.columns([4, 1])
-                _c1.write(f"　- {_ym_jp(_ym)} ／ {_emp}さん ＋{int(_days)}日")
-                if _c2.button("🗑 削除", key=f"mx_del_carry_{_ym}_{_emp}"):
-                    _new = dict(_mx_raw)
-                    _new_carry = {
-                        k: dict(v) for k, v in _carry_map.items()
-                    }
-                    _new_carry[_ym].pop(_emp, None)
-                    if not _new_carry[_ym]:
-                        _new_carry.pop(_ym)
-                    _new["carryover_consecutive_allowances"] = _new_carry
-                    _mx_save_and_push(_new, actor=_mx_actor)
-
-    if _avoid_map:
-        st.markdown("**🚫 同時休みの回避**（指定した2人が同じ日に休むのをなるべく避ける）")
-        for _ym in sorted(_avoid_map):
-            for _idx, _rule in enumerate(list(_avoid_map[_ym] or [])):
-                _a = str(_rule.get("a", ""))
-                _b = str(_rule.get("b", ""))
-                _note = str(_rule.get("note", ""))
-                _c1, _c2 = st.columns([4, 1])
-                _label = f"　- {_ym_jp(_ym)} ／ {_a}さん × {_b}さん"
-                if _note:
-                    _label += f"（{_note}）"
-                _c1.write(_label)
-                if _c2.button("🗑 削除", key=f"mx_del_avoid_{_ym}_{_idx}"):
-                    _new = dict(_mx_raw)
-                    _new_avoid = {
-                        k: list(v) for k, v in _avoid_map.items()
-                    }
-                    _new_avoid[_ym].pop(_idx)
-                    if not _new_avoid[_ym]:
-                        _new_avoid.pop(_ym)
-                    _new["avoid_same_off"] = _new_avoid
-                    _mx_save_and_push(_new, actor=_mx_actor)
-
-    if _yamamoto_policy_map:
-        st.markdown("**🧓 山本の補助勤務方針**")
-        for _ym, _policy in sorted(_yamamoto_policy_map.items()):
-            _yc1, _yc2 = st.columns([4, 1])
-            _yc1.write(
-                f"　- {_ym_jp(_ym)} ／ 赤羽で必要な日だけ自動投入、"
-                f"月間上限{int(_policy.get('max_days', 15))}日、"
-                f"連続{int(_policy.get('max_consecutive', 2))}日まで。"
-                "追加勤務は完成後に手動調整"
+                    _mx_new_data = _new
+        elif _mx_type.startswith("🧑‍🏫"):
+            _max_plan_day = monthrange(
+                int(_mx_ym[:4]), int(_mx_ym[5:]),
+            )[1]
+            st.caption(
+                "研修を前半・後半などの段階に分けて設定します。"
+                "通常は「強い目標」がおすすめです。本人の休み希望や店舗運営を"
+                "優先しながら、可能な限り指定回数へ寄せます。"
             )
-            if _yc2.button(
-                "🗑 標準に戻す",
-                key=f"mx_del_yamamoto_policy_{_ym}",
+            _gp1, _gp2 = st.columns(2)
+            with _gp1:
+                _gp_trainee = st.selectbox(
+                    "研修対象者",
+                    _mx_emp_names,
+                    key=context_key + "mx_generic_training_trainee",
+                )
+                _gp_name = st.text_input(
+                    "研修計画名",
+                    value=f"{_mx_ym} {_gp_trainee}研修",
+                    key=context_key + "mx_generic_training_name",
+                )
+            with _gp2:
+                _gp_severity_label = st.selectbox(
+                    "重要度",
+                    ["強い目標（おすすめ）", "絶対条件"],
+                    key=context_key + "mx_generic_training_severity",
+                    help=(
+                        "絶対条件は、休み希望や必要人数と両立しない場合に"
+                        "シフト自体が生成できなくなります。"
+                    ),
+                )
+                _gp_all_workdays = st.checkbox(
+                    "研修対象者の全出勤日に、指定した指導担当の誰かを同店舗へ置く",
+                    value=False,
+                    key=context_key + "mx_generic_training_all_days",
+                )
+            _gp_partner_options = [
+                name for name in _mx_emp_names if name != _gp_trainee
+            ]
+            _gp_approved = st.multiselect(
+                "月全体の指導担当（上の全出勤日チェックを使う場合）",
+                _gp_partner_options,
+                key=context_key + "mx_generic_training_approved",
+            )
+
+            def _training_phase_fields(
+                prefix: str,
+                title: str,
+                default_start: int,
+                default_end: int,
+                enabled: bool = True,
+            ) -> Optional[dict]:
+                if not enabled:
+                    return None
+                st.markdown(f"**{title}**")
+                _p1, _p2, _p3, _p4 = st.columns(4)
+                with _p1:
+                    start_day = int(st.number_input(
+                        "開始日",
+                        min_value=1,
+                        max_value=_max_plan_day,
+                        value=min(default_start, _max_plan_day),
+                        key=f"{prefix}_start",
+                    ))
+                    end_day = int(st.number_input(
+                        "終了日",
+                        min_value=1,
+                        max_value=_max_plan_day,
+                        value=min(default_end, _max_plan_day),
+                        key=f"{prefix}_end",
+                    ))
+                with _p2:
+                    store = st.selectbox(
+                        "研修店舗",
+                        _mx_store_options,
+                        format_func=lambda value: _mx_store_labels.get(value, value),
+                        key=f"{prefix}_store",
+                    )
+                with _p3:
+                    mentors = st.multiselect(
+                        "指導担当",
+                        _gp_partner_options,
+                        key=f"{prefix}_mentors",
+                    )
+                with _p4:
+                    target = int(st.number_input(
+                        "目標回数",
+                        min_value=1,
+                        max_value=_max_plan_day,
+                        value=1,
+                        key=f"{prefix}_target",
+                    ))
+                    comparison_label = st.selectbox(
+                        "回数の意味",
+                        ["以上", "ちょうど"],
+                        key=f"{prefix}_comparison",
+                    )
+                return {
+                    "label": title,
+                    "start_day": start_day,
+                    "end_day": end_day,
+                    "store": store,
+                    "mentors": list(mentors),
+                    "target_count": target,
+                    "comparison": (
+                        "exact" if comparison_label == "ちょうど" else "min"
+                    ),
+                    "severity": (
+                        "ERROR"
+                        if _gp_severity_label == "絶対条件"
+                        else "WARNING"
+                    ),
+                }
+
+            _phase1 = _training_phase_fields(
+                "mx_generic_phase1",
+                "第1段階",
+                1,
+                min(15, _max_plan_day),
+            )
+            _use_phase2 = st.checkbox(
+                "第2段階も設定する",
+                value=True,
+                key=context_key + "mx_generic_use_phase2",
+            )
+            _phase2 = _training_phase_fields(
+                "mx_generic_phase2",
+                "第2段階",
+                min(16, _max_plan_day),
+                _max_plan_day,
+                enabled=_use_phase2,
+            )
+            if st.button(
+                "この研修計画を追加",
+                key=context_key + "mx_add_generic_training",
+                type="primary",
+            ):
+                _phases = [phase for phase in (_phase1, _phase2) if phase]
+                _new = dict(_mx_raw)
+                _new_plans = {
+                    key: [dict(value) for value in list(values or [])]
+                    for key, values in (
+                        _new.get("training_plans", {}) or {}
+                    ).items()
+                }
+                _new_plans.setdefault(_mx_ym, []).append({
+                    "id": (
+                        f"{_mx_ym}-{_gp_trainee}-"
+                        f"{now_jst().strftime('%H%M%S%f')}"
+                    ),
+                    "name": _gp_name.strip() or f"{_gp_trainee}研修",
+                    "trainee": _gp_trainee,
+                    "severity": (
+                        "ERROR"
+                        if _gp_severity_label == "絶対条件"
+                        else "WARNING"
+                    ),
+                    "require_mentor_on_workday": bool(_gp_all_workdays),
+                    "approved_mentors": list(_gp_approved),
+                    "phases": _phases,
+                })
+                _new["training_plans"] = _new_plans
+                _mx_new_data = _new
+        elif _mx_type.startswith("🎓"):
+            st.caption(
+                "8月の田中さん研修で使用した形式です。"
+                "対象者を、西口は指定相手と、赤羽は指定相手＋候補者の誰かと、"
+                "東口は指定相手と同じ日に配置します。1か月につき1セット設定できます。"
+            )
+            _mx_training_employee = st.selectbox(
+                "研修対象者",
+                _mx_emp_names,
+                key=context_key + "mx_add_training_employee",
+            )
+            _mx_partner_names = [
+                name for name in _mx_emp_names
+                if name != _mx_training_employee
+            ]
+            _tr1, _tr2, _tr3 = st.columns(3)
+            with _tr1:
+                st.markdown("**西口**")
+                _mx_nishi_partner = st.selectbox(
+                    "一緒に勤務する人",
+                    _mx_partner_names,
+                    key=context_key + "mx_add_training_nishi_partner",
+                )
+                _mx_nishi_count = int(st.number_input(
+                    "西口の回数",
+                    min_value=1,
+                    max_value=31,
+                    value=1,
+                    key=context_key + "mx_add_training_nishi_count",
+                ))
+            with _tr2:
+                st.markdown("**赤羽**")
+                _mx_akabane_partner = st.selectbox(
+                    "必ず一緒に勤務する人",
+                    _mx_partner_names,
+                    key=context_key + "mx_add_training_akabane_partner",
+                )
+                _mx_third_candidates = st.multiselect(
+                    "さらに一緒に勤務する候補",
+                    options=[
+                        name for name in _mx_partner_names
+                        if name != _mx_akabane_partner
+                    ],
+                    key=context_key + "mx_add_training_third_candidates",
+                    help="候補のうち、毎回少なくとも1人が同じ日に赤羽へ入ります。",
+                )
+                _mx_akabane_count = int(st.number_input(
+                    "赤羽の回数",
+                    min_value=1,
+                    max_value=31,
+                    value=1,
+                    key=context_key + "mx_add_training_akabane_count",
+                ))
+            with _tr3:
+                st.markdown("**東口**")
+                _mx_higashi_partner = st.selectbox(
+                    "一緒に勤務する人",
+                    _mx_partner_names,
+                    key=context_key + "mx_add_training_higashi_partner",
+                )
+                _mx_higashi_from_day = int(st.number_input(
+                    "開始日",
+                    min_value=1,
+                    max_value=monthrange(
+                        int(_mx_ym[:4]), int(_mx_ym[5:]),
+                    )[1],
+                    value=1,
+                    key=context_key + "mx_add_training_higashi_from",
+                ))
+                _mx_higashi_count = int(st.number_input(
+                    "東口の回数",
+                    min_value=1,
+                    max_value=31,
+                    value=1,
+                    key=context_key + "mx_add_training_higashi_count",
+                ))
+            st.caption(
+                "回数はすべて「ちょうど」の指定です。対象者の西口・東口勤務は、"
+                "ここで指定した組み合わせの日だけに限定されます。"
+            )
+            if st.button(
+                "この研修条件を追加・上書き",
+                key=context_key + "mx_add_training",
+                type="primary",
+            ):
+                if not _mx_third_candidates:
+                    st.error("赤羽を設定する場合は、3人目の候補を1人以上選んでください。")
+                else:
+                    _new = dict(_mx_raw)
+                    _new_training = {
+                        key: dict(value)
+                        for key, value in (
+                            _new.get("tanaka_training", {}) or {}
+                        ).items()
+                    }
+                    _new_training[_mx_ym] = {
+                        "employee": _mx_training_employee,
+                        "nishiguchi_partner": _mx_nishi_partner,
+                        "nishiguchi_count": _mx_nishi_count,
+                        "akabane_partner": _mx_akabane_partner,
+                        "akabane_third_candidates": list(_mx_third_candidates),
+                        "akabane_count": _mx_akabane_count,
+                        "higashiguchi_partner": _mx_higashi_partner,
+                        "higashiguchi_from_day": _mx_higashi_from_day,
+                        "higashiguchi_count": _mx_higashi_count,
+                    }
+                    _new["tanaka_training"] = _new_training
+                    _mx_new_data = _new
+        elif _mx_type.startswith("🧓"):
+            _default_yamamoto_max = (
+                14 if int(_mx_ym[5:]) in (1, 2) else 15
+            )
+            _existing_yamamoto = _yamamoto_policy_map.get(_mx_ym, {})
+            st.caption(
+                "山本は通常スタッフの人数には含めず、赤羽で本当に必要な日にだけ"
+                "自動で○を付けます。ここで設定する日数は目標ではなく上限です。"
+                "給料とのバランス等による追加勤務は、完成後に手動で入れます。"
+            )
+            _yp1, _yp2 = st.columns(2)
+            with _yp1:
+                _yp_max_days = int(st.number_input(
+                    "月間出勤上限",
+                    min_value=0,
+                    max_value=31,
+                    value=int(
+                        _existing_yamamoto.get(
+                            "max_days", _default_yamamoto_max,
+                        )
+                    ),
+                    key=context_key + "mx_yamamoto_max_days",
+                ))
+            with _yp2:
+                _yp_max_consecutive = int(st.number_input(
+                    "連続勤務上限",
+                    min_value=1,
+                    max_value=7,
+                    value=int(
+                        _existing_yamamoto.get("max_consecutive", 2)
+                    ),
+                    key=context_key + "mx_yamamoto_max_consecutive",
+                ))
+            st.info(
+                f"{_ym_jp(_mx_ym)}は、赤羽で不足する日に限り自動投入し、"
+                f"月{_yp_max_days}日以内・{_yp_max_consecutive}連勤以内にします。"
+            )
+            if st.button(
+                "この補助勤務方針を追加・上書き",
+                key=context_key + "mx_add_yamamoto_policy",
+                type="primary",
             ):
                 _new = dict(_mx_raw)
                 _new_policy = {
                     key: dict(value)
-                    for key, value in _yamamoto_policy_map.items()
-                    if key != _ym
+                    for key, value in (
+                        _new.get("yamamoto_policy", {}) or {}
+                    ).items()
+                }
+                _new_policy[_mx_ym] = {
+                    "max_days": _yp_max_days,
+                    "max_consecutive": _yp_max_consecutive,
+                    "auto_only_if_needed": True,
                 }
                 _new["yamamoto_policy"] = _new_policy
-                _mx_save_and_push(
-                    _new,
-                    actor=_mx_actor,
-                    action=f"{_ym_jp(_ym)}の山本補助勤務方針を標準に戻す",
+                _mx_new_data = _new
+        elif _mx_type.startswith("🔗"):
+            _mc1, _mc2 = st.columns(2)
+            with _mc1:
+                _mx_emp = st.selectbox(
+                    "対象の従業員", _mx_emp_names, key=context_key + "mx_add_carry_emp",
                 )
-
-    st.markdown("---")
-
-    # ---- 追加フォーム ------------------------------------------
-    st.markdown("#### 例外を追加する")
-
-    _mx_type = st.selectbox(
-        "どんな例外を追加しますか？",
-        [
-            "🏬 大宮アンカー緩和（大宮の春山・下地必須ルールをその月だけ外す）",
-            "👤 月限定の店舗区分（主担当・通常担当・応援巡回担当）",
-            "🧑‍🏫 段階別研修計画（期間・店舗・指導担当・回数）",
-            "🎓 従来型の研修組み合わせ（西口・赤羽・東口の回数指定）",
-            "🧓 山本の補助勤務方針（月上限・連続勤務上限）",
-            "🔗 境界連勤の延長（前月から続く連勤の上限をその月初だけ延長）",
-            "🚫 同時休みの回避（2人が同じ日に休むのをなるべく避ける）",
-        ],
-        key="mx_add_type",
-        help=(
-            "例: 2026年7月のように主力メンバーが連休を取る月は"
-            "「大宮アンカー緩和」を設定します。"
-            "解なしの原因調査で「境界連勤の延長を許可してください」と"
-            "案内された場合は「境界連勤の延長」を設定します。"
-        ),
-    )
-
-    # 対象月の選択肢（今月から14ヶ月先まで）
-    _mx_month_options = []
-    _my, _mm = now_jst().date().year, now_jst().date().month
-    for _ in range(14):
-        _mx_month_options.append(f"{_my:04d}-{_mm:02d}")
-        _mm += 1
-        if _mm > 12:
-            _mm = 1
-            _my += 1
-    _mx_ym = st.selectbox(
-        "対象の月",
-        _mx_month_options,
-        format_func=_ym_jp,
-        key="mx_add_ym",
-    )
-
-    _mx_emp_names = [
-        e.name for e in shift_active_employees() if not e.is_auxiliary
-    ]
-    _mx_store_options = [s.name for s in Store if s != Store.OFF]
-    _mx_store_labels = {
-        s.name: s.display_name for s in Store if s != Store.OFF
-    }
-
-    _mx_new_data = None
-    if _mx_type.startswith("🏬"):
-        st.caption(
-            f"{_ym_jp(_mx_ym)}は、大宮駅前店に春山さん・下地さんの"
-            "どちらかが必ずいなくてもよい月になります。"
-        )
-        if st.button("この内容で追加", key="mx_add_anchor", type="primary"):
-            _new = dict(_mx_raw)
-            _lst = list(_new.get("omiya_anchor_relaxed_months", []) or [])
-            if _mx_ym not in _lst:
-                _lst.append(_mx_ym)
-            _new["omiya_anchor_relaxed_months"] = sorted(_lst)
-            _mx_new_data = _new
-    elif _mx_type.startswith("👤"):
-        st.caption(
-            "従業員マスタの現在区分を初期値として表示します。ここで保存した"
-            "区分は対象月だけに適用され、翌月は基本設定へ戻ります。"
-            "基本設定の絶対配置不可は変更されません。3区分に含めなかった"
-            "配置可能店舗も禁止にはせず、人員不足時の緊急候補として残します。"
-        )
-        _mx_override_employee = st.selectbox(
-            "対象の従業員",
-            _mx_emp_names,
-            key="mx_add_override_employee",
-        )
-        _mx_override_emp = get_employee(_mx_override_employee)
-        _mx_existing_rule = dict(
-            (_employee_override_map.get(_mx_ym, {}) or {}).get(
-                _mx_override_employee, {}
-            ) or {}
-        )
-
-        def _mx_store_name(raw_value) -> str:
-            raw_text = str(raw_value or "").strip()
-            for store in Store:
-                if store == Store.OFF:
-                    continue
-                if raw_text in (store.name, store.value, store.display_name):
-                    return store.name
-            return ""
-
-        _mx_allowed_store_options = [
-            store.name for store in Store
-            if store != Store.OFF
-            and _mx_override_emp.affinities.get(store, Affinity.NONE)
-            != Affinity.NONE
-        ]
-        _mx_base_primary = next((
-            store.name for store in Store
-            if store != Store.OFF
-            and _mx_override_emp.affinities.get(store) == Affinity.STRONG
-        ), "")
-        _mx_base_normal = [
-            store.name for store in Store
-            if store != Store.OFF
-            and _mx_override_emp.affinities.get(store) == Affinity.MEDIUM
-        ]
-        _mx_base_support = [
-            store.name for store in Store
-            if store != Store.OFF
-            and _mx_override_emp.affinities.get(store) == Affinity.WEAK
-        ]
-        _mx_existing_full = (
-            "normal_stores" in _mx_existing_rule
-            or "support_stores" in _mx_existing_rule
-        )
-        _mx_default_primary = (
-            _mx_store_name(_mx_existing_rule.get("primary_store"))
-            if _mx_existing_full or _mx_existing_rule.get("primary_store")
-            else _mx_base_primary
-        )
-        _mx_default_removed = [
-            name for name in (
-                _mx_store_name(value)
-                for value in (
-                    _mx_existing_rule.get("remove_support_stores") or []
+            with _mc2:
+                _mx_days = st.number_input(
+                    "延長する日数", min_value=1, max_value=3, value=1,
+                    key=context_key + "mx_add_carry_days",
+                    help="通常は1日で足ります。",
                 )
+            st.caption(
+                f"{_ym_jp(_mx_ym)}の{_mx_emp}さんに限り、前月から続く連勤の"
+                f"上限を＋{int(_mx_days)}日だけ延長します（月の途中の連勤上限は変わりません）。"
             )
-            if name in _mx_allowed_store_options
-        ]
-        _mx_default_normal = (
-            [
-                name for name in (
-                    _mx_store_name(value)
-                    for value in (_mx_existing_rule.get("normal_stores") or [])
-                )
-                if name in _mx_allowed_store_options
-            ]
-            if "normal_stores" in _mx_existing_rule
-            else list(_mx_base_normal)
-        )
-        _mx_default_support = (
-            [
-                name for name in (
-                    _mx_store_name(value)
-                    for value in (_mx_existing_rule.get("support_stores") or [])
-                )
-                if name in _mx_allowed_store_options
-            ]
-            if "support_stores" in _mx_existing_rule
-            else list(_mx_base_support)
-        )
-        _mx_default_normal = [
-            value for value in _mx_default_normal
-            if value != _mx_default_primary and value not in _mx_default_removed
-        ]
-        _mx_default_support = [
-            value for value in _mx_default_support
-            if value != _mx_default_primary
-            and value not in _mx_default_normal
-            and value not in _mx_default_removed
-        ]
-
-        _mso1, _mso2 = st.columns(2)
-        with _mso1:
-            _mx_primary_store = st.selectbox(
-                "この月の主担当",
-                options=[""] + _mx_allowed_store_options,
-                index=(
-                    ([""] + _mx_allowed_store_options).index(_mx_default_primary)
-                    if _mx_default_primary in _mx_allowed_store_options
-                    else 0
-                ),
-                format_func=lambda value: (
-                    "主担当なし"
-                    if not value
-                    else _mx_store_labels.get(value, value)
-                ),
-                key=f"mx_add_override_primary_{_mx_ym}_{_mx_override_employee}",
-            )
-            _mx_normal_stores = st.multiselect(
-                "この月の通常担当",
-                options=_mx_allowed_store_options,
-                default=_mx_default_normal,
-                format_func=lambda value: _mx_store_labels.get(value, value),
-                key=f"mx_add_override_normal_{_mx_ym}_{_mx_override_employee}",
-            )
-        with _mso2:
-            _mx_support_stores = st.multiselect(
-                "この月の応援・巡回担当",
-                options=_mx_allowed_store_options,
-                default=_mx_default_support,
-                format_func=lambda value: _mx_store_labels.get(value, value),
-                key=f"mx_add_override_support_{_mx_ym}_{_mx_override_employee}",
-            )
-            _mx_removed_support = st.multiselect(
-                "この月だけ応援・巡回先から外す店舗（任意）",
-                options=_mx_allowed_store_options,
-                default=_mx_default_removed,
-                format_func=lambda value: _mx_store_labels.get(value, value),
-                key=f"mx_add_override_removed_{_mx_ym}_{_mx_override_employee}",
-                help=(
-                    "特になければ空欄のままで大丈夫です。絶対配置不可にはせず、"
-                    "通常の自動配置候補から外します。人員不足時の緊急配置は許容します。"
-                ),
-            )
-        _override_parts = []
-        if _mx_primary_store:
-            _override_parts.append(
-                f"主担当 {_mx_store_labels[_mx_primary_store]}"
-            )
+            if st.button("この内容で追加", key=context_key + "mx_add_carry", type="primary"):
+                _new = dict(_mx_raw)
+                _cm = {
+                    k: dict(v) for k, v in (
+                        _new.get("carryover_consecutive_allowances", {}) or {}
+                    ).items()
+                }
+                _cm.setdefault(_mx_ym, {})[_mx_emp] = int(_mx_days)
+                _new["carryover_consecutive_allowances"] = _cm
+                _mx_new_data = _new
         else:
-            _override_parts.append("主担当なし")
-        _override_parts.append(
-            "通常担当 "
-            + (
-                "・".join(_mx_store_labels[s] for s in _mx_normal_stores)
-                or "なし"
-            )
-        )
-        _override_parts.append(
-            "応援・巡回担当 "
-            + (
-                "・".join(_mx_store_labels[s] for s in _mx_support_stores)
-                or "なし"
-            )
-        )
-        if _mx_removed_support:
-            _override_parts.append(
-                "応援・巡回先から"
-                + "・".join(_mx_store_labels[s] for s in _mx_removed_support)
-                + "を外す"
-            )
-        else:
-            _override_parts.append("応援・巡回から外す店舗なし")
-        st.caption(
-            f"{_ym_jp(_mx_ym)}の{_mx_override_employee}さん: "
-            + ("、".join(_override_parts) if _override_parts else "変更内容を選択してください。")
-        )
-        if st.button(
-            "この内容で追加・上書き",
-            key="mx_add_employee_override",
-            type="primary",
-        ):
-            _category_sets = {
-                "主担当": {_mx_primary_store} if _mx_primary_store else set(),
-                "通常担当": set(_mx_normal_stores),
-                "応援・巡回担当": set(_mx_support_stores),
-                "応援・巡回から外す店舗": set(_mx_removed_support),
-            }
-            _overlap_messages = []
-            _category_labels = list(_category_sets)
-            for _idx, _first_label in enumerate(_category_labels):
-                for _second_label in _category_labels[_idx + 1:]:
-                    _overlap = (
-                        _category_sets[_first_label]
-                        & _category_sets[_second_label]
-                    )
-                    if _overlap:
-                        _overlap_messages.append(
-                            "・".join(_mx_store_labels[s] for s in sorted(_overlap))
-                            + f"が「{_first_label}」と「{_second_label}」で重複"
-                        )
-            if (
-                not _mx_primary_store
-                and not _mx_normal_stores
-                and not _mx_support_stores
-            ):
-                st.error(
-                    "主担当・通常担当・応援巡回担当のいずれかを、"
-                    "少なくとも1店舗設定してください。"
+            _ac1, _ac2 = st.columns(2)
+            with _ac1:
+                _mx_emp_a = st.selectbox(
+                    "従業員A", _mx_emp_names, key=context_key + "mx_add_avoid_a",
                 )
-            elif _overlap_messages:
-                st.error("店舗区分が重複しています: " + " / ".join(_overlap_messages))
-            else:
-                _new = dict(_mx_raw)
-                _new_overrides = {
-                    key: {
-                        name: dict(value)
-                        for name, value in dict(employees or {}).items()
-                    }
-                    for key, employees in (
-                        _new.get("employee_store_overrides", {}) or {}
-                    ).items()
-                }
-                _new_overrides.setdefault(_mx_ym, {})[
-                    _mx_override_employee
-                ] = {
-                    "primary_store": _mx_primary_store or None,
-                    "normal_stores": list(_mx_normal_stores),
-                    "support_stores": list(_mx_support_stores),
-                    "remove_support_stores": list(_mx_removed_support),
-                }
-                _new["employee_store_overrides"] = _new_overrides
-                _mx_new_data = _new
-    elif _mx_type.startswith("🧑‍🏫"):
-        _max_plan_day = monthrange(
-            int(_mx_ym[:4]), int(_mx_ym[5:]),
-        )[1]
-        st.caption(
-            "研修を前半・後半などの段階に分けて設定します。"
-            "通常は「強い目標」がおすすめです。本人の休み希望や店舗運営を"
-            "優先しながら、可能な限り指定回数へ寄せます。"
-        )
-        _gp1, _gp2 = st.columns(2)
-        with _gp1:
-            _gp_trainee = st.selectbox(
-                "研修対象者",
-                _mx_emp_names,
-                key="mx_generic_training_trainee",
-            )
-            _gp_name = st.text_input(
-                "研修計画名",
-                value=f"{_mx_ym} {_gp_trainee}研修",
-                key="mx_generic_training_name",
-            )
-        with _gp2:
-            _gp_severity_label = st.selectbox(
-                "重要度",
-                ["強い目標（おすすめ）", "絶対条件"],
-                key="mx_generic_training_severity",
-                help=(
-                    "絶対条件は、休み希望や必要人数と両立しない場合に"
-                    "シフト自体が生成できなくなります。"
-                ),
-            )
-            _gp_all_workdays = st.checkbox(
-                "研修対象者の全出勤日に、指定した指導担当の誰かを同店舗へ置く",
-                value=False,
-                key="mx_generic_training_all_days",
-            )
-        _gp_partner_options = [
-            name for name in _mx_emp_names if name != _gp_trainee
-        ]
-        _gp_approved = st.multiselect(
-            "月全体の指導担当（上の全出勤日チェックを使う場合）",
-            _gp_partner_options,
-            key="mx_generic_training_approved",
-        )
-
-        def _training_phase_fields(
-            prefix: str,
-            title: str,
-            default_start: int,
-            default_end: int,
-            enabled: bool = True,
-        ) -> Optional[dict]:
-            if not enabled:
-                return None
-            st.markdown(f"**{title}**")
-            _p1, _p2, _p3, _p4 = st.columns(4)
-            with _p1:
-                start_day = int(st.number_input(
-                    "開始日",
-                    min_value=1,
-                    max_value=_max_plan_day,
-                    value=min(default_start, _max_plan_day),
-                    key=f"{prefix}_start",
-                ))
-                end_day = int(st.number_input(
-                    "終了日",
-                    min_value=1,
-                    max_value=_max_plan_day,
-                    value=min(default_end, _max_plan_day),
-                    key=f"{prefix}_end",
-                ))
-            with _p2:
-                store = st.selectbox(
-                    "研修店舗",
-                    _mx_store_options,
-                    format_func=lambda value: _mx_store_labels.get(value, value),
-                    key=f"{prefix}_store",
+            with _ac2:
+                _mx_emp_b = st.selectbox(
+                    "従業員B", _mx_emp_names, key=context_key + "mx_add_avoid_b",
                 )
-            with _p3:
-                mentors = st.multiselect(
-                    "指導担当",
-                    _gp_partner_options,
-                    key=f"{prefix}_mentors",
-                )
-            with _p4:
-                target = int(st.number_input(
-                    "目標回数",
-                    min_value=1,
-                    max_value=_max_plan_day,
-                    value=1,
-                    key=f"{prefix}_target",
-                ))
-                comparison_label = st.selectbox(
-                    "回数の意味",
-                    ["以上", "ちょうど"],
-                    key=f"{prefix}_comparison",
-                )
-            return {
-                "label": title,
-                "start_day": start_day,
-                "end_day": end_day,
-                "store": store,
-                "mentors": list(mentors),
-                "target_count": target,
-                "comparison": (
-                    "exact" if comparison_label == "ちょうど" else "min"
-                ),
-                "severity": (
-                    "ERROR"
-                    if _gp_severity_label == "絶対条件"
-                    else "WARNING"
-                ),
-            }
-
-        _phase1 = _training_phase_fields(
-            "mx_generic_phase1",
-            "第1段階",
-            1,
-            min(15, _max_plan_day),
-        )
-        _use_phase2 = st.checkbox(
-            "第2段階も設定する",
-            value=True,
-            key="mx_generic_use_phase2",
-        )
-        _phase2 = _training_phase_fields(
-            "mx_generic_phase2",
-            "第2段階",
-            min(16, _max_plan_day),
-            _max_plan_day,
-            enabled=_use_phase2,
-        )
-        if st.button(
-            "この研修計画を追加",
-            key="mx_add_generic_training",
-            type="primary",
-        ):
-            _phases = [phase for phase in (_phase1, _phase2) if phase]
-            _new = dict(_mx_raw)
-            _new_plans = {
-                key: [dict(value) for value in list(values or [])]
-                for key, values in (
-                    _new.get("training_plans", {}) or {}
-                ).items()
-            }
-            _new_plans.setdefault(_mx_ym, []).append({
-                "id": (
-                    f"{_mx_ym}-{_gp_trainee}-"
-                    f"{now_jst().strftime('%H%M%S%f')}"
-                ),
-                "name": _gp_name.strip() or f"{_gp_trainee}研修",
-                "trainee": _gp_trainee,
-                "severity": (
-                    "ERROR"
-                    if _gp_severity_label == "絶対条件"
-                    else "WARNING"
-                ),
-                "require_mentor_on_workday": bool(_gp_all_workdays),
-                "approved_mentors": list(_gp_approved),
-                "phases": _phases,
-            })
-            _new["training_plans"] = _new_plans
-            _mx_new_data = _new
-    elif _mx_type.startswith("🎓"):
-        st.caption(
-            "8月の田中さん研修で使用した形式です。"
-            "対象者を、西口は指定相手と、赤羽は指定相手＋候補者の誰かと、"
-            "東口は指定相手と同じ日に配置します。1か月につき1セット設定できます。"
-        )
-        _mx_training_employee = st.selectbox(
-            "研修対象者",
-            _mx_emp_names,
-            key="mx_add_training_employee",
-        )
-        _mx_partner_names = [
-            name for name in _mx_emp_names
-            if name != _mx_training_employee
-        ]
-        _tr1, _tr2, _tr3 = st.columns(3)
-        with _tr1:
-            st.markdown("**西口**")
-            _mx_nishi_partner = st.selectbox(
-                "一緒に勤務する人",
-                _mx_partner_names,
-                key="mx_add_training_nishi_partner",
+            _mx_note = st.text_input(
+                "メモ（任意）",
+                key=context_key + "mx_add_avoid_note",
+                placeholder="例: すずらんメイン2名の同時休みは避ける",
             )
-            _mx_nishi_count = int(st.number_input(
-                "西口の回数",
-                min_value=1,
-                max_value=31,
-                value=1,
-                key="mx_add_training_nishi_count",
-            ))
-        with _tr2:
-            st.markdown("**赤羽**")
-            _mx_akabane_partner = st.selectbox(
-                "必ず一緒に勤務する人",
-                _mx_partner_names,
-                key="mx_add_training_akabane_partner",
+            st.caption(
+                f"{_ym_jp(_mx_ym)}は、{_mx_emp_a}さんと{_mx_emp_b}さんが"
+                "同じ日に休むことをなるべく避けて生成します（絶対条件ではありません）。"
             )
-            _mx_third_candidates = st.multiselect(
-                "さらに一緒に勤務する候補",
-                options=[
-                    name for name in _mx_partner_names
-                    if name != _mx_akabane_partner
-                ],
-                key="mx_add_training_third_candidates",
-                help="候補のうち、毎回少なくとも1人が同じ日に赤羽へ入ります。",
-            )
-            _mx_akabane_count = int(st.number_input(
-                "赤羽の回数",
-                min_value=1,
-                max_value=31,
-                value=1,
-                key="mx_add_training_akabane_count",
-            ))
-        with _tr3:
-            st.markdown("**東口**")
-            _mx_higashi_partner = st.selectbox(
-                "一緒に勤務する人",
-                _mx_partner_names,
-                key="mx_add_training_higashi_partner",
-            )
-            _mx_higashi_from_day = int(st.number_input(
-                "開始日",
-                min_value=1,
-                max_value=monthrange(
-                    int(_mx_ym[:4]), int(_mx_ym[5:]),
-                )[1],
-                value=1,
-                key="mx_add_training_higashi_from",
-            ))
-            _mx_higashi_count = int(st.number_input(
-                "東口の回数",
-                min_value=1,
-                max_value=31,
-                value=1,
-                key="mx_add_training_higashi_count",
-            ))
-        st.caption(
-            "回数はすべて「ちょうど」の指定です。対象者の西口・東口勤務は、"
-            "ここで指定した組み合わせの日だけに限定されます。"
-        )
-        if st.button(
-            "この研修条件を追加・上書き",
-            key="mx_add_training",
-            type="primary",
-        ):
-            if not _mx_third_candidates:
-                st.error("赤羽を設定する場合は、3人目の候補を1人以上選んでください。")
-            else:
-                _new = dict(_mx_raw)
-                _new_training = {
-                    key: dict(value)
-                    for key, value in (
-                        _new.get("tanaka_training", {}) or {}
-                    ).items()
-                }
-                _new_training[_mx_ym] = {
-                    "employee": _mx_training_employee,
-                    "nishiguchi_partner": _mx_nishi_partner,
-                    "nishiguchi_count": _mx_nishi_count,
-                    "akabane_partner": _mx_akabane_partner,
-                    "akabane_third_candidates": list(_mx_third_candidates),
-                    "akabane_count": _mx_akabane_count,
-                    "higashiguchi_partner": _mx_higashi_partner,
-                    "higashiguchi_from_day": _mx_higashi_from_day,
-                    "higashiguchi_count": _mx_higashi_count,
-                }
-                _new["tanaka_training"] = _new_training
-                _mx_new_data = _new
-    elif _mx_type.startswith("🧓"):
-        _default_yamamoto_max = (
-            14 if int(_mx_ym[5:]) in (1, 2) else 15
-        )
-        _existing_yamamoto = _yamamoto_policy_map.get(_mx_ym, {})
-        st.caption(
-            "山本は通常スタッフの人数には含めず、赤羽で本当に必要な日にだけ"
-            "自動で○を付けます。ここで設定する日数は目標ではなく上限です。"
-            "給料とのバランス等による追加勤務は、完成後に手動で入れます。"
-        )
-        _yp1, _yp2 = st.columns(2)
-        with _yp1:
-            _yp_max_days = int(st.number_input(
-                "月間出勤上限",
-                min_value=0,
-                max_value=31,
-                value=int(
-                    _existing_yamamoto.get(
-                        "max_days", _default_yamamoto_max,
-                    )
-                ),
-                key="mx_yamamoto_max_days",
-            ))
-        with _yp2:
-            _yp_max_consecutive = int(st.number_input(
-                "連続勤務上限",
-                min_value=1,
-                max_value=7,
-                value=int(
-                    _existing_yamamoto.get("max_consecutive", 2)
-                ),
-                key="mx_yamamoto_max_consecutive",
-            ))
-        st.info(
-            f"{_ym_jp(_mx_ym)}は、赤羽で不足する日に限り自動投入し、"
-            f"月{_yp_max_days}日以内・{_yp_max_consecutive}連勤以内にします。"
-        )
-        if st.button(
-            "この補助勤務方針を追加・上書き",
-            key="mx_add_yamamoto_policy",
-            type="primary",
-        ):
-            _new = dict(_mx_raw)
-            _new_policy = {
-                key: dict(value)
-                for key, value in (
-                    _new.get("yamamoto_policy", {}) or {}
-                ).items()
-            }
-            _new_policy[_mx_ym] = {
-                "max_days": _yp_max_days,
-                "max_consecutive": _yp_max_consecutive,
-                "auto_only_if_needed": True,
-            }
-            _new["yamamoto_policy"] = _new_policy
-            _mx_new_data = _new
-    elif _mx_type.startswith("🔗"):
-        _mc1, _mc2 = st.columns(2)
-        with _mc1:
-            _mx_emp = st.selectbox(
-                "対象の従業員", _mx_emp_names, key="mx_add_carry_emp",
-            )
-        with _mc2:
-            _mx_days = st.number_input(
-                "延長する日数", min_value=1, max_value=3, value=1,
-                key="mx_add_carry_days",
-                help="通常は1日で足ります。",
-            )
-        st.caption(
-            f"{_ym_jp(_mx_ym)}の{_mx_emp}さんに限り、前月から続く連勤の"
-            f"上限を＋{int(_mx_days)}日だけ延長します（月の途中の連勤上限は変わりません）。"
-        )
-        if st.button("この内容で追加", key="mx_add_carry", type="primary"):
-            _new = dict(_mx_raw)
-            _cm = {
-                k: dict(v) for k, v in (
-                    _new.get("carryover_consecutive_allowances", {}) or {}
-                ).items()
-            }
-            _cm.setdefault(_mx_ym, {})[_mx_emp] = int(_mx_days)
-            _new["carryover_consecutive_allowances"] = _cm
-            _mx_new_data = _new
-    else:
-        _ac1, _ac2 = st.columns(2)
-        with _ac1:
-            _mx_emp_a = st.selectbox(
-                "従業員A", _mx_emp_names, key="mx_add_avoid_a",
-            )
-        with _ac2:
-            _mx_emp_b = st.selectbox(
-                "従業員B", _mx_emp_names, key="mx_add_avoid_b",
-            )
-        _mx_note = st.text_input(
-            "メモ（任意）",
-            key="mx_add_avoid_note",
-            placeholder="例: すずらんメイン2名の同時休みは避ける",
-        )
-        st.caption(
-            f"{_ym_jp(_mx_ym)}は、{_mx_emp_a}さんと{_mx_emp_b}さんが"
-            "同じ日に休むことをなるべく避けて生成します（絶対条件ではありません）。"
-        )
-        if st.button("この内容で追加", key="mx_add_avoid", type="primary"):
-            if _mx_emp_a == _mx_emp_b:
-                st.error("従業員AとBは別の人を選んでください。")
-            else:
-                _new = dict(_mx_raw)
-                _am = {
-                    k: list(v) for k, v in (
-                        _new.get("avoid_same_off", {}) or {}
-                    ).items()
-                }
-                _am.setdefault(_mx_ym, []).append({
-                    "a": _mx_emp_a, "b": _mx_emp_b, "note": _mx_note,
-                })
-                _new["avoid_same_off"] = _am
-                _mx_new_data = _new
-
-    if _mx_new_data is not None:
-        _mx_save_and_push(
-            _mx_new_data,
-            actor=_mx_actor,
-            action=(
-                f"{_ym_jp(_mx_ym)}に"
-                f"{_mx_type.split('（', 1)[0].strip()}を追加・更新"
-            ),
-        )
-
-    st.markdown("---")
-    st.markdown("#### 🏪 営業モード（省人員・休業日の設定）")
-    st.caption(
-        "基本は**全日「通常」体制**で計算します。連休などで休み希望が集中し、"
-        "やむを得ず少人数で営業する日だけ、ここで設定してください（経営判断）。"
-        "解なしの原因調査で「人員不足」が出た日を設定するのが目安です。"
-    )
-    _om_map = dict(_mx_raw.get("operation_modes", {}) or {})
-    if _om_map:
-        for _om_ym in sorted(_om_map):
-            _om_day_map = dict(_om_map[_om_ym] or {})
-            for _om_day in sorted(_om_day_map, key=lambda t: int(t)):
-                _omc1, _omc2 = st.columns([4, 1])
-                _omc1.write(
-                    f"　- {_ym_jp(_om_ym)}{int(_om_day)}日 ／ "
-                    f"{_om_day_map[_om_day]}"
-                )
-                if _omc2.button(
-                    "🗑 削除", key=f"mx_del_om_{_om_ym}_{_om_day}",
-                ):
+            if st.button("この内容で追加", key=context_key + "mx_add_avoid", type="primary"):
+                if _mx_emp_a == _mx_emp_b:
+                    st.error("従業員AとBは別の人を選んでください。")
+                else:
                     _new = dict(_mx_raw)
-                    _new_om = {k: dict(v) for k, v in _om_map.items()}
-                    _new_om[_om_ym].pop(_om_day, None)
-                    if not _new_om[_om_ym]:
-                        _new_om.pop(_om_ym)
-                    _new["operation_modes"] = _new_om
-                    _mx_save_and_push(_new, actor=_mx_actor)
-    else:
-        st.caption("現在、省人員・休業の設定はありません（全日通常）。")
+                    _am = {
+                        k: list(v) for k, v in (
+                            _new.get("avoid_same_off", {}) or {}
+                        ).items()
+                    }
+                    _am.setdefault(_mx_ym, []).append({
+                        "a": _mx_emp_a, "b": _mx_emp_b, "note": _mx_note,
+                    })
+                    _new["avoid_same_off"] = _am
+                    _mx_new_data = _new
 
-    _omf1, _omf2, _omf3 = st.columns([1.2, 2, 1])
-    with _omf1:
-        _om_ym_sel = st.selectbox(
-            "対象の月", _mx_month_options,
-            format_func=_ym_jp, key="mx_om_ym",
+        if _mx_new_data is not None:
+            _mx_save_and_push(
+                _mx_new_data,
+                actor=_mx_actor,
+                action=(
+                    f"{_ym_jp(_mx_ym)}に"
+                    f"{_mx_type.split('（', 1)[0].strip()}を追加・更新"
+                ),
+            )
+
+    if section == "営業体制":
+        st.markdown("---")
+        st.markdown("#### 🏪 営業モード（省人員・休業日の設定）")
+        st.caption(
+            "基本は**全日「通常」体制**で計算します。連休などで休み希望が集中し、"
+            "やむを得ず少人数で営業する日だけ、ここで設定してください（経営判断）。"
+            "解なしの原因調査で「人員不足」が出た日を設定するのが目安です。"
         )
-    with _omf2:
-        _om_days_sel = st.multiselect(
-            "対象の日（複数選択可）",
-            list(range(
-                1,
-                monthrange(int(_om_ym_sel[:4]), int(_om_ym_sel[5:]))[1] + 1,
-            )),
-            key="mx_om_days",
-        )
-    with _omf3:
-        _om_mode_sel = st.selectbox(
-            "モード", ["省人員", "最小営業", "営業停止"], key="mx_om_mode",
-        )
-    if st.button("営業モードを設定", key="mx_om_add", type="primary"):
-        if not _om_days_sel:
-            st.error("対象の日を選んでください。")
+        _om_map = dict(_mx_raw.get("operation_modes", {}) or {})
+        if _om_map.get(_mx_ym):
+            for _om_ym in sorted(_om_map):
+                if _om_ym != _mx_ym:
+                    continue
+                _om_day_map = dict(_om_map[_om_ym] or {})
+                for _om_day in sorted(_om_day_map, key=lambda t: int(t)):
+                    _omc1, _omc2 = st.columns([4, 1])
+                    _omc1.write(
+                        f"　- {_ym_jp(_om_ym)}{int(_om_day)}日 ／ "
+                        f"{_om_day_map[_om_day]}"
+                    )
+                    if _omc2.button(
+                        "🗑 削除", key=f"mx_del_om_{_om_ym}_{_om_day}",
+                    ):
+                        _new = dict(_mx_raw)
+                        _new_om = {k: dict(v) for k, v in _om_map.items()}
+                        _new_om[_om_ym].pop(_om_day, None)
+                        if not _new_om[_om_ym]:
+                            _new_om.pop(_om_ym)
+                        _new["operation_modes"] = _new_om
+                        _mx_save_and_push(_new, actor=_mx_actor)
         else:
-            _new = dict(_mx_raw)
-            _new_om = {
-                k: dict(v)
-                for k, v in (_new.get("operation_modes", {}) or {}).items()
-            }
-            _new_om.setdefault(_om_ym_sel, {})
-            for _om_d in _om_days_sel:
-                _new_om[_om_ym_sel][str(int(_om_d))] = _om_mode_sel
-            _new["operation_modes"] = _new_om
-            _mx_save_and_push(_new, actor=_mx_actor)
+            st.caption("現在、省人員・休業の設定はありません（全日通常）。")
+
+        _om_ym_sel = _mx_ym
+        _omf2, _omf3 = st.columns([2, 1])
+        with _omf2:
+            _om_days_sel = st.multiselect(
+                "対象の日（複数選択可）",
+                list(range(
+                    1,
+                    monthrange(int(_om_ym_sel[:4]), int(_om_ym_sel[5:]))[1] + 1,
+                )),
+                key=context_key + "mx_om_days",
+            )
+        with _omf3:
+            _om_mode_sel = st.selectbox(
+                "モード", ["省人員", "最小営業", "営業停止"], key=context_key + "mx_om_mode",
+            )
+        if st.button("営業モードを設定", key=context_key + "mx_om_add", type="primary"):
+            if not _om_days_sel:
+                st.error("対象の日を選んでください。")
+            else:
+                _new = dict(_mx_raw)
+                _new_om = {
+                    k: dict(v)
+                    for k, v in (_new.get("operation_modes", {}) or {}).items()
+                }
+                _new_om.setdefault(_om_ym_sel, {})
+                for _om_d in _om_days_sel:
+                    _new_om[_om_ym_sel][str(int(_om_d))] = _om_mode_sel
+                _new["operation_modes"] = _new_om
+                _mx_save_and_push(_new, actor=_mx_actor)
 
     st.markdown("---")
     with st.expander("🕘 月例外の変更履歴・元に戻す", expanded=False):
@@ -5424,9 +5414,7 @@ def render_monthly_exceptions_panel() -> None:
 
     st.markdown("---")
     st.caption(
-        "💡 このほか「この月だけ○○さんを△店に□日配置する」のような"
-        "月別の配置ルールは「🔧 ルール設定」タブから追加できます。"
-        "例外を追加・削除したら、シフトの再生成を忘れずに行ってください。"
+        "保存済みのシフトは自動変更されません。変更した条件は次の生成・検証に使われます。"
     )
 
 
@@ -5967,670 +5955,354 @@ if mode == "📊 経営者ビュー":
             unsafe_allow_html=True,
         )
 
-    note_review_items = [
-        s for s in submission_status.get("submitted", [])
-        if s.get("note_review_labels")
-    ]
-    if note_review_items:
-        review_names = "、".join(s.get("employee", "") for s in note_review_items)
-        st.warning(
-            "⚠ 自由記載に、管理者確認が必要な表現があります。"
-            f"対象: {review_names}"
+    # 原文と最終条件は、生成にも使う提出ローダーから取得する。
+    from prototype.submission_loader import load_submissions_for_month
+    from prototype.submission_review_ui import build_review_rows, render_submission_review
+
+    try:
+        review_submissions = load_submissions_for_month(
+            int(target_year), int(target_month), expected_employees,
         )
-        with st.expander("自由記載の要確認内容を見る", expanded=False):
-            for s in note_review_items:
-                st.markdown(f"**{s.get('employee', '')}**")
-                st.write(" / ".join(s.get("note_review_labels", [])))
-                if s.get("note_auto_labels"):
-                    st.caption("自動反映: " + " / ".join(s.get("note_auto_labels", [])))
-                st.caption("原文: " + (s.get("note", "") or s.get("note_excerpt", "")))
+        actual_note_summaries = dict(review_submissions.parsed_note_summaries)
+    except Exception as exc:
+        actual_note_summaries = None
+        st.error("自由記載の生成条件を取得できませんでした。再読込してください。")
+        _startup_log(f"submission review load failed: {type(exc).__name__}")
 
-    all_note_items = [
-        s for s in submission_status.get("submitted", [])
-        if s.get("has_note")
-    ]
-    if all_note_items:
-        note_adjustments_by_employee = latest_note_adjustments_by_employee(
-            int(target_year), int(target_month),
+    review_rows, review_details = build_review_rows(
+        expected_employees, submission_status["submitted"],
+        latest_note_adjustments_by_employee(int(target_year), int(target_month)),
+        actual_note_summaries, int(target_year), int(target_month),
+        build_note_reflection_review, parsed_note_summary_to_labels, format_day_list,
+        admin_paid_leave_days_for_month(int(target_year), int(target_month)),
+    )
+    render_submission_review(
+        review_rows, review_details, int(target_year), int(target_month),
+        render_note_adjustment_editor,
+    )
+    with st.expander("提出日時・未提出者への連絡", expanded=False):
+        st.dataframe(
+            [{"氏名": item["employee"],
+              "提出日時": format_timestamp_jst(item.get("submitted_at", ""))}
+             for item in submission_status["submitted"]],
+            width="stretch", hide_index=True,
         )
-        with st.expander("📝 自由記載レビュー一覧（原文・自動反映・要確認）", expanded=False):
-            actual_note_summaries = {}
-            try:
-                from prototype.submission_loader import load_submissions_for_month
-
-                actual_sub_data_for_review = load_submissions_for_month(
-                    int(target_year), int(target_month), expected_employees,
-                )
-                actual_note_summaries = dict(
-                    getattr(actual_sub_data_for_review, "parsed_note_summaries", {})
-                )
-            except Exception:
-                st.warning("自由記載の最終反映条件を読み込めませんでした。")
-
-            reflection_rows = []
-            note_rows = []
-            for s in all_note_items:
-                employee_name = s.get("employee", "")
-                adj = note_adjustments_by_employee.get(employee_name) or {}
-                reflection = build_note_reflection_review(
-                    s.get("note", "") or s.get("note_excerpt", ""),
-                    adj,
-                    int(target_year),
-                    int(target_month),
-                    s.get("off_request_days", []),
-                )
-                actual_final_labels = parsed_note_summary_to_labels(
-                    actual_note_summaries.get(employee_name, {})
-                )
-                reflection_notes = list(reflection.get("notes", []))
-                has_unread_correction = any(
-                    "生成条件として読めていません" in str(note)
-                    for note in reflection_notes
-                )
-                status = str(adj.get("status", "") or "")
-                if status == "反映しない":
-                    reflection_status = "反映しない"
-                elif not actual_final_labels:
-                    reflection_status = "未反映"
-                    if not reflection_notes:
-                        reflection_notes.append("自由記載由来の条件は生成に入りません")
-                elif has_unread_correction:
-                    reflection_status = "一部未反映"
-                elif reflection_notes:
-                    reflection_status = "反映済み（要確認あり）"
-                else:
-                    reflection_status = "反映済み"
-
-                reflection_rows.append({
-                    "氏名": employee_name,
-                    "反映判定": reflection_status,
-                    "実際に生成へ渡る自由記載条件": " / ".join(actual_final_labels) or "-",
-                    "未反映・確認ポイント": " / ".join(_unique_label_list(reflection_notes)) or "-",
-                    "反映方式": reflection.get("source_label", "-"),
-                })
-                note_rows.append({
-                    "氏名": employee_name,
-                    "判定": s.get("note_parse_status", ""),
-                    "自動反映": " / ".join(s.get("note_auto_labels", [])) or "-",
-                    "要確認": " / ".join(s.get("note_review_labels", [])) or "-",
-                    "管理者補正": adj.get("corrected_text", "") or "-",
-                    "補正の読取": " / ".join(reflection.get("correction_auto_labels", [])) or "-",
-                    "最終反映条件": " / ".join(actual_final_labels) or "-",
-                    "反映方式": reflection.get("source_label", "-"),
-                    "確認メモ": " / ".join(_unique_label_list(reflection_notes)) or "-",
-                    "補正状態": format_note_adjustment_status(adj.get("status", "")),
-                    "原文": s.get("note", "") or s.get("note_excerpt", ""),
-                })
-            st.markdown("##### 自由記載の反映チェック（生成に入る最終条件）")
-            render_scrollable_dict_table(
-                reflection_rows,
-                columns=[
-                    "氏名",
-                    "反映判定",
-                    "実際に生成へ渡る自由記載条件",
-                    "未反映・確認ポイント",
-                    "反映方式",
-                ],
-                widths={
-                    "氏名": 90,
-                    "反映判定": 160,
-                    "実際に生成へ渡る自由記載条件": 420,
-                    "未反映・確認ポイント": 420,
-                    "反映方式": 190,
-                },
-                empty_message="自由記載の反映チェックはありません",
-                max_height=360,
+        if submission_status["not_submitted"]:
+            st.code(
+                f"【{int(target_month)}月分シフト希望提出のお願い】\n"
+                "まだ提出されていない方は、提出をお願いいたします。\n"
+                + "未提出: " + "、".join(submission_status["not_submitted"]),
+                language=None,
             )
-            st.caption(
-                "この表の「実際に生成へ渡る自由記載条件」が、自由記載・管理者補正から生成へ入る最終条件です。"
-                "「一部未反映」「未反映」がある場合は、補正メモを直すか、反映しない扱いにしてください。"
-            )
-            st.markdown("##### 詳細（原文・自動反映・管理者補正）")
-            render_scrollable_dict_table(
-                note_rows,
-                columns=[
-                    "氏名",
-                    "判定",
-                    "自動反映",
-                    "要確認",
-                    "管理者補正",
-                    "補正の読取",
-                    "最終反映条件",
-                    "反映方式",
-                    "確認メモ",
-                    "補正状態",
-                    "原文",
-                ],
-                widths={
-                    "氏名": 90,
-                    "判定": 120,
-                    "自動反映": 320,
-                    "要確認": 300,
-                    "管理者補正": 420,
-                    "補正の読取": 320,
-                    "最終反映条件": 380,
-                    "反映方式": 180,
-                    "確認メモ": 340,
-                    "補正状態": 230,
-                    "原文": 520,
-                },
-                empty_message="自由記載の詳細はありません",
-                max_height=460,
-            )
-            st.caption(
-                "追記は原文の条件を残し、日付などを追加します。休日数・連勤上限などは補正の値を優先します。"
-                "置き換えは原文の自動読取を使わず補正だけを使います。下書きは補正をまだ反映しません。"
-                "本人が選択した×休みは、自由記載を置き換えても削除されません。"
-            )
-            note_employee_options = [s.get("employee", "") for s in all_note_items]
-            selected_note_employee = st.selectbox(
-                "補正するスタッフ",
-                note_employee_options,
-                key=f"note_adjust_employee_{int(target_year)}_{int(target_month)}",
-            )
-            existing_adjustment = note_adjustments_by_employee.get(selected_note_employee, {})
-            original_note = next(
-                (
-                    s.get("note", "") or s.get("note_excerpt", "")
-                    for s in all_note_items
-                    if s.get("employee", "") == selected_note_employee
-                ),
-                "",
-            )
-            st.markdown("**原文（変更不可）**")
-            st.markdown(
-                f'<div style="background:#f8fafc; border:1px solid #cbd5e1; '
-                f'border-radius:8px; padding:10px 12px; white-space:pre-wrap; '
-                f'font-size:13px; line-height:1.6; color:#111827;">'
-                f'{escape(original_note or "自由記載なし")}</div>',
-                unsafe_allow_html=True,
-            )
-            current_reflection = build_note_reflection_review(
-                original_note,
-                existing_adjustment,
-                int(target_year),
-                int(target_month),
-                next((s.get("off_request_days", []) for s in all_note_items
-                      if s.get("employee") == selected_note_employee), []),
-            )
-            st.markdown("**現在の最終反映条件**")
-            st.dataframe(
-                [{
-                    "反映方式": current_reflection.get("source_label", "-"),
-                    "補正の読取": " / ".join(current_reflection.get("correction_auto_labels", [])) or "-",
-                    "生成に渡る条件": " / ".join(current_reflection.get("final_labels", [])) or "-",
-                    "確認メモ": " / ".join(current_reflection.get("notes", [])) or "-",
-                }],
-                width="stretch",
-                hide_index=True,
-            )
-            render_note_adjustment_editor(
-                original_note, existing_adjustment,
-                int(target_year), int(target_month), selected_note_employee,
-                next((s.get("off_request_days", []) for s in all_note_items
-                      if s.get("employee") == selected_note_employee), []),
-            )
-
-    # 詳細表示（折りたたみ式）
-    with st.expander(
-        f"📥 提出状況の詳細を見る（提出済み{summary['total_submitted']}名・未提出{summary['total_pending']}名）",
-        expanded=(summary["total_pending"] > 0 and summary["total_pending"] < summary["total_expected"]),
-    ):
-        detail_col1, detail_col2 = st.columns([3, 2])
-
-        # 提出済み詳細
-        with detail_col1:
-            st.markdown("##### ✅ 提出済み")
-            if not submission_status["submitted"]:
-                st.caption("まだ誰も提出していません")
-            else:
-                submitted_data = []
-                for s in submission_status["submitted"]:
-                    submitted_data.append({
-                        "氏名": s["employee"],
-                        "提出日時": format_timestamp_jst(s.get("submitted_at", "")),
-                        "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
-                        "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
-                        "有給": f"{s.get('paid_leave_days', 0)}日",
-                        "備考": "📝 あり" if s["has_note"] else "",
-                        "自由記載確認": s.get("note_parse_status", ""),
-                    })
-                st.dataframe(submitted_data, width="stretch", hide_index=True)
-
-                # 備考のあるものだけ展開表示
-                has_notes = [s for s in submission_status["submitted"] if s["has_note"]]
-                if has_notes:
-                    st.markdown("**📝 自由記述コメント:**")
-                    for s in has_notes:
-                        status_label = s.get("note_parse_status", "")
-                        status_html = (
-                            f' <span style="font-size:12px; color:#0369a1;">'
-                            f'[{escape(str(status_label))}]</span>'
-                            if status_label else ""
-                        )
-                        st.markdown(
-                            f'<div style="background:#f0f9ff; padding:6px 10px; '
-                            f'margin:4px 0; border-left:3px solid #0ea5e9; font-size:13px;">'
-                            f'<strong>{s["employee"]}</strong>{status_html}: {escape(str(s["note_excerpt"]))}'
-                            f'</div>',
-                            unsafe_allow_html=True,
-                        )
-
-        # 未提出詳細
-        with detail_col2:
-            st.markdown("##### ⏳ 未提出（要催促）")
-            if not submission_status["not_submitted"]:
-                st.success("全員提出済みです 🎉")
-            else:
-                pending_html = ""
-                for name in submission_status["not_submitted"]:
-                    pending_html += (
-                        f'<div style="background:#fef2f2; padding:6px 10px; '
-                        f'margin:3px 0; border-left:3px solid #ef4444; '
-                        f'font-size:14px; font-weight:bold; color:#991b1b;">'
-                        f'⏳ {name}</div>'
-                    )
-                st.markdown(pending_html, unsafe_allow_html=True)
-
-                # 催促用テンプレ
-                st.markdown("---")
-                st.caption("📨 LINE送信用テンプレート（クリックでコピー可）:")
-                template = (
-                    f"【{int(target_month)}月分シフト希望提出のお願い】\n"
-                    f"恐れ入ります、まだ提出されていない方はお早めに提出をお願いいたします。\n"
-                    f"未提出: {', '.join(submission_status['not_submitted'])}"
-                )
-                st.code(template, language=None)
-
-        # 更新ボタン
-        if st.button("🔄 提出状況を更新", key="refresh_submissions"):
+        if st.button("提出状況を更新", key="refresh_submissions"):
             st.rerun()
-
-    with st.expander("🧾 本人提出希望の一覧（調整時の確認用）", expanded=summary["total_submitted"] > 0):
-        st.caption(
-            "×は本人が提出した絶対休みです。シフト作成・AI対話・手動調整でも勤務にしない前提で扱います。"
-        )
-        submitted_by_name = {
-            s["employee"]: s for s in submission_status["submitted"]
-        }
-        admin_leave_by_employee = admin_paid_leave_days_for_month(
-            int(target_year), int(target_month),
-        )
-        note_adjustments_by_employee = latest_note_adjustments_by_employee(
-            int(target_year), int(target_month),
-        )
-        monthly_custom_by_employee: dict[str, list[str]] = {}
-        for rule in active_monthly_custom_rules(rule_cfg, int(target_year), int(target_month)):
-            employee = getattr(rule, "employee", "") or ""
-            if not employee:
-                continue
-            if getattr(rule, "rule_type", "note") == "employee_store_count":
-                label = custom_monthly_rule_display_text(rule)
-            elif getattr(rule, "rule_type", "note") == "required_assignment":
-                label = custom_monthly_rule_display_text(rule)
-            else:
-                label = f"月別メモ: {rule.name}"
-            monthly_custom_by_employee.setdefault(employee, []).append(label)
-
-        request_rows = []
-        for emp_name in expected_employees:
-            s = submitted_by_name.get(emp_name)
-            if s:
-                submitted_leave = int(s.get("paid_leave_days", 0) or 0)
-                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
-                leave_label = f"{submitted_leave + admin_leave}日"
-                if admin_leave:
-                    leave_label += f"（管理者+{admin_leave}日）"
-                note_applied = []
-                if s.get("requested_work_days") is not None:
-                    from prototype.submission_loader import note_day_count_labels
-                    note_applied.extend(note_day_count_labels(
-                        s.get("requested_holiday_days"), submitted_leave or None,
-                        s["requested_work_days"],
-                    ))
-                elif s.get("requested_holiday_days"):
-                    if submitted_leave:
-                        note_applied.append(
-                            f"休み計{s['requested_holiday_days']}日"
-                            f"（うち有給{submitted_leave}日）"
-                        )
-                    else:
-                        note_applied.append(f"休み計{s['requested_holiday_days']}日")
-                if s.get("max_consecutive_work_days"):
-                    note_applied.append(f"{s['max_consecutive_work_days']}連勤まで")
-                if s.get("max_consecutive_off_days"):
-                    note_applied.append(f"{s['max_consecutive_off_days']}連休まで")
-                if s.get("preferred_consecutive_off_days"):
-                    note_applied.append(f"{s['preferred_consecutive_off_days']}連休を優先")
-                note_applied.extend(consecutive_count_label(rule) for rule in s.get("consecutive_count_rules", []))
-                note_applied.extend(s.get("work_request_group_labels", []))
-                note_applied.extend(
-                    label for label in s.get("note_auto_labels", [])
-                    if not str(label).startswith(("希望出勤日数:", "希望休日数:", "希望有給日数:"))
-                )
-                note_applied.extend(monthly_custom_by_employee.get(emp_name, []))
-                note_adjustment = note_adjustments_by_employee.get(emp_name)
-                if note_adjustment and note_adjustment.get("corrected_text"):
-                    note_applied.append(
-                        f"管理者補正({note_adjustment.get('status', '要確認')}): "
-                        f"{note_adjustment.get('corrected_text')}"
-                    )
-                note_applied = list(dict.fromkeys(note_applied))
-                request_rows.append({
-                    "氏名": emp_name,
-                    "状態": "提出済み",
-                    "× 休み希望（絶対）": format_day_list(s.get("off_request_days", [])),
-                    "△ できれば休み": format_day_list(s.get("flexible_off_days", [])),
-                    "出勤希望": format_day_list(s.get("work_request_days", [])),
-                    "有給": leave_label,
-                    "自由記載から反映": " / ".join(note_applied),
-                    "自由記載確認": " / ".join(s.get("note_review_labels", [])) or s.get("note_parse_status", ""),
-                    "備考": s.get("note", "") or s.get("note_excerpt", ""),
-                })
-            else:
-                admin_leave = int(admin_leave_by_employee.get(emp_name, 0) or 0)
-                request_rows.append({
-                    "氏名": emp_name,
-                    "状態": "未提出",
-                    "× 休み希望（絶対）": "",
-                    "△ できれば休み": "",
-                    "出勤希望": "",
-                    "有給": f"管理者+{admin_leave}日" if admin_leave else "",
-                    "自由記載から反映": " / ".join(monthly_custom_by_employee.get(emp_name, [])),
-                    "自由記載確認": "",
-                    "備考": "",
-                })
-        render_scrollable_request_table(request_rows)
-
-    st.markdown("---")
 
     st.markdown("---")
     st.markdown("## ⚙️ 2. 今月の条件を整える")
 
-    with st.expander("📅 月例外・営業モード（この月だけの特例）", expanded=False):
-        render_monthly_exceptions_panel()
+    if any(word in MONTHLY_EXCEPTIONS_RESTORE_STATUS for word in ("保留", "未保存", "失敗", "エラー")):
+        st.warning("月別設定の確認が必要です: " + MONTHLY_EXCEPTIONS_RESTORE_STATUS)
+        if st.button("月別設定の復元・初期追加を再試行", key="retry_monthly_boot_update"):
+            _restore_monthly_exceptions_on_boot.clear()
+            st.rerun()
 
-    # 月別設定ファイルで確定しているルールを明示する。
-    try:
-        from prototype.rules import active_code_managed_monthly_rules
-        _code_rules = active_code_managed_monthly_rules(
-            int(target_year), int(target_month),
+    with st.expander("基本ルール（全月共通）", expanded=False):
+        ledger_rows = [row for row in load_rule_ledger_v1().get("rules", [])
+                       if row.get("分類") != "月別例外"]
+        st.dataframe(ledger_rows, width="stretch", hide_index=True, height=350)
+        st.dataframe(build_numeric_ledger_rows_from_parameters(rule_cfg.parameters),
+                     width="stretch", hide_index=True)
+        st.dataframe(build_employee_suitability_rows_from_master(),
+                     width="stretch", hide_index=True)
+        st.caption("基本ルールを土台に、下の対象月だけの変更を重ねます。本人の×休みは優先します。")
+
+    with st.expander(f"{int(target_year)}年{int(target_month)}月だけの変更・追加", expanded=False):
+        from prototype.rules import active_monthly_exception_descriptions
+        monthly_descriptions = active_monthly_exception_descriptions(int(target_year), int(target_month))
+        monthly_descriptions.extend(
+            custom_monthly_rule_display_text(rule)
+            for rule in active_monthly_custom_rules(rule_cfg, int(target_year), int(target_month))
         )
-        if _code_rules:
-            st.info(
-                "🧩 **この月の確定ルールが有効です**"
-                "（生成と検証の両方に同じ内容を反映します）\n\n"
-                + "\n".join(f"- {t}" for t in _code_rules)
+        if monthly_descriptions:
+            st.markdown("**この月だけ変更している条件**")
+            for description in monthly_descriptions:
+                st.write("- " + description)
+        monthly_section = st.radio(
+            "設定する内容",
+            ["店舗区分・研修など", "日付指定・回数・メモ", "営業体制"],
+            horizontal=True, key="monthly_condition_section",
+        )
+        if monthly_section != "日付指定・回数・メモ":
+            render_monthly_exceptions_panel(
+                int(target_year), int(target_month), section=monthly_section,
             )
-    except Exception:
-        pass
-
-    with st.expander("📌 今月だけの特別ルール", expanded=False):
-        current_month_rules = active_monthly_store_count_rules(
-            rule_cfg, int(target_year), int(target_month),
-        )
-        current_required_assignment_rules = active_monthly_required_assignment_rules(
-            rule_cfg, int(target_year), int(target_month),
-        )
-        current_custom_rules = active_monthly_custom_rules(
-            rule_cfg, int(target_year), int(target_month),
-        )
-        st.caption(
-            "基本ルールは「設定 → ルール設定」と従業員マスタで管理しています。"
-            "ここには、その月だけの例外・研修・一時的な配置条件だけを表示します。"
-        )
-
-        display_rows = []
-        for rule in current_month_rules:
-            display_rows.append({
-                "種類": "システム月別例外" if rule.get("source") == "system" else "月別配置",
-                "内容": monthly_rule_display_text(rule),
-                "重要度": rule.get("severity", "WARNING"),
-            })
-        for rule in current_required_assignment_rules:
-            display_rows.append({
-                "種類": "日付指定配置",
-                "内容": monthly_rule_display_text(rule),
-                "重要度": rule.get("severity", "ERROR"),
-            })
-        for rule in current_custom_rules:
-            if getattr(rule, "rule_type", "note") in (
-                "employee_store_count",
-                "required_assignment",
-            ):
-                continue
-            display_rows.append({
-                "種類": "月別メモ",
-                "内容": f"{rule.name}: {rule.description}",
-                "重要度": rule.severity,
-            })
-        if display_rows:
-            st.dataframe(display_rows, width="stretch", hide_index=True)
         else:
-            st.caption("この月だけの追加ルールは未設定です。")
-
-        deletable_rules = [
-            rule for rule in current_custom_rules
-            if getattr(rule, "id", "")
-        ]
-        if deletable_rules:
-            with st.expander("追加済みルールを削除", expanded=False):
-                rule_labels = {
-                    rule.id: custom_monthly_rule_display_text(rule)
-                    for rule in deletable_rules
-                }
-                delete_rule_id = st.selectbox(
-                    "削除するルール",
-                    options=[rule.id for rule in deletable_rules],
-                    format_func=lambda rule_id: rule_labels.get(rule_id, rule_id),
-                    key=f"delete_monthly_rule_select_{int(target_year)}_{int(target_month)}",
-                )
-                st.caption(
-                    "削除すると、この月の生成・検証条件から外れます。"
-                    "提出データや作成済みシフトそのものは削除しません。"
-                )
-                if st.button(
-                    "選択した特別ルールを削除",
-                    key=f"delete_monthly_rule_button_{int(target_year)}_{int(target_month)}",
-                    type="secondary",
+            current_month_rules = active_monthly_store_count_rules(
+                rule_cfg, int(target_year), int(target_month),
+            )
+            current_required_assignment_rules = active_monthly_required_assignment_rules(
+                rule_cfg, int(target_year), int(target_month),
+            )
+            current_custom_rules = active_monthly_custom_rules(
+                rule_cfg, int(target_year), int(target_month),
+            )
+            st.caption(
+                "基本ルールは「設定 → ルール設定」と従業員マスタで管理しています。"
+                "ここには、その月だけの例外・研修・一時的な配置条件だけを表示します。"
+            )
+    
+            display_rows = []
+            for rule in current_month_rules:
+                display_rows.append({
+                    "種類": "システム月別例外" if rule.get("source") == "system" else "月別配置",
+                    "内容": monthly_rule_display_text(rule),
+                    "重要度": rule.get("severity", "WARNING"),
+                })
+            for rule in current_required_assignment_rules:
+                display_rows.append({
+                    "種類": "日付指定配置",
+                    "内容": monthly_rule_display_text(rule),
+                    "重要度": rule.get("severity", "ERROR"),
+                })
+            for rule in current_custom_rules:
+                if getattr(rule, "rule_type", "note") in (
+                    "employee_store_count",
+                    "required_assignment",
                 ):
-                    target_rule = next(
-                        (rule for rule in deletable_rules if rule.id == delete_rule_id),
-                        None,
+                    continue
+                display_rows.append({
+                    "種類": "月別メモ",
+                    "内容": f"{rule.name}: {rule.description}",
+                    "重要度": rule.severity,
+                })
+            if display_rows:
+                st.dataframe(display_rows, width="stretch", hide_index=True)
+            else:
+                st.caption("この月だけの追加ルールは未設定です。")
+    
+            deletable_rules = [
+                rule for rule in current_custom_rules
+                if getattr(rule, "id", "")
+            ]
+            if deletable_rules:
+                with st.expander("追加済みルールを削除", expanded=False):
+                    rule_labels = {
+                        rule.id: custom_monthly_rule_display_text(rule)
+                        for rule in deletable_rules
+                    }
+                    delete_rule_id = st.selectbox(
+                        "削除するルール",
+                        options=[rule.id for rule in deletable_rules],
+                        format_func=lambda rule_id: rule_labels.get(rule_id, rule_id),
+                        key=f"delete_monthly_rule_select_{int(target_year)}_{int(target_month)}",
                     )
-                    next_cfg = RuleConfig(
-                        enabled_checks=dict(rule_cfg.enabled_checks),
-                        parameters=dict(rule_cfg.parameters),
-                        custom_rules=[
-                            rule for rule in rule_cfg.custom_rules
-                            if getattr(rule, "id", "") != delete_rule_id
-                        ],
+                    st.caption(
+                        "削除すると、この月の生成・検証条件から外れます。"
+                        "提出データや作成済みシフトそのものは削除しません。"
                     )
-                    rule_mgr.save(
-                        next_cfg,
-                        actor="管理者",
-                        note=(
-                            f"{int(target_year)}年{int(target_month)}月の特別ルール削除"
-                            + (f": {target_rule.name}" if target_rule else "")
-                        ),
-                    )
-                    st.success("選択した特別ルールを削除しました。")
-                    st.rerun()
-
-        st.markdown("##### 特別ルールを追加")
-        rule_mode = st.radio(
-            "反映方法",
-            ["メモとして残す", "生成にも反映する（月内回数）", "生成にも反映する（日付指定配置）"],
-            horizontal=True,
-            key=f"quick_monthly_rule_mode_{int(target_year)}_{int(target_month)}",
-            help=(
-                "月内回数は「月に3回以上」など、日付指定配置は「4日は大宮駅前」などを"
-                "シフト計算に渡します。文章の細かい条件は備考として残ります。"
-            ),
-        )
-
-        with st.form(
-            f"quick_monthly_rule_form_{int(target_year)}_{int(target_month)}",
-            clear_on_submit=True,
-        ):
-            is_store_count_rule = rule_mode == "生成にも反映する（月内回数）"
-            is_required_assignment_rule = rule_mode == "生成にも反映する（日付指定配置）"
-            name_placeholder = (
-                "例: 春山さん4日大宮駅前"
-                if is_required_assignment_rule
-                else "例: 月内の応援回数"
+                    if st.button(
+                        "選択した特別ルールを削除",
+                        key=f"delete_monthly_rule_button_{int(target_year)}_{int(target_month)}",
+                        type="secondary",
+                    ):
+                        target_rule = next(
+                            (rule for rule in deletable_rules if rule.id == delete_rule_id),
+                            None,
+                        )
+                        next_cfg = RuleConfig(
+                            enabled_checks=dict(rule_cfg.enabled_checks),
+                            parameters=dict(rule_cfg.parameters),
+                            custom_rules=[
+                                rule for rule in rule_cfg.custom_rules
+                                if getattr(rule, "id", "") != delete_rule_id
+                            ],
+                        )
+                        rule_mgr.save(
+                            next_cfg,
+                            actor="管理者",
+                            note=(
+                                f"{int(target_year)}年{int(target_month)}月の特別ルール削除"
+                                + (f": {target_rule.name}" if target_rule else "")
+                            ),
+                        )
+                        st.success("選択した特別ルールを削除しました。")
+                        st.rerun()
+    
+            st.markdown("##### 特別ルールを追加")
+            rule_mode = st.radio(
+                "反映方法",
+                ["メモとして残す", "生成にも反映する（月内回数）", "生成にも反映する（日付指定配置）"],
+                horizontal=True,
+                key=f"quick_monthly_rule_mode_{int(target_year)}_{int(target_month)}",
+                help=(
+                    "月内回数は「月に3回以上」など、日付指定配置は「4日は大宮駅前」などを"
+                    "シフト計算に渡します。文章の細かい条件は備考として残ります。"
+                ),
             )
-            desc_placeholder = (
-                "例: 酒類小売販売研修のため、4日は春山さんを大宮駅前に固定する"
-                if is_required_assignment_rule
-                else "例: 指定スタッフを対象店舗に月1回以上入れる"
-            )
-            quick_rule_name = st.text_input(
-                "見出し",
-                placeholder=name_placeholder,
-            )
-            quick_rule_desc = st.text_area(
-                "内容",
-                placeholder=desc_placeholder,
-                height=80,
-            )
-            employee_options = ["指定なし"] + shift_submission_employee_names()
-            quick_employee = st.selectbox("対象スタッフ", employee_options)
-            quick_stores = []
-            quick_count = 0
-            quick_comparison = "min"
-            quick_day = 0
-            if is_store_count_rule:
-                store_options = [s.name for s in Store if s != Store.OFF]
-                store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
-                quick_stores = st.multiselect(
-                    "対象店舗",
-                    options=store_options,
-                    format_func=lambda name: store_labels.get(name, name),
+    
+            with st.form(
+                f"quick_monthly_rule_form_{int(target_year)}_{int(target_month)}",
+                clear_on_submit=True,
+            ):
+                is_store_count_rule = rule_mode == "生成にも反映する（月内回数）"
+                is_required_assignment_rule = rule_mode == "生成にも反映する（日付指定配置）"
+                name_placeholder = (
+                    "例: 春山さん4日大宮駅前"
+                    if is_required_assignment_rule
+                    else "例: 月内の応援回数"
                 )
-                comparison_label = st.selectbox(
-                    "条件",
-                    ["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
+                desc_placeholder = (
+                    "例: 酒類小売販売研修のため、4日は春山さんを大宮駅前に固定する"
+                    if is_required_assignment_rule
+                    else "例: 指定スタッフを対象店舗に月1回以上入れる"
                 )
-                quick_comparison = {
-                    "最低回数": "min",
-                    "最大回数": "max",
-                    "ちょうど回数": "exact",
-                    "配置禁止": "forbid",
-                }[comparison_label]
-                quick_count = int(st.number_input(
-                    "月内回数",
-                    min_value=0 if quick_comparison == "forbid" else 1,
-                    max_value=31,
-                    value=0 if quick_comparison == "forbid" else 3,
-                    disabled=quick_comparison == "forbid",
-                ))
-            elif is_required_assignment_rule:
-                store_options = [s.name for s in Store if s != Store.OFF]
-                store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
-                col_day, col_store = st.columns(2)
-                with col_day:
-                    quick_day = int(st.number_input(
-                        "日付",
-                        min_value=1,
-                        max_value=monthrange(int(target_year), int(target_month))[1],
-                        value=4,
-                    ))
-                with col_store:
-                    quick_store = st.selectbox(
-                        "配置店舗",
+                quick_rule_name = st.text_input(
+                    "見出し",
+                    placeholder=name_placeholder,
+                )
+                quick_rule_desc = st.text_area(
+                    "内容",
+                    placeholder=desc_placeholder,
+                    height=80,
+                )
+                employee_options = ["指定なし"] + shift_submission_employee_names()
+                quick_employee = st.selectbox("対象スタッフ", employee_options)
+                quick_stores = []
+                quick_count = 0
+                quick_comparison = "min"
+                quick_day = 0
+                if is_store_count_rule:
+                    store_options = [s.name for s in Store if s != Store.OFF]
+                    store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
+                    quick_stores = st.multiselect(
+                        "対象店舗",
                         options=store_options,
                         format_func=lambda name: store_labels.get(name, name),
                     )
-                quick_stores = [quick_store]
-                quick_count = 1
-                quick_comparison = "exact"
-                if quick_employee != "指定なし":
-                    st.caption(
-                        "登録される生成条件: "
-                        f"{quick_employee} / {int(quick_day)}日 / "
-                        f"{monthly_rule_store_label(quick_stores)}に配置"
+                    comparison_label = st.selectbox(
+                        "条件",
+                        ["最低回数", "最大回数", "ちょうど回数", "配置禁止"],
                     )
-            quick_severity = st.selectbox(
-                "重要度",
-                ["WARNING", "ERROR"],
-                index=1 if is_required_assignment_rule else 0,
-                help="ERRORは必ず守る条件、WARNINGはできるだけ守る条件です。",
-            )
-            submitted_quick_rule = st.form_submit_button("この月の特別ルールに追加")
-            if submitted_quick_rule:
-                missing_structured = (
-                    is_store_count_rule
-                    and (
-                        quick_employee == "指定なし"
-                        or not quick_stores
-                        or (quick_comparison != "forbid" and quick_count <= 0)
-                    )
-                )
-                missing_required_assignment = (
-                    is_required_assignment_rule
-                    and (
-                        quick_employee == "指定なし"
-                        or not quick_stores
-                        or quick_day <= 0
-                    )
-                )
-                if not quick_rule_name or (
-                    not quick_rule_desc
-                    and not (is_store_count_rule or is_required_assignment_rule)
-                ):
-                    st.error("見出しと内容を入力してください。")
-                elif missing_structured:
-                    st.error("生成にも反映する場合は、スタッフ・店舗・回数を入力してください。")
-                elif missing_required_assignment:
-                    st.error("日付指定配置の場合は、スタッフ・日付・店舗を入力してください。")
-                else:
-                    auto_desc = ""
-                    if is_required_assignment_rule:
-                        auto_desc = (
-                            f"{quick_employee}を{int(target_month)}/{int(quick_day)}に"
-                            f"{monthly_rule_store_label(quick_stores)}へ配置する。"
+                    quick_comparison = {
+                        "最低回数": "min",
+                        "最大回数": "max",
+                        "ちょうど回数": "exact",
+                        "配置禁止": "forbid",
+                    }[comparison_label]
+                    quick_count = int(st.number_input(
+                        "月内回数",
+                        min_value=0 if quick_comparison == "forbid" else 1,
+                        max_value=31,
+                        value=0 if quick_comparison == "forbid" else 3,
+                        disabled=quick_comparison == "forbid",
+                    ))
+                elif is_required_assignment_rule:
+                    store_options = [s.name for s in Store if s != Store.OFF]
+                    store_labels = {s.name: s.display_name for s in Store if s != Store.OFF}
+                    col_day, col_store = st.columns(2)
+                    with col_day:
+                        quick_day = int(st.number_input(
+                            "日付",
+                            min_value=1,
+                            max_value=monthrange(int(target_year), int(target_month))[1],
+                            value=4,
+                        ))
+                    with col_store:
+                        quick_store = st.selectbox(
+                            "配置店舗",
+                            options=store_options,
+                            format_func=lambda name: store_labels.get(name, name),
                         )
-                    elif is_store_count_rule:
-                        auto_desc = (
-                            f"{quick_employee}を{monthly_rule_store_label(quick_stores)}へ"
-                            f"{format_monthly_rule_condition({'count': quick_count, 'comparison': quick_comparison})}配置する。"
+                    quick_stores = [quick_store]
+                    quick_count = 1
+                    quick_comparison = "exact"
+                    if quick_employee != "指定なし":
+                        st.caption(
+                            "登録される生成条件: "
+                            f"{quick_employee} / {int(quick_day)}日 / "
+                            f"{monthly_rule_store_label(quick_stores)}に配置"
                         )
-                    new_rule = CustomRule(
-                        id=f"monthly_{now_jst().strftime('%Y%m%d%H%M%S')}",
-                        name=quick_rule_name,
-                        description=quick_rule_desc or auto_desc,
-                        enabled=True,
-                        severity=quick_severity,
-                        created_at=now_jst().isoformat(timespec="seconds"),
-                        created_by="管理者",
-                        target_year=int(target_year),
-                        target_month=int(target_month),
-                        rule_type=(
-                            "employee_store_count"
-                            if is_store_count_rule
-                            else "required_assignment"
-                            if is_required_assignment_rule
-                            else "note"
-                        ),
-                        employee="" if quick_employee == "指定なし" else quick_employee,
-                        stores=quick_stores,
-                        count=0 if quick_comparison == "forbid" else quick_count,
-                        comparison=quick_comparison,
-                        day=quick_day,
+                quick_severity = st.selectbox(
+                    "重要度",
+                    ["WARNING", "ERROR"],
+                    index=1 if is_required_assignment_rule else 0,
+                    help="ERRORは必ず守る条件、WARNINGはできるだけ守る条件です。",
+                )
+                submitted_quick_rule = st.form_submit_button("この月の特別ルールに追加")
+                if submitted_quick_rule:
+                    missing_structured = (
+                        is_store_count_rule
+                        and (
+                            quick_employee == "指定なし"
+                            or not quick_stores
+                            or (quick_comparison != "forbid" and quick_count <= 0)
+                        )
                     )
-                    next_cfg = RuleConfig(
-                        enabled_checks=dict(rule_cfg.enabled_checks),
-                        parameters=dict(rule_cfg.parameters),
-                        custom_rules=list(rule_cfg.custom_rules) + [new_rule],
+                    missing_required_assignment = (
+                        is_required_assignment_rule
+                        and (
+                            quick_employee == "指定なし"
+                            or not quick_stores
+                            or quick_day <= 0
+                        )
                     )
-                    rule_mgr.save(
-                        next_cfg,
-                        actor="管理者",
-                        note=f"{int(target_year)}年{int(target_month)}月の特別ルール追加",
-                    )
-                    st.success("この月の特別ルールに追加しました。")
-                    st.rerun()
+                    if not quick_rule_name or (
+                        not quick_rule_desc
+                        and not (is_store_count_rule or is_required_assignment_rule)
+                    ):
+                        st.error("見出しと内容を入力してください。")
+                    elif missing_structured:
+                        st.error("生成にも反映する場合は、スタッフ・店舗・回数を入力してください。")
+                    elif missing_required_assignment:
+                        st.error("日付指定配置の場合は、スタッフ・日付・店舗を入力してください。")
+                    else:
+                        auto_desc = ""
+                        if is_required_assignment_rule:
+                            auto_desc = (
+                                f"{quick_employee}を{int(target_month)}/{int(quick_day)}に"
+                                f"{monthly_rule_store_label(quick_stores)}へ配置する。"
+                            )
+                        elif is_store_count_rule:
+                            auto_desc = (
+                                f"{quick_employee}を{monthly_rule_store_label(quick_stores)}へ"
+                                f"{format_monthly_rule_condition({'count': quick_count, 'comparison': quick_comparison})}配置する。"
+                            )
+                        new_rule = CustomRule(
+                            id=f"monthly_{now_jst().strftime('%Y%m%d%H%M%S')}",
+                            name=quick_rule_name,
+                            description=quick_rule_desc or auto_desc,
+                            enabled=True,
+                            severity=quick_severity,
+                            created_at=now_jst().isoformat(timespec="seconds"),
+                            created_by="管理者",
+                            target_year=int(target_year),
+                            target_month=int(target_month),
+                            rule_type=(
+                                "employee_store_count"
+                                if is_store_count_rule
+                                else "required_assignment"
+                                if is_required_assignment_rule
+                                else "note"
+                            ),
+                            employee="" if quick_employee == "指定なし" else quick_employee,
+                            stores=quick_stores,
+                            count=0 if quick_comparison == "forbid" else quick_count,
+                            comparison=quick_comparison,
+                            day=quick_day,
+                        )
+                        next_cfg = RuleConfig(
+                            enabled_checks=dict(rule_cfg.enabled_checks),
+                            parameters=dict(rule_cfg.parameters),
+                            custom_rules=list(rule_cfg.custom_rules) + [new_rule],
+                        )
+                        rule_mgr.save(
+                            next_cfg,
+                            actor="管理者",
+                            note=f"{int(target_year)}年{int(target_month)}月の特別ルール追加",
+                        )
+                        st.success("この月の特別ルールに追加しました。")
+                        st.rerun()
+    
 
     st.markdown("---")
     st.markdown("## ✅ 3. 生成前チェック")
@@ -7022,10 +6694,10 @@ if mode == "📊 経営者ビュー":
                         data_source_msg += (
                             "\n📅 営業モード: 全日、通常体制で計算しました。"
                         )
-                    # 月別設定の確定ルールも生成メッセージに明示する
+                    # 固定ルールを月限定と誤表示せず、明示的な月別変更だけを表示する。
                     try:
                         from prototype.rules import (
-                            active_code_managed_monthly_rules as _acm_rules,
+                            active_monthly_exception_descriptions as _acm_rules,
                         )
                         for _cr_text in _acm_rules(
                             _saved_target_year, _saved_target_month,
@@ -7675,13 +7347,32 @@ if mode == "📊 経営者ビュー":
     # ============================================================
     # ロック・解除ダイアログ
     # ============================================================
-    if st.session_state.get("show_lock_dialog"):
+    if st.session_state.get("show_lock_dialog") and current_shift is not None:
         with st.form("lock_form", clear_on_submit=True):
             st.markdown("### 🔒 シフトを確定版としてロック")
             st.write(
                 f"**{int(target_year)}年{int(target_month)}月** のシフトを"
                 f"確定版として保存します。ロック中は再生成・編集が制限されます。"
             )
+            from prototype.paid_leave_sync import build_confirmation, CONFIRMATION_KEY, SyncError
+            _lock_preview_metadata = current_or_remembered_generation_metadata_for_month(
+                int(target_year), int(target_month),
+            )
+            _lock_leave_confirmation = None
+            try:
+                _lock_leave_confirmation = build_confirmation(
+                    int(target_year), int(target_month),
+                    (_lock_preview_metadata.get("input_summary") or {}).get("paid_leave_days"),
+                    shift_active_employees(), current_shift.assignments, now_jst(),
+                )
+                st.markdown("#### 確定版に保存する有給日数")
+                st.dataframe([
+                    {"氏名": row["employee_name"], "有給日数": row["paid_leave_days"]}
+                    for row in _lock_leave_confirmation["employees"]
+                ], hide_index=True, width="stretch")
+                st.caption("生成条件の有給日数です。ロック時には勤務表へ送信せず、月初連携の対象として保存します。")
+            except SyncError as exc:
+                st.warning(f"有給の月初連携は保留になります：{exc}")
             lock_note = st.text_input(
                 "メモ（任意）",
                 placeholder=f"例: {int(target_month)}月分 確定版（顧問承認済み）",
@@ -7700,6 +7391,10 @@ if mode == "📊 経営者ビュー":
                 _lock_metadata = current_or_remembered_generation_metadata_for_month(
                     _lock_year, _lock_month,
                 )
+                _lock_metadata = dict(_lock_metadata)
+                _lock_metadata.pop(CONFIRMATION_KEY, None)
+                if _lock_leave_confirmation is not None:
+                    _lock_metadata[CONFIRMATION_KEY] = _lock_leave_confirmation
                 snapshot_path = backup_mgr.save_shift(
                     current_shift, kind="finalized",
                     author=lock_author, note=lock_note,
@@ -10791,21 +10486,19 @@ elif mode == "⚙️ 設定":
             "本人が提出した希望有給と、管理者が後から付けた有給調整を合算して確認できます。"
         )
 
+        from prototype.paid_leave_sync_ui import render_paid_leave_sync_panel
+        render_paid_leave_sync_panel()
+
         # ============================================================
-        # 社労士提出用CSV（出勤簿システム連携）
+        # 参考用CSV（最新の申告・調整値。月初の確定値連携とは別）
         # ============================================================
-        with st.container(border=True):
-            st.markdown("#### 📤 社労士提出用CSV（出勤簿システム連携）")
+        with st.expander("参考用：現在の申告・調整値をCSVで確認", expanded=False):
             st.caption(
-                "その月の確定有給日数（本人申告＋管理者調整）を従業員別のCSVにします。"
-                "毎月、月が替わって最初にこのアプリが開かれた時点で自動保存され、"
-                "出勤簿システム（GAS）が定期的に取得してGoogleドライブへ配置します。"
-                "手動でのダウンロード・再保存もここからできます。"
+                "本人申告と管理者調整の現在値です。ロック済みの確定値や勤務表への連携済み日数とは異なる場合があります。"
             )
             from prototype.sharoushi_export import (
                 build_paid_leave_rows,
                 rows_to_csv_bytes,
-                paid_leave_csv_repo_path,
             )
             _csv_col1, _csv_col2 = st.columns([1, 2])
             with _csv_col1:
@@ -10848,44 +10541,13 @@ elif mode == "⚙️ 設定":
             else:
                 st.caption("この月の有給取得者はいません（0日でも全員分がCSVに含まれます）。")
 
-            _dl_col, _push_col = st.columns(2)
-            with _dl_col:
-                st.download_button(
-                    "⬇️ CSVをダウンロード",
-                    data=rows_to_csv_bytes(_csv_rows),
-                    file_name=f"paid_leave_{_csv_ym}.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
-            with _push_col:
-                if st.button(
-                    "☁️ 出勤簿連携用に保存（GitHub経由）",
-                    use_container_width=True,
-                    key="push_sharoushi_csv",
-                    help=(
-                        "GitHubバックアップに保存し、出勤簿システム（GAS）が"
-                        "取得できる状態にします。調整を追加した後の再保存にも使えます。"
-                    ),
-                ):
-                    from prototype.github_backup import push_export_to_github
-                    _push_ok, _push_msg = push_export_to_github(
-                        paid_leave_csv_repo_path(_csv_y, _csv_m),
-                        rows_to_csv_bytes(_csv_rows),
-                        f"Paid leave export {_csv_ym}",
-                    )
-                    if _push_ok:
-                        st.success(
-                            f"✅ {_csv_ym} の有給CSVを保存しました。"
-                            "出勤簿システムが次回の定期取得でGoogleドライブへ配置します。"
-                        )
-                    else:
-                        st.error(f"保存に失敗しました: {_push_msg}")
-            try:
-                st.caption(
-                    f"月初の自動保存: {st.session_state.get('paid_leave_auto_export_status', '未実行')}"
-                )
-            except Exception:
-                pass
+            st.download_button(
+                "⬇️ 参考用CSVをダウンロード",
+                data=rows_to_csv_bytes(_csv_rows),
+                file_name=f"paid_leave_reference_{_csv_ym}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
 
         with st.container(border=True):
             st.markdown("#### 管理者側で有給調整を追加")
@@ -11533,59 +11195,14 @@ elif mode == "⚙️ 設定":
                 """
             )
             try:
-                from prototype.rules import (
-                    active_code_managed_monthly_rules,
-                    monthly_avoid_same_off_rules,
-                    monthly_operation_mode_overrides,
-                )
+                from prototype.rules import active_monthly_exception_descriptions
 
-                _month_rule_rows = []
-                for _rule_text in active_code_managed_monthly_rules(
-                    _rule_view_year,
-                    _rule_view_month,
-                ):
-                    _month_rule_rows.append({
-                        "区分": "実行中の月別条件",
-                        "内容": _rule_text,
-                    })
-
-                for _first, _second, _reason in monthly_avoid_same_off_rules(
-                    _rule_view_year,
-                    _rule_view_month,
-                ):
-                    _month_rule_rows.append({
-                        "区分": "月別の強い目標",
-                        "内容": (
-                            f"{_first}・{_second}の同時休みをなるべく避ける"
-                            f"（{_reason or '理由未記入'}）"
-                        ),
-                    })
-
-                _boundary_allowances = monthly_carryover_consecutive_allowances(
-                    _rule_view_year,
-                    _rule_view_month,
-                )
-                for _employee_name, _extra_days in sorted(
-                    _boundary_allowances.items()
-                ):
-                    _month_rule_rows.append({
-                        "区分": "月境界だけの例外",
-                        "内容": (
-                            f"{_employee_name}: 前月末から続く連勤に限り"
-                            f"上限を{int(_extra_days)}日延長"
-                        ),
-                    })
-
-                for _day, _mode in sorted(
-                    monthly_operation_mode_overrides(
-                        _rule_view_year,
-                        _rule_view_month,
-                    ).items()
-                ):
-                    _month_rule_rows.append({
-                        "区分": "営業モード",
-                        "内容": f"{_rule_view_month}/{int(_day)}: {_mode.value}",
-                    })
+                _month_rule_rows = [
+                    {"区分": "対象月だけの変更・追加", "内容": text}
+                    for text in active_monthly_exception_descriptions(
+                        _rule_view_year, _rule_view_month,
+                    )
+                ]
 
                 for _custom_rule in active_monthly_custom_rules(
                     cfg,
