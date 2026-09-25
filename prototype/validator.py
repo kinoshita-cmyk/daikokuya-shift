@@ -11,6 +11,7 @@
 """
 
 from __future__ import annotations
+from .conditional_store import conditional_store_mismatches
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from calendar import monthrange
@@ -287,6 +288,7 @@ def validate(
     preferred_work_requests: Optional[list] = None,
     preferred_work_groups: Optional[list] = None,
     consecutive_count_rules: Optional[list[dict]] = None,
+    conditional_store_requests: Optional[list] = None,
 ) -> ValidationResult:
     """
     シフトを検証して問題リストを返す。
@@ -392,6 +394,7 @@ def validate(
 
     # 11. 出勤希望チェック
     _check_work_requests(shift, result, work_requests, off_requests)
+    _check_conditional_store_requests(shift, result, conditional_store_requests, off_requests)
 
     # 12. 大宮アンカースタッフ（春山・下地）チェック
     _check_omiya_anchor(shift, result, days_in_month)
@@ -1441,6 +1444,15 @@ def _check_mandatory_work_on_request(
                 f"候補日のうち{required}日以上の出勤希望に対し、"
                 f"実績{worked_count}日です"
             ),
+        ))
+
+
+def _check_conditional_store_requests(shift, result, requests, off_requests):
+    for name, day, preferred, actual in conditional_store_mismatches(shift, requests, off_requests):
+        result.issues.append(Issue(
+            severity="INFO", category="出勤時の希望店舗不一致", day=day, employee=name,
+            message=f"出勤する場合は{preferred.display_name}希望、実配置は{actual.display_name}です。"
+                    "出勤自体を指定した条件ではありません。",
         ))
 
 

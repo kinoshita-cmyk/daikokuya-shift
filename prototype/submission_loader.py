@@ -30,6 +30,7 @@ class SubmissionData:
     off_requests: dict[str, list[int]] = field(default_factory=dict)
     work_requests: list[tuple] = field(default_factory=list)
     preferred_work_requests: list[tuple] = field(default_factory=list)
+    conditional_store_requests: list[tuple] = field(default_factory=list)
     preferred_work_groups: list[tuple[str, list[int], int, Optional[Store]]] = field(default_factory=list)
     flexible_off: list[tuple] = field(default_factory=list)
     natural_language_notes: dict[str, str] = field(default_factory=dict)
@@ -140,6 +141,7 @@ class ParsedNaturalLanguageNote:
 
     off_requests: list[int] = field(default_factory=list)
     work_requests: list[tuple[int, Optional[Store]]] = field(default_factory=list)
+    conditional_store_requests: list[tuple[int, Store]] = field(default_factory=list)
     work_groups: list[tuple[list[int], int, Optional[Store]]] = field(default_factory=list)
     flexible_off: list[tuple[list[int], int]] = field(default_factory=list)
     paid_leave_days: Optional[int] = None
@@ -157,6 +159,7 @@ class ParsedNaturalLanguageNote:
         return bool(
             self.off_requests
             or self.work_requests
+            or self.conditional_store_requests
             or self.work_groups
             or self.flexible_off
             or self.paid_leave_days is not None
@@ -521,6 +524,12 @@ def _extract_work_group_from_sentence(
     return [(candidates, required, _extract_store_from_text(normalized))]
 
 
+_CONDITIONAL_WORK_PATTERN = re.compile(
+    r"(?:出勤|勤務)(?:の|する|になる|になった|となった|となる)?"
+    r"(?:場合|とき|時|なら|であれば)(?:には|は|に)?"
+)
+
+
 def parse_natural_language_note(
     note: str,
     target_year: int,
@@ -629,7 +638,32 @@ def parse_natural_language_note(
         # 「連休がほしい」のように日数指定がない場合は、最低限の2連休希望として扱う。
         result.preferred_consecutive_off_days = 2
 
+    previous_choice_days = []
     for sentence in sentences:
+        choice_days = _extract_choice_days_from_sentence(sentence, days_in_month)
+        conditional = _CONDITIONAL_WORK_PATTERN.search(sentence)
+        if conditional:
+            prefix = sentence[:conditional.start()]
+            has_off_clause = bool(re.search(r"休み|休日|休暇", prefix))
+            store_clause = sentence[conditional.end():] if has_off_clause else sentence
+            work_days = _extract_work_days_from_sentence(store_clause, target_month, days_in_month)
+            if not work_days and not re.search(r"\d", store_clause):
+                work_days = choice_days or previous_choice_days
+            store = _extract_store_from_text(store_clause)
+            stores_mentioned = {
+                _extract_store_from_text(part)
+                for part in re.findall(r"赤羽東口|大宮西口|大宮駅前|赤羽駅前|東口|西口|すずらん|大宮|赤羽", store_clause)
+            }
+            ambiguous = bool(re.search(r"以外|希望しな|不可|未定|できな|しません", store_clause))
+            if work_days and store and len(stores_mentioned) == 1 and not ambiguous:
+                result.conditional_store_requests.extend((day, store) for day in work_days)
+            else:
+                result.review_messages.append("出勤する場合の店舗希望の日付・店舗を確認してください。")
+            # 候補休みは残すが、この文から通常の出勤希望を作らない。
+            sentence = prefix if has_off_clause else ""
+        previous_choice_days = choice_days
+        if not sentence.strip():
+            continue
         for flex in _extract_flexible_off_from_sentence(sentence, days_in_month):
             result.flexible_off.append(flex)
 
@@ -715,6 +749,18 @@ def parse_natural_language_note(
         if day not in by_day or by_day[day] is None:
             by_day[day] = store
     result.work_requests = sorted(by_day.items())
+    result.conditional_store_requests = sorted(
+        set(result.conditional_store_requests), key=lambda item: (item[0], item[1].name),
+    )
+    by_conditional_day = {}
+    for day, store in result.conditional_store_requests:
+        by_conditional_day.setdefault(day, set()).add(store)
+    conflicting_days = {day for day, stores in by_conditional_day.items() if len(stores) > 1}
+    if conflicting_days:
+        result.review_messages.append("同じ日の出勤時店舗希望が複数あります。管理者が確認してください。")
+        result.conditional_store_requests = [
+            item for item in result.conditional_store_requests if item[0] not in conflicting_days
+        ]
     return result
 
 
@@ -755,6 +801,12 @@ def _apply_parsed_note_to_submission_data(
             if key not in existing_summary_work:
                 summary["work_requests"].append({"day": key[0], "store": key[1]})
                 existing_summary_work.add(key)
+
+        conditional_summary = summary.setdefault("conditional_store_requests", [])
+        for day, store in parsed_note.conditional_store_requests:
+            # 確認済み補正で同日の店舗を指定し直した場合は補正側を採用する。
+            conditional_summary[:] = [item for item in conditional_summary if item["day"] != day]
+            conditional_summary.append({"day": day, "store": store.name})
 
         existing_summary_groups = {
             (
@@ -819,6 +871,12 @@ def _apply_parsed_note_to_submission_data(
         data.off_requests[author] = sorted(existing_off)
 
     only_on_request = _is_only_on_request_employee(author)
+    for day, store in parsed_note.conditional_store_requests:
+        data.conditional_store_requests = [
+            item for item in data.conditional_store_requests if item[:2] != (author, day)
+        ]
+        if day not in data.off_requests.get(author, []):
+            data.conditional_store_requests.append((author, day, store))
     existing_preferred_work_days = {
         (emp, day, store) for emp, day, store in data.preferred_work_requests
     }
@@ -909,8 +967,15 @@ def _exclude_off_days_from_note_work(data: SubmissionData) -> None:
         (employee, day, store) for employee, day, store in data.preferred_work_requests
         if day not in data.off_requests.get(employee, [])
     ]
+    data.conditional_store_requests = [
+        item for item in data.conditional_store_requests
+        if item[1] not in data.off_requests.get(item[0], [])
+    ]
     for employee, summary in data.parsed_note_summaries.items():
         off_days = set(data.off_requests.get(employee, []))
+        summary["conditional_store_requests"] = [
+            item for item in summary.get("conditional_store_requests", []) if item["day"] not in off_days
+        ]
         blocked = sorted({item["day"] for item in summary.get("work_requests", []) if item["day"] in off_days})
         if blocked:
             summary["blocked_work_days"] = blocked
@@ -1064,101 +1129,8 @@ def load_submissions_for_month(
             # 2026年4月の大塚さんは「13日出勤・3連勤NG」と同時に
             # 3連休もNGという運用。旧提出文に3連休NGが抜けていても補完する。
             parsed_note.max_consecutive_off_days = 2
-        if parsed_note.has_constraints or parsed_note.ignored_optional_work_days:
-            data.parsed_note_summaries[author] = {
-                "off_requests": list(parsed_note.off_requests),
-                "work_requests": [
-                    {"day": day, "store": store.name if store else None}
-                    for day, store in parsed_note.work_requests
-                ],
-                "work_groups": [
-                    {
-                        "candidate_days": list(candidate_days),
-                        "required_count": required_count,
-                        "store": store.name if store else None,
-                    }
-                    for candidate_days, required_count, store in parsed_note.work_groups
-                ],
-                "flexible_off": [
-                    {"candidate_days": days, "n_required": n}
-                    for days, n in parsed_note.flexible_off
-                ],
-                "paid_leave_days": parsed_note.paid_leave_days,
-                "requested_holiday_days": parsed_note.requested_holiday_days,
-                "requested_work_days": parsed_note.requested_work_days,
-                "max_consecutive_work_days": parsed_note.max_consecutive_work_days,
-                "max_consecutive_off_days": parsed_note.max_consecutive_off_days,
-                "preferred_consecutive_off_days": parsed_note.preferred_consecutive_off_days,
-                "ignored_optional_work_days": list(parsed_note.ignored_optional_work_days),
-            }
-
-        if parsed_note.off_requests:
-            existing_off = set(data.off_requests.get(author, []))
-            existing_off.update(parsed_note.off_requests)
-            data.off_requests[author] = sorted(existing_off)
-
+        _apply_parsed_note_to_submission_data(data, author, parsed_note)
         only_on_request = _is_only_on_request_employee(author)
-        existing_preferred_work_days = {
-            (emp, day, store) for emp, day, store in data.preferred_work_requests
-        }
-        for day, store in parsed_note.work_requests:
-            item = (author, day, store)
-            if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
-                data.preferred_work_requests.append(item)
-                existing_preferred_work_days.add(item)
-        for day in parsed_note.ignored_optional_work_days:
-            if not only_on_request:
-                continue
-            item = (author, day, None)
-            if day not in set(data.off_requests.get(author, [])) and item not in existing_preferred_work_days:
-                data.preferred_work_requests.append(item)
-                existing_preferred_work_days.add(item)
-        existing_work_groups = {
-            (emp, tuple(candidate_days), required_count, store)
-            for emp, candidate_days, required_count, store in data.preferred_work_groups
-        }
-        for candidate_days, required_count, store in parsed_note.work_groups:
-            filtered_candidates = [
-                day for day in candidate_days
-                if day not in set(data.off_requests.get(author, []))
-            ]
-            if not filtered_candidates:
-                continue
-            item = (
-                author,
-                sorted(set(filtered_candidates)),
-                min(int(required_count), len(set(filtered_candidates))),
-                store,
-            )
-            key = (item[0], tuple(item[1]), item[2], item[3])
-            if key not in existing_work_groups:
-                data.preferred_work_groups.append(item)
-                existing_work_groups.add(key)
-
-        for candidate_days, n_required in parsed_note.flexible_off:
-            data.flexible_off.append((author, candidate_days, n_required))
-
-        if parsed_note.paid_leave_days is not None:
-            data.paid_leave_days[author] = max(
-                int(data.paid_leave_days.get(author, 0) or 0),
-                int(parsed_note.paid_leave_days),
-            )
-
-        if parsed_note.requested_holiday_days is not None:
-            data.requested_holiday_days[author] = int(parsed_note.requested_holiday_days)
-
-        if parsed_note.max_consecutive_work_days is not None:
-            data.max_consecutive_work_days[author] = int(parsed_note.max_consecutive_work_days)
-
-        if parsed_note.max_consecutive_off_days is not None:
-            data.max_consecutive_off_days[author] = int(parsed_note.max_consecutive_off_days)
-
-        if parsed_note.preferred_consecutive_off_days is not None:
-            data.preferred_consecutive_off.append(
-                (author, int(parsed_note.preferred_consecutive_off_days))
-            )
-
-        _apply_consecutive_counts(data, author, parsed_note)
 
         if only_on_request:
             # 旧データでは「○」の日を work_requests に保存していなかった。

@@ -21,6 +21,7 @@ OR-Tools の CP-SAT ソルバーを使い、希望データから最適なシフ
 """
 
 from __future__ import annotations
+from .conditional_store import normalize_conditional_store_requests, conditional_store_penalties
 from calendar import monthrange
 from datetime import date
 from typing import Optional
@@ -327,6 +328,7 @@ def generate_shift(
     disable_month_edge_rules: bool = False,
     status_out: Optional[dict] = None,
     consecutive_count_rules: Optional[list[dict]] = None,
+    conditional_store_requests: Optional[list[tuple[str, int, Store]]] = None,
 ) -> Optional[MonthlyShift]:
     """
     Args:
@@ -348,6 +350,9 @@ def generate_shift(
     employee_max_consecutive_off = employee_max_consecutive_off or {}
     preferred_work_requests = preferred_work_requests or []
     preferred_work_groups = preferred_work_groups or []
+    conditional_store_requests = normalize_conditional_store_requests(
+        conditional_store_requests, year, month, off_requests,
+    )
     preferred_consecutive_off = preferred_consecutive_off or []
     consecutive_count_rules = consecutive_count_rules or []
     monthly_store_count_rules = monthly_store_count_rules or []
@@ -1442,6 +1447,10 @@ def generate_shift(
             preferred_work_terms.append(store_weight * x[name][d][store])
         else:
             preferred_work_terms.append(no_store_weight * any_work)
+
+    preferred_work_terms.extend(
+        -term for term in conditional_store_penalties(x, conditional_store_requests, main_stores)
+    )
 
     # 「3日か29日のいずれか1日は出勤したい」のような自由記載は、
     # 候補のうち指定回数分だけ満たせるように優先する。

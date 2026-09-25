@@ -117,6 +117,7 @@ def _validation_kwargs(context: Optional[dict], max_consec: int) -> dict:
     return {
         "work_requests": ctx.get("work_requests", []),
         "preferred_work_requests": ctx.get("preferred_work_requests", []),
+        "conditional_store_requests": ctx.get("conditional_store_requests", []),
         "preferred_work_groups": ctx.get("preferred_work_groups", []),
         "off_requests": ctx.get("off_requests", {}),
         "prev_month": ctx.get("prev_month", []),

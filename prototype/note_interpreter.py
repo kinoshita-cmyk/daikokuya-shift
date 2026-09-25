@@ -7,7 +7,7 @@ from calendar import monthrange
 from dataclasses import asdict, dataclass
 
 from .models import Store
-from .submission_loader import ParsedNaturalLanguageNote, parse_natural_language_note
+from .submission_loader import ParsedNaturalLanguageNote, parse_natural_language_note, _CONDITIONAL_WORK_PATTERN
 
 
 LOGGER = logging.getLogger(__name__)
@@ -15,7 +15,7 @@ STORES = {s.name: s for s in Store if s != Store.OFF}
 KINDS = (
     "off_dates", "work_dates", "choice_off", "choice_work", "paid_leave_days",
     "holiday_days", "work_day_count", "max_work_streak", "max_off_streak",
-    "preferred_off_streak", "work_streak_count", "off_streak_count",
+    "preferred_off_streak", "work_streak_count", "off_streak_count", "conditional_store",
 )
 CONDITION_PROPERTIES = {
     "kind": {"type": "string", "enum": list(KINDS)},
@@ -47,6 +47,8 @@ SYSTEM_PROMPT = """あなたはシフト希望の翻訳・整理係です。決�
 希望休以外にあと2日、などの追加日数も合計休日2日に変換しないでください。
 「二連休憩不可」は誤字として2連休不可と読む場合も、その訂正をreview_messagesで説明してください。
 「1.2.3.4日全て出勤」は1,2,3,4日のwork_dates。「どれか1日」はchoiceであり全日指定ではありません。
+「5か6どちらか休み希望 出勤の場合5.6は赤羽希望」はchoice_offとconditional_storeです。
+「出勤する場合は赤羽希望」は出勤を希望する条件ではありません。work_datesに変換しないでください。
 「月12日勤務」「合計12日勤務」「12日間、出勤でお願い致します」はwork_day_count(value=12)。
 月内の出勤日数はholiday_daysへ換算せず、work_day_countのまま返してください。
 「12日は出勤」は日付のwork_dates(days=[12])です。日数に有給を勝手に加減しないでください。
@@ -54,6 +56,7 @@ SYSTEM_PROMPT = """あなたはシフト希望の翻訳・整理係です。決�
 各条件のevidenceは入力textからの完全一致引用。推測した根拠を捏造しないでください。
 conditionsの仕様:
 off_dates/work_dates: daysに具体日、storeはworkのみ、value/length/comparisonはnull。
+conditional_store: daysに具体日、storeは必須、value/length/comparisonはnull。出勤時だけの店舗希望。
 choice_off/choice_work: daysは候補、valueは必要日数、storeはworkのみ、length/comparisonはnull。
 paid_leave_days/holiday_days/work_day_count: valueは月内日数、daysは空、他はnull。
 max_work_streak/max_off_streak/preferred_off_streak: valueは連続日数、daysは空、他はnull。
@@ -102,6 +105,8 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
         if not isinstance(quote, str) or not quote.strip() or quote not in text:
             raise ValueError("原文にない根拠が含まれるため、AIの案を採用できません。")
         evidence.append(quote)
+        if kind in {"work_dates", "choice_work"} and _CONDITIONAL_WORK_PATTERN.search(quote):
+            raise ValueError("出勤する場合の店舗希望が、出勤希望に変わっています。AIの案は採用できません。")
         days = item["days"]
         if not isinstance(days, list) or len(days) > days_in_month:
             raise ValueError("日付の形式が正しくありません。")
@@ -114,12 +119,17 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
         value, length, comparison = item["value"], item["length"], item["comparison"]
         if comparison is not None and not isinstance(comparison, str):
             raise ValueError("回数の比較方法が正しくありません。")
-        if kind in {"off_dates", "work_dates", "choice_off", "choice_work"}:
+        if kind in {"off_dates", "work_dates", "choice_off", "choice_work", "conditional_store"}:
             if not days or length is not None or comparison is not None:
                 raise ValueError("日付指定の形式が正しくありません。")
             if kind in {"off_dates", "choice_off"} and store is not None:
                 raise ValueError("休日に店舗指定はできません。")
-            if kind.endswith("dates"):
+            if kind == "conditional_store":
+                if store is None or value is not None:
+                    raise ValueError("出勤する場合の店舗希望には店舗を指定してください。")
+                expected.conditional_store_requests.extend((d, store) for d in days)
+                lines.extend(f"{d}日は出勤する場合は{store_text}希望。" for d in days)
+            elif kind.endswith("dates"):
                 if value is not None:
                     raise ValueError("全日指定と回数指定が混在しています。")
                 if kind == "off_dates":
@@ -174,6 +184,9 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
             lines.append(line)
     expected.off_requests = sorted(set(expected.off_requests))
     expected.work_requests = sorted(set(expected.work_requests), key=lambda x: x[0])
+    expected.conditional_store_requests = sorted(
+        set(expected.conditional_store_requests), key=lambda item: (item[0], item[1].name),
+    )
     if set(expected.off_requests) & {d for d, _ in expected.work_requests}:
         raise ValueError("同じ日が休みと出勤に指定されています。原文の確認が必要です。")
     if expected.requested_holiday_days is not None and expected.requested_holiday_days < max(

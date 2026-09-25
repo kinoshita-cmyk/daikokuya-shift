@@ -510,6 +510,7 @@ class ShiftChatEngine:
         return validate(
             shift=shift,
             work_requests=self.validation_inputs.get("work_requests", []),
+            conditional_store_requests=self.validation_inputs.get("conditional_store_requests", []),
             preferred_work_requests=self.validation_inputs.get(
                 "preferred_work_requests", []
             ),
