@@ -101,7 +101,7 @@ ECO_STAFF: list[Employee] = [
     ),
     Employee(
         name="春山",
-        full_name="春山廣直",
+        full_name="春山廣植",
         employee_id="010",
         skill=Skill.ECO,
         is_eco_core=True,

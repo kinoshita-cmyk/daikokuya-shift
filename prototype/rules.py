@@ -157,7 +157,8 @@ EMPLOYEE_TARGET_NAME_ALIASES: dict[str, str] = {
     "長尾暁洋": "長尾",
     "楯有史": "楯",
     "春山廣植": "春山",
-    "春山廣直": "春山",
+    "春山廣直": "春山",  # 過去データの読み込み互換
+    "春山廣植": "春山",
     "牧野怜偉": "牧野",
     "鈴木真美": "鈴木",
     "野澤絵美": "野澤",
@@ -822,29 +823,30 @@ def yamamoto_monthly_max_consecutive(year: int, month: int) -> int:
     )
 
 
-def active_code_managed_monthly_rules(year: int, month: int) -> list:
-    """設定ファイルで管理している月限定ルールの説明文を返す。"""
+def active_code_managed_monthly_rules(year: int, month: int, *, include_fixed: bool = True) -> list:
+    """既存の生成結果説明用。固定ルールと月別条件を含む（互換用）。"""
     notes = []
-    notes.append(
-        f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
-    )
-    notes.append("固定の強い目標: " + CLOSE_LONG_WORK_DESCRIPTION)
-    notes.append("固定の強い目標: " + IMAZU_MONDAY_DESCRIPTION)
-    notes.append("固定の強い目標: " + IMAZU_WEEKEND_DESCRIPTION)
-    if is_omiya_two_person_allowed_month(year, month):
+    if include_fixed:
         notes.append(
-            "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"
-            "（通常はエコ対応1名以上・合計3名体制を優先）"
+            f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
         )
-    notes.append(
-        "固定絶対条件: 大宮駅前の終日2名体制には大塚・南を含めない"
-        "（両名を配置する場合は合計3名以上）"
-    )
-    notes.append(
-        "固定絶対条件: 月初固定勤務者（"
-        + "・".join(MONTH_EDGE_FIXED_EMPLOYEES)
-        + f"）は月末最大{MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF}連勤"
-    )
+        notes.append("固定の強い目標: " + CLOSE_LONG_WORK_DESCRIPTION)
+        notes.append("固定の強い目標: " + IMAZU_MONDAY_DESCRIPTION)
+        notes.append("固定の強い目標: " + IMAZU_WEEKEND_DESCRIPTION)
+        if is_omiya_two_person_allowed_month(year, month):
+            notes.append(
+                "固定ルール: 大宮駅前はエコ対応1名以上・合計2名体制を許容"
+                "（通常はエコ対応1名以上・合計3名体制を優先）"
+            )
+        notes.append(
+            "固定絶対条件: 大宮駅前の終日2名体制には大塚・南を含めない"
+            "（両名を配置する場合は合計3名以上）"
+        )
+        notes.append(
+            "固定絶対条件: 月初固定勤務者（"
+            + "・".join(MONTH_EDGE_FIXED_EMPLOYEES)
+            + f"）は月末最大{MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF}連勤"
+        )
     tanaka_rule = tanaka_pair_training_rule(year, month)
     if tanaka_rule:
         training_employee = str(tanaka_rule.get("employee") or "対象者")
@@ -920,13 +922,29 @@ def active_code_managed_monthly_rules(year: int, month: int) -> list:
             f"{employee_name}さん: {'、'.join(parts)}"
             "（外した店舗も緊急時の手動配置は禁止しない）"
         )
-    policy = yamamoto_monthly_policy(year, month)
-    notes.append(
-        "山本さん: 赤羽で通常スタッフだけでは不足する日に限り自動投入。"
-        f"月間上限{policy['max_days']}日、"
-        f"連続{policy['max_consecutive']}日まで。"
-        "追加勤務は完成後に手動調整"
-    )
+    if include_fixed or (int(year), int(month)) in MONTHLY_YAMAMOTO_POLICIES:
+        policy = yamamoto_monthly_policy(year, month)
+        notes.append(
+            "山本さん: 赤羽で通常スタッフだけでは不足する日に限り自動投入。"
+            f"月間上限{policy['max_days']}日、"
+            f"連続{policy['max_consecutive']}日まで。"
+            "追加勤務は完成後に手動調整"
+        )
+    return notes
+
+
+def active_monthly_exception_descriptions(year: int, month: int) -> list[str]:
+    """管理画面用。その月に明示設定された例外だけを列挙する。"""
+    ym = (int(year), int(month))
+    notes = active_code_managed_monthly_rules(year, month, include_fixed=False)
+    if ym in OMIYA_ANCHOR_RELAXED_MONTHS:
+        notes.append("大宮駅前の春山・下地どちらか必須の条件を、この月だけ緩和")
+    for name, days in monthly_carryover_consecutive_allowances(year, month).items():
+        notes.append(f"{name}: 月境界だけ連勤上限を{days}日延長（月内上限は変更なし）")
+    for first, second, reason in monthly_avoid_same_off_rules(year, month):
+        notes.append(f"{first}・{second}: 同時休みをできるだけ回避" + (f"（{reason}）" if reason else ""))
+    for day, mode in sorted(monthly_operation_mode_overrides(year, month).items()):
+        notes.append(f"{day}日: 営業体制を{mode.value}に変更")
     return notes
 
 # 月内の最低巡回条件。
