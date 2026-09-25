@@ -2255,6 +2255,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
         return {
             "work_requests": [],
             "preferred_work_requests": [],
+            "conditional_store_requests": [],
             "preferred_work_groups": [],
             "off_requests": {},
             "prev_month": [],
@@ -2272,6 +2273,7 @@ def get_validation_context_for_shift(shift: MonthlyShift) -> dict:
     return {
         "work_requests": inputs.get("work_requests", []),
         "preferred_work_requests": inputs.get("preferred_work_requests", []),
+        "conditional_store_requests": inputs.get("conditional_store_requests", []),
         "preferred_work_groups": inputs.get("preferred_work_groups", []),
         "off_requests": inputs.get("off_requests", {}),
         "prev_month": inputs.get("prev_month", []),
@@ -2400,6 +2402,7 @@ def restore_validation_context_for_month(
         "off_requests": off_requests,
         "work_requests": work_requests,
         "preferred_work_requests": preferred_work_requests,
+        "conditional_store_requests": list(getattr(sub_data, "conditional_store_requests", [])),
         "preferred_work_groups": preferred_work_groups,
         "prev_month": list(carryover_result.carryover),
         "holiday_overrides": holiday_overrides,
@@ -2640,6 +2643,9 @@ def summarize_natural_language_note_for_review(
                 f"候補出勤: {_day_list_label(candidate_days)} のうち "
                 f"{int(required_count)}日出勤{store_text}"
             )
+
+    from prototype.conditional_store import conditional_store_labels
+    auto_labels.extend(conditional_store_labels(parsed_note.conditional_store_requests))
 
     from prototype.submission_loader import note_day_count_labels
     auto_labels.extend(note_day_count_labels(
@@ -2977,6 +2983,11 @@ def parsed_note_summary_to_labels(summary: dict) -> list[str]:
         )
     if work_parts:
         labels.append("出勤希望: " + "、".join(work_parts))
+
+    from prototype.conditional_store import conditional_store_labels
+    labels.extend(conditional_store_labels([
+        (item["day"], item["store"]) for item in summary.get("conditional_store_requests", [])
+    ]))
 
     for item in summary.get("work_groups") or []:
         if not isinstance(item, dict):
@@ -5855,6 +5866,10 @@ if mode == "📊 経営者ビュー":
                         f"- 自由記載の選択式出勤希望: "
                         f"{_isum.get('preferred_work_groups_count', 0)}件"
                     )
+                    st.write(
+                        f"- 出勤する場合の店舗希望（出勤指定なし）: "
+                        f"{_isum.get('conditional_store_requests_count', 0)}件"
+                    )
                     st.write(f"- 柔軟休み: {_isum.get('flexible_off_count', 0)}件")
             if _last_gen.get("error_detail"):
                 with st.expander("🔧 技術者向け: 例外スタックトレース", expanded=False):
@@ -6492,6 +6507,7 @@ if mode == "📊 経営者ビュー":
                             and d not in set(use_off_requests.get(emp, []))
                         ]
                         use_preferred_work_groups = []
+                        use_conditional_store_requests = list(sub_data.conditional_store_requests)
                         for emp, candidate_days, required_count, store in getattr(
                             sub_data, "preferred_work_groups", []
                         ):
@@ -6603,6 +6619,7 @@ if mode == "📊 経営者ビュー":
                         # 2026年5月のテストデータ（PREVIOUS_MONTH_CARRYOVER は5月用）
                         use_off_requests = OFF_REQUESTS
                         use_work_requests = WORK_REQUESTS
+                        use_conditional_store_requests = []
                         use_preferred_work_requests = []
                         use_preferred_work_groups = []
                         use_flexible_off = FLEXIBLE_OFF_REQUESTS
@@ -6621,6 +6638,7 @@ if mode == "📊 経営者ビュー":
                         # 提出ゼロ + 5月以外: 制約なしで生成（誰でも自由配置）
                         use_off_requests = {}
                         use_work_requests = []
+                        use_conditional_store_requests = []
                         use_preferred_work_requests = []
                         use_preferred_work_groups = []
                         use_flexible_off = []
@@ -6742,6 +6760,7 @@ if mode == "📊 経営者ビュー":
                         "consecutive_count_rules": use_consecutive_count_rules,
                     }
                     generator_params = inspect.signature(generate_shift).parameters
+                    generation_kwargs["conditional_store_requests"] = use_conditional_store_requests
                     if "preferred_work_requests" in generator_params:
                         generation_kwargs["preferred_work_requests"] = use_preferred_work_requests
                     if "preferred_work_groups" in generator_params:
@@ -6803,6 +6822,7 @@ if mode == "📊 経営者ビュー":
                                 "preferred_work_requests": list(
                                     use_preferred_work_requests
                                 ),
+                                "conditional_store_requests": list(use_conditional_store_requests),
                                 "preferred_work_groups": list(
                                     use_preferred_work_groups
                                 ),
@@ -6890,6 +6910,7 @@ if mode == "📊 経営者ビュー":
                             shift=shift,
                             work_requests=list(use_work_requests),
                             preferred_work_requests=list(use_preferred_work_requests),
+                            conditional_store_requests=list(use_conditional_store_requests),
                             preferred_work_groups=list(use_preferred_work_groups),
                             off_requests=use_off_requests,
                             prev_month=use_prev_month,
@@ -7067,6 +7088,7 @@ if mode == "📊 経営者ビュー":
                     },
                     "work_requests_count": len(use_work_requests),
                     "preferred_work_requests_count": len(use_preferred_work_requests),
+                    "conditional_store_requests_count": len(use_conditional_store_requests),
                     "preferred_work_groups_count": len(use_preferred_work_groups),
                     "flexible_off_count": len(use_flexible_off),
                     "holiday_overrides": dict(use_holiday_overrides),
@@ -7154,6 +7176,7 @@ if mode == "📊 経営者ビュー":
                         "off_requests": dict(use_off_requests),
                         "work_requests": list(use_work_requests),
                         "preferred_work_requests": list(use_preferred_work_requests),
+                        "conditional_store_requests": list(use_conditional_store_requests),
                         "preferred_work_groups": list(use_preferred_work_groups),
                         "prev_month": list(use_prev_month),
                         "holiday_overrides": dict(use_holiday_overrides),
@@ -7755,6 +7778,7 @@ if mode == "📊 経営者ビュー":
                     shift=inline_display_shift,
                     work_requests=_table_validation_context.get("work_requests", []),
                     preferred_work_requests=_table_validation_context.get("preferred_work_requests", []),
+                    conditional_store_requests=_table_validation_context.get("conditional_store_requests", []),
                     preferred_work_groups=_table_validation_context.get("preferred_work_groups", []),
                     off_requests=_table_validation_context.get("off_requests", {}),
                     prev_month=_table_validation_context.get("prev_month", []),
@@ -8103,6 +8127,7 @@ if mode == "📊 経営者ビュー":
                 shift=edited_shift,
                 work_requests=validation_context.get("work_requests", []),
                 preferred_work_requests=validation_context.get("preferred_work_requests", []),
+                conditional_store_requests=validation_context.get("conditional_store_requests", []),
                 preferred_work_groups=validation_context.get("preferred_work_groups", []),
                 off_requests=validation_context.get("off_requests", {}),
                 prev_month=validation_context.get("prev_month", []),
@@ -8308,6 +8333,7 @@ if mode == "📊 経営者ビュー":
             result = run_shift_validation(
                 shift=shift, work_requests=_v_work,
                 preferred_work_requests=_v_preferred_work,
+                conditional_store_requests=_validation_context.get("conditional_store_requests", []),
                 preferred_work_groups=_v_preferred_groups,
                 off_requests=_v_off, prev_month=_v_prev,
                 holiday_overrides=_v_holiday,
@@ -9291,6 +9317,7 @@ if mode == "📊 経営者ビュー":
                 chat_result = run_shift_validation(
                     shift=display_shift, work_requests=_cv_work,
                     preferred_work_requests=_cv_preferred_work,
+                    conditional_store_requests=_cv_inputs.get("conditional_store_requests", []) if _cv_match else [],
                     preferred_work_groups=_cv_preferred_groups,
                     off_requests=_cv_off, prev_month=_cv_prev,
                     holiday_overrides=_cv_holiday,
