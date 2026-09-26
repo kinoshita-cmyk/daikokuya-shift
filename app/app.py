@@ -4187,6 +4187,31 @@ def format_monthly_rule_condition(rule: dict) -> str:
 # 経営者ビュー
 # ============================================================
 
+def render_paid_leave_sync_settings_panel() -> None:
+    """連携用ファイルが未配置でも、ほかの設定は利用可能にする。"""
+    try:
+        from prototype.paid_leave_sync_ui import render_paid_leave_sync_panel
+    except ModuleNotFoundError as exc:
+        integration_files = {
+            "prototype.paid_leave_sync_ui": "prototype/paid_leave_sync_ui.py",
+            "prototype.paid_leave_sync": "prototype/paid_leave_sync.py",
+        }
+        if exc.name not in integration_files:
+            raise
+        missing_file = integration_files[exc.name]
+        print(f"[daikokuya-settings] paid leave sync unavailable: missing {missing_file}", flush=True)
+        st.warning(
+            "勤務表への有給連携は、必要なファイルが見つからないため利用できません。"
+            "ほかの設定と、この下の有給使用状況は引き続き確認できます。"
+            f" 不足ファイル: `{missing_file}`。"
+            " GitHubの `prototype` フォルダに `paid_leave_sync_ui.py` と"
+            " `paid_leave_sync.py` の両方があることを確認し、"
+            "不足分をアップロードしてStreamlitを再起動してください。"
+        )
+        return
+    render_paid_leave_sync_panel()
+
+
 def render_monthly_exceptions_panel(year=None, month=None, section=None) -> None:
     """月例外（店舗区分・研修・連勤・同時休み等）の管理パネル。
 
@@ -8627,7 +8652,7 @@ if mode == "📊 経営者ビュー":
                     "飛び石と山本の機械的な再調整は、キーなしでも利用できます。"
             )
             if available_ai_providers:
-                from prototype.shift_chat import ShiftChatEngine
+                from prototype.shift_chat import ShiftChatEngine, format_chat_error
                 from prototype.shift_readjuster import (
                     build_readjustment_quality_snapshot,
                     compare_readjustment_quality,
@@ -9276,6 +9301,7 @@ if mode == "📊 経営者ビュー":
                             st.rerun()
                     with btn_clear:
                         if st.button("会話をクリア", key="chat_clear", width="stretch"):
+                            chat_engine.reset_conversation()
                             st.session_state.chat_messages = []
                             st.rerun()
 
@@ -9544,11 +9570,7 @@ if mode == "📊 経営者ビュー":
                             try:
                                 response = chat_engine.chat(prompt)
                             except Exception as chat_err:
-                                response = (
-                                    "AI対話中にエラーが発生しました。"
-                                    "APIキーの設定、利用上限、または通信状態を確認してください。\n\n"
-                                    f"詳細: {type(chat_err).__name__}: {chat_err}"
-                                )
+                                response = format_chat_error(chat_err)
                         st.session_state.chat_messages.append({"role": "assistant", "content": response})
                         st.rerun()
 
@@ -10513,8 +10535,7 @@ elif mode == "⚙️ 設定":
             "本人が提出した希望有給と、管理者が後から付けた有給調整を合算して確認できます。"
         )
 
-        from prototype.paid_leave_sync_ui import render_paid_leave_sync_panel
-        render_paid_leave_sync_panel()
+        render_paid_leave_sync_settings_panel()
 
         # ============================================================
         # 参考用CSV（最新の申告・調整値。月初の確定値連携とは別）
