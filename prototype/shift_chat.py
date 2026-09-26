@@ -21,6 +21,7 @@ AI対話によるシフト微調整
 
 from __future__ import annotations
 import json
+import logging
 import os
 from calendar import monthrange
 from dataclasses import dataclass
@@ -50,6 +51,32 @@ from .shift_readjuster import (
 from .validator import validate
 from .rules import STORE_STAFFING_LIMITS, IMAZU_MONDAY_DESCRIPTION, IMAZU_WEEKEND_DESCRIPTION
 from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+
+
+logger = logging.getLogger(__name__)
+
+
+def _is_openai_tool_history_error(error: Exception) -> bool:
+    return (
+        getattr(error, "status_code", None) == 400
+        and "no tool output found for function call" in str(error).lower()
+    )
+
+
+def format_chat_error(error: Exception) -> str:
+    if _is_openai_tool_history_error(error):
+        return (
+            "AIの会話履歴と処理結果の対応が崩れたため、対話を中断しました。"
+            "APIキーの変更や追加課金で解決するエラーではありません。\n\n"
+            "作成済みのプレビューを確認したうえで、「会話をクリア」を押し、"
+            "対象日・対象者・変更内容を具体的に書いて再送してください。"
+            "会話のクリアでは、本シフト・プレビュー・戻る／進むの履歴は消えません。"
+        )
+    return (
+        "AI対話中にエラーが発生しました。"
+        "APIキーの設定、利用上限、または通信状態を確認してください。\n\n"
+        f"詳細: {type(error).__name__}: {error}"
+    )
 
 
 SYSTEM_PROMPT = """\
@@ -343,6 +370,11 @@ class ShiftChatEngine:
         self.max_consec = max_consec
 
     # ========== 内部ヘルパ ==========
+
+    def reset_conversation(self) -> None:
+        """会話だけを初期化し、シフト・プレビュー・変更履歴は維持する。"""
+        self.message_history.clear()
+        self.openai_previous_response_id = None
 
     def _clone_shift(self, shift: MonthlyShift) -> MonthlyShift:
         """シフトを履歴保存用にコピーする。"""
@@ -1100,17 +1132,49 @@ class ShiftChatEngine:
 
     def _chat_openai(self, user_message: str, max_iterations: int) -> str:
         """OpenAI Responses API function-calling loop."""
+        max_iterations = max(0, int(max_iterations))
         request: dict = {
             "model": self.model,
             "instructions": SYSTEM_PROMPT,
             "input": user_message,
             "tools": _openai_tools(),
         }
+        if max_iterations == 0:
+            request["tool_choice"] = "none"
         if self.openai_previous_response_id:
             request["previous_response_id"] = self.openai_previous_response_id
 
-        response = self.client.responses.create(**request)
-        for _ in range(max_iterations):
+        recovery_notice = ""
+        try:
+            response = self.client.responses.create(**request)
+        except Exception as exc:
+            if not (request.get("previous_response_id") and _is_openai_tool_history_error(exc)):
+                raise
+            # このターンのツールはまだ未実行。壊れた旧履歴だけを外して1回再送する。
+            self.openai_previous_response_id = None
+            request.pop("previous_response_id")
+            request["instructions"] += (
+                "\n前の会話は引き継がれていません。現在のシフトとプレビューをツールで確認し、"
+                "今回の依頼だけを扱ってください。以前の案や口頭条件を推測せず、"
+                "『それでお願い』など内容が不明な場合は具体的な指示を確認してください。"
+            )
+            logger.warning("openai_tool_history_recovery phase=turn_start retry=1")
+            recovery_notice = (
+                "AIの会話接続をリセットして再開しました。本シフト・プレビュー・変更履歴は"
+                "維持していますが、以前の会話内容は引き継いでいません。\n\n"
+            )
+            response = self.client.responses.create(**request)
+
+        # 最後のツール結果への返答も確認してから、次の会話に渡すIDを保存する。
+        for iteration in range(max_iterations + 1):
+            if getattr(response, "status", "completed") != "completed":
+                self.openai_previous_response_id = None
+                logger.warning("openai_response_not_completed")
+                return recovery_notice + (
+                    "AIの回答が途中で終了しました。調整は完了していません。"
+                    "作成済みのプレビューは維持しています。内容を確認し、"
+                    "対象日・対象者・希望を具体的に書いて再送してください。"
+                )
             tool_calls = [
                 item for item in getattr(response, "output", [])
                 if getattr(item, "type", None) == "function_call"
@@ -1118,34 +1182,61 @@ class ShiftChatEngine:
             if not tool_calls:
                 self.openai_previous_response_id = getattr(response, "id", None)
                 output_text = str(getattr(response, "output_text", "") or "").strip()
-                return output_text or "内容を確認しました。追加の条件を教えてください。"
+                return recovery_notice + (output_text or "内容を確認しました。追加の条件を教えてください。")
+
+            if iteration == max_iterations:
+                # tool_choice=none に反して呼出しが残っても、そのIDを次ターンに使わない。
+                self.openai_previous_response_id = None
+                logger.warning("openai_tool_iteration_limit limit=%s pending_calls=%s",
+                               max_iterations, len(tool_calls))
+                return recovery_notice + (
+                    "AIの処理回数が上限に達したため中断しました。調整は完了していません。"
+                    "本シフト・作成済みプレビュー・変更履歴は維持しています。"
+                    "未完了の会話接続をリセットしたため、内容を確認したうえで"
+                    "対象日・対象者・希望を具体的に書いて再送してください。"
+                )
 
             tool_outputs = []
             for tool_call in tool_calls:
                 raw_arguments = getattr(tool_call, "arguments", "{}") or "{}"
                 try:
                     arguments = json.loads(raw_arguments)
-                except (TypeError, json.JSONDecodeError):
-                    arguments = {}
-                result = self._execute_tool(
-                    str(getattr(tool_call, "name", "")), arguments
-                )
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool arguments must be an object")
+                except (TypeError, ValueError):
+                    result = "ツール入力エラー: 引数をJSONオブジェクトで指定してください。処理は実行していません。"
+                else:
+                    result = self._execute_tool(
+                        str(getattr(tool_call, "name", "")), arguments
+                    )
                 tool_outputs.append({
                     "type": "function_call_output",
                     "call_id": str(getattr(tool_call, "call_id", "")),
                     "output": result,
                 })
 
-            response = self.client.responses.create(
-                model=self.model,
-                instructions=SYSTEM_PROMPT,
-                previous_response_id=response.id,
-                input=tool_outputs,
-                tools=_openai_tools(),
-            )
-
-        self.openai_previous_response_id = getattr(response, "id", None)
-        return "（応答生成中にツール呼び出しが多すぎました）"
+            followup = {
+                "model": self.model,
+                "instructions": request["instructions"],
+                "previous_response_id": response.id,
+                "input": tool_outputs,
+                "tools": _openai_tools(),
+            }
+            if iteration == max_iterations - 1:
+                followup["tool_choice"] = "none"
+                followup["instructions"] += (
+                    "\nこの依頼の処理回数の上限です。追加ツールを呼ばず、"
+                    "実際に確認・変更できた内容だけをまとめてください。"
+                    "未検証・未完了の内容はその旨を明示し、成功したと断定しないでください。"
+                )
+            try:
+                response = self.client.responses.create(**followup)
+            except Exception as exc:
+                if _is_openai_tool_history_error(exc):
+                    self.openai_previous_response_id = None
+                    logger.warning("openai_tool_history_error phase=tool_result auto_retry=0")
+                # プレビュー変更を二重実行しない。途中の失敗は再実行せず画面へ返す。
+                raise
 
     def chat(self, user_message: str, max_iterations: int = 10) -> str:
         """ユーザーメッセージに応答（ツール呼び出しを含む）。"""

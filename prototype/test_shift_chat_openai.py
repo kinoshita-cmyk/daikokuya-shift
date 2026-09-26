@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import ast
 import json
+from dataclasses import asdict
+from pathlib import Path
+from textwrap import dedent
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -10,6 +14,7 @@ from prototype.shift_chat import (
     PendingSafetyReport,
     PendingShiftChange,
     ShiftChatEngine,
+    format_chat_error,
 )
 from prototype.validator import Issue, ValidationResult
 
@@ -50,7 +55,42 @@ class _ScriptedResponses:
 
     def create(self, **kwargs):
         self.calls.append(kwargs)
-        return self.responses.pop(0)
+        result = self.responses.pop(0)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+
+class _APIError(Exception):
+    def __init__(self, status_code, message):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _ToolLoopResponses:
+    """Reject a user message linked to unanswered calls, like the API."""
+    def __init__(self, ignore_tool_choice=False):
+        self.calls = []
+        self.outputs = {}
+        self.ignore_tool_choice = ignore_tool_choice
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        previous = kwargs.get("previous_response_id")
+        waiting = self.outputs.get(previous, [])
+        if waiting:
+            supplied = kwargs["input"]
+            ids = {item["call_id"] for item in supplied} if isinstance(supplied, list) else set()
+            if ids != {call.call_id for call in waiting}:
+                raise _APIError(400, f"No tool output found for function call {waiting[0].call_id}.")
+        response_id = f"response-{len(self.calls)}"
+        output = [] if kwargs.get("tool_choice") == "none" and not self.ignore_tool_choice else [
+            SimpleNamespace(type="function_call", name="validate_current",
+                            arguments="{}", call_id=f"call-{len(self.calls)}")
+        ]
+        self.outputs[response_id] = output
+        return SimpleNamespace(id=response_id, output=output,
+                               output_text="確認結果です。" if not output else "")
 
 
 class ShiftChatOpenAITest(unittest.TestCase):
@@ -87,6 +127,222 @@ class ShiftChatOpenAITest(unittest.TestCase):
             fake_client.responses.calls[1]["input"][0]["type"],
             "function_call_output",
         )
+
+    def test_iteration_limit_does_not_poison_the_next_message(self) -> None:
+        engine, client = self._engine()
+        client.responses = _ToolLoopResponses()
+        with patch.object(engine, "_execute_tool", return_value="検証OK") as execute:
+            first = engine.chat("確認して", max_iterations=1)
+            second = engine.chat("もう一度確認して", max_iterations=1)
+        self.assertEqual(first, "確認結果です。")
+        self.assertEqual(second, "確認結果です。")
+        self.assertEqual(execute.call_count, 2)
+        self.assertEqual(client.responses.calls[1]["tool_choice"], "none")
+        self.assertEqual(client.responses.calls[2]["previous_response_id"], "response-2")
+        self.assertEqual(engine.openai_previous_response_id, "response-4")
+
+    @staticmethod
+    def _response(response_id="done", calls=(), status="completed"):
+        return SimpleNamespace(id=response_id, status=status, output=[
+            SimpleNamespace(type="function_call", name="validate_current", arguments="{}", call_id=call_id)
+            for call_id in calls
+        ], output_text="確認結果です。" if not calls else "")
+
+    def test_limit_ignoring_response_is_not_reused_or_executed(self) -> None:
+        engine, client = self._engine()
+        client.responses = _ToolLoopResponses(ignore_tool_choice=True)
+        with patch.object(engine, "_execute_tool", return_value="検証OK") as execute:
+            result = engine.chat("確認して", max_iterations=1)
+        self.assertIn("上限", result)
+        self.assertIsNone(engine.openai_previous_response_id)
+        execute.assert_called_once()
+        self.assertEqual(len(client.responses.calls), 2)
+        client.responses.ignore_tool_choice = False
+        with patch.object(engine, "_execute_tool", return_value="検証OK"):
+            self.assertEqual(engine.chat("確認して", max_iterations=1), "確認結果です。")
+        self.assertNotIn("previous_response_id", client.responses.calls[2])
+
+    def test_zero_iterations_never_executes_tools(self) -> None:
+        engine, client = self._engine()
+        client.responses = _ToolLoopResponses()
+        with patch.object(engine, "_execute_tool") as execute:
+            self.assertEqual(engine.chat("確認して", max_iterations=0), "確認結果です。")
+        execute.assert_not_called()
+        self.assertEqual(len(client.responses.calls), 1)
+        self.assertEqual(engine.openai_previous_response_id, "response-1")
+
+    def test_final_round_sends_all_parallel_tool_outputs(self) -> None:
+        engine, client = self._engine()
+        client.responses = _ScriptedResponses([
+            self._response("tools", ("call-a", "call-b")), self._response(),
+        ])
+        with patch.object(engine, "_execute_tool", side_effect=["結果A", "結果B"]) as execute:
+            self.assertEqual(engine.chat("確認して", max_iterations=1), "確認結果です。")
+        self.assertEqual(execute.call_count, 2)
+        submitted = client.responses.calls[1]
+        self.assertEqual(submitted["previous_response_id"], "tools")
+        self.assertEqual(submitted["tool_choice"], "none")
+        self.assertEqual(submitted["input"], [
+            {"type": "function_call_output", "call_id": "call-a", "output": "結果A"},
+            {"type": "function_call_output", "call_id": "call-b", "output": "結果B"},
+        ])
+        self.assertEqual(engine.openai_previous_response_id, "done")
+
+    def test_old_broken_history_recovers_once_without_changing_schedule_state(self) -> None:
+        engine, client = self._engine()
+        engine.openai_previous_response_id = "old-unanswered"
+        engine.pending_changes.append(PendingShiftChange("山本", 1, None))
+        engine.undo_stack.append(("undo", engine._clone_shift(engine.shift)))
+        engine.redo_stack.append(("redo", engine._clone_shift(engine.shift)))
+        engine.redo_preview_active = True
+        engine.validation_inputs = {"off_requests": {"山本": [2]}}
+        before = (asdict(engine.shift), list(engine.pending_changes), list(engine.undo_stack),
+                  list(engine.redo_stack), engine.validation_inputs.copy())
+        client.responses = _ScriptedResponses([
+            _APIError(400, "No tool output found for function call call-old."),
+            self._response("recovered"),
+        ])
+        with patch.object(engine, "_execute_tool") as execute:
+            result = engine.chat("10月25日の配属を確認して")
+        self.assertIn("リセットして再開", result)
+        self.assertIn("以前の会話内容は引き継いでいません", result)
+        self.assertEqual(client.responses.calls[0]["previous_response_id"], "old-unanswered")
+        self.assertNotIn("previous_response_id", client.responses.calls[1])
+        self.assertEqual(client.responses.calls[1]["input"], "10月25日の配属を確認して")
+        self.assertIn("以前の案や口頭条件を推測せず", client.responses.calls[1]["instructions"])
+        self.assertEqual(engine.openai_previous_response_id, "recovered")
+        self.assertEqual(before, (asdict(engine.shift), engine.pending_changes, engine.undo_stack,
+                                 engine.redo_stack, engine.validation_inputs))
+        self.assertTrue(engine.redo_preview_active)
+        execute.assert_not_called()
+
+    def test_broken_history_retry_is_bounded(self) -> None:
+        engine, client = self._engine()
+        engine.openai_previous_response_id = "old-unanswered"
+        failure = _APIError(400, "No tool output found for function call call-old.")
+        client.responses = _ScriptedResponses([failure, failure])
+        with self.assertRaises(_APIError):
+            engine.chat("確認して")
+        self.assertEqual(len(client.responses.calls), 2)
+        self.assertIsNone(engine.openai_previous_response_id)
+
+    def test_unrelated_api_errors_are_not_retried_or_clear_history(self) -> None:
+        for status, message in [(401, "invalid key"), (429, "insufficient_quota"),
+                                (400, "unsupported model"), (500, "server error")]:
+            with self.subTest(status=status):
+                engine, client = self._engine()
+                engine.openai_previous_response_id = "complete"
+                client.responses = _ScriptedResponses([_APIError(status, message)])
+                with self.assertRaises(_APIError):
+                    engine.chat("確認して")
+                self.assertEqual(len(client.responses.calls), 1)
+                self.assertEqual(engine.openai_previous_response_id, "complete")
+
+    def test_failed_tool_result_submission_does_not_reexecute_changes(self) -> None:
+        for failure in [_APIError(400, "No tool output found for function call call-a."),
+                        TimeoutError("connection failed")]:
+            with self.subTest(failure=type(failure).__name__):
+                engine, client = self._engine()
+                client.responses = _ScriptedResponses([
+                    self._response("tools", ("call-a",)), failure,
+                ])
+                before = asdict(engine.shift)
+
+                def make_preview(*_):
+                    engine.pending_changes.append(PendingShiftChange("山本", 1, None))
+                    return "プレビューを作成しました"
+
+                with patch.object(engine, "_execute_tool", side_effect=make_preview) as execute:
+                    with self.assertRaises(type(failure)):
+                        engine.chat("変更して")
+                self.assertEqual(execute.call_count, 1)
+                self.assertEqual(len(client.responses.calls), 2)
+                self.assertEqual(asdict(engine.shift), before)
+                self.assertEqual(engine.get_pending_change_count(), 1)
+                self.assertIsNone(engine.openai_previous_response_id)
+
+    def test_malformed_arguments_return_output_without_executing(self) -> None:
+        for raw in ["{broken", "[]", "null", '"text"']:
+            with self.subTest(raw=raw):
+                engine, client = self._engine()
+                response = self._response("tools", ("call-a",))
+                response.output[0].arguments = raw
+                client.responses = _ScriptedResponses([response, self._response()])
+                with patch.object(engine, "_execute_tool") as execute:
+                    engine.chat("確認して")
+                execute.assert_not_called()
+                output = client.responses.calls[1]["input"][0]
+                self.assertEqual(output["call_id"], "call-a")
+                self.assertIn("処理は実行していません", output["output"])
+
+    def test_incomplete_response_is_not_saved_or_executed(self) -> None:
+        for calls in [(), ("partial-call",)]:
+            with self.subTest(calls=calls):
+                engine, client = self._engine()
+                client.responses = _ScriptedResponses([self._response("partial", calls, "incomplete")])
+                with patch.object(engine, "_execute_tool") as execute:
+                    result = engine.chat("確認して")
+                self.assertIn("途中で終了", result)
+                self.assertIsNone(engine.openai_previous_response_id)
+                execute.assert_not_called()
+
+    def test_reset_conversation_keeps_preview_undo_and_rules(self) -> None:
+        engine, _ = self._engine()
+        engine.message_history = [{"role": "user", "content": "過去の会話"}]
+        engine.openai_previous_response_id = "old"
+        engine.pending_changes.append(PendingShiftChange("山本", 1, None))
+        engine.undo_stack.append(("undo", engine._clone_shift(engine.shift)))
+        engine.redo_stack.append(("redo", engine._clone_shift(engine.shift)))
+        engine.validation_inputs = {"off_requests": {"山本": [2]}}
+        before = (asdict(engine.shift), list(engine.pending_changes), list(engine.undo_stack),
+                  list(engine.redo_stack), engine.validation_inputs.copy())
+        engine.reset_conversation()
+        self.assertEqual(engine.message_history, [])
+        self.assertIsNone(engine.openai_previous_response_id)
+        self.assertEqual(before, (asdict(engine.shift), engine.pending_changes, engine.undo_stack,
+                                 engine.redo_stack, engine.validation_inputs))
+
+    def test_history_error_has_actionable_message_not_key_or_credit_advice(self) -> None:
+        error = _APIError(400, "No tool output found for function call call-sensitive.")
+        message = format_chat_error(error)
+        self.assertIn("会話をクリア", message)
+        self.assertIn("追加課金で解決するエラーではありません", message)
+        self.assertNotIn("call-sensitive", message)
+        self.assertIn("利用上限", format_chat_error(_APIError(429, "quota")))
+
+    def test_clear_button_resets_internal_conversation_but_keeps_work(self) -> None:
+        from streamlit.testing.v1 import AppTest
+        source = (Path(__file__).resolve().parents[1] / "app" / "app.py").read_text(encoding="utf-8")
+        button = next(n for n in ast.walk(ast.parse(source)) if isinstance(n, ast.If)
+                      and isinstance(n.test, ast.Call)
+                      and any(k.arg == "key" and isinstance(k.value, ast.Constant)
+                              and k.value.value == "chat_clear" for k in n.test.keywords))
+        app = AppTest.from_string('''
+import streamlit as st
+from prototype.shift_chat import ShiftChatEngine, PendingShiftChange
+from prototype.models import MonthlyShift, ShiftAssignment, Store
+if "chat_engine" not in st.session_state:
+    engine = ShiftChatEngine(MonthlyShift(2026, 10, assignments=[ShiftAssignment("山本", 1, Store.AKABANE)]), provider="local")
+    engine.openai_previous_response_id = "unanswered"
+    engine.message_history = [{"role": "user", "content": "以前の会話"}]
+    engine.pending_changes = [PendingShiftChange("山本", 1, None)]
+    engine.undo_stack = [("undo", engine._clone_shift(engine.shift))]
+    st.session_state.chat_engine = engine
+    st.session_state.chat_messages = [{"role": "user", "content": "以前の会話"}]
+    st.session_state.chat_quality_guard = {"protected": "unchanged"}
+chat_engine = st.session_state.chat_engine
+''' + dedent(ast.get_source_segment(source, button))).run()
+        self.assertEqual(len(app.exception), 0)
+        app.button(key="chat_clear").click().run()
+        self.assertEqual(len(app.exception), 0)
+        engine = app.session_state.chat_engine
+        self.assertIsNone(engine.openai_previous_response_id)
+        self.assertEqual(engine.message_history, [])
+        self.assertEqual(app.session_state.chat_messages, [])
+        self.assertEqual(engine.get_pending_change_count(), 1)
+        self.assertEqual(len(engine.undo_stack), 1)
+        self.assertEqual(engine.shift.get_assignment("山本", 1).store, Store.AKABANE)
+        self.assertEqual(app.session_state.chat_quality_guard, {"protected": "unchanged"})
 
     def test_pending_none_store_removes_assignment_only_after_apply(self) -> None:
         engine, _ = self._engine()
