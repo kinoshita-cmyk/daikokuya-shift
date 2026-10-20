@@ -12853,3 +12853,15 @@ elif mode == "⚙️ 設定":
                 )
         else:
             st.info("ロックされているシフトはありません")
+
+# 閲覧ページの更新は生成・保存とは独立。未設定や公開先障害でも本体は継続する。
+if mode in ("📊 経営者ビュー", "⚙️ 設定"):
+    @st.fragment(run_every=60)
+    def _render_rule_book_publication():
+        try:
+            from prototype.rule_book_sync import render_sync_panel
+            render_sync_panel()
+        except Exception as exc:
+            print(f"[rule-book] panel unavailable: {type(exc).__name__}", flush=True)
+            st.warning("条件ブックの接続を確認できません。シフト操作には影響しません。")
+    _render_rule_book_publication()
