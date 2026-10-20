@@ -97,7 +97,7 @@
       "notes": "主担当: すずらん。通常対応可: 赤羽・大宮。絶対配置不可: 東口・西口。",
       "employment_status": "正社員",
       "hired_at": null,
-      "retired_at": null,
+      "retired_at": "2026-10-31",
       "status_changed_at": null,
       "constraint_check_excluded": false,
       "is_auxiliary": false,
