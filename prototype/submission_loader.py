@@ -67,10 +67,17 @@ def _store_from_name(name: Optional[str]) -> Optional[Store]:
     return None
 
 
-def _is_only_on_request_employee(name: str) -> bool:
+def _is_only_on_request_employee(name: str, *, sync_remote: bool = True) -> bool:
     """出勤希望日のみ稼働する従業員かどうかを従業員マスタから判定する。"""
     try:
-        from .employees import get_employee
+        from .employees import get_employee, ALL_EMPLOYEES
+
+        if not sync_remote:
+            path = CONFIG_DIR / "employees.json"
+            if path.exists():
+                entries = json.loads(path.read_text(encoding="utf-8")).get("employees", [])
+                return any(d.get("name") == name and d.get("only_on_request_days") for d in entries)
+            return any(e.name == name and e.only_on_request_days for e in ALL_EMPLOYEES)
 
         return bool(getattr(get_employee(name), "only_on_request_days", False))
     except Exception:
@@ -80,12 +87,13 @@ def _is_only_on_request_employee(name: str) -> bool:
 NOTE_ADJUSTMENT_FILE = CONFIG_DIR / "natural_language_adjustments.json"
 
 
-def _load_latest_note_adjustments(year: int, month: int) -> dict[str, dict]:
+def _load_latest_note_adjustments(year: int, month: int, *, sync_remote: bool = True) -> dict[str, dict]:
     """従業員ごとの最新の自由記載補正を読み込む。"""
     try:
         from .github_backup import sync_latest_config_from_github
 
-        sync_latest_config_from_github("natural_language_adjustments", CONFIG_DIR)
+        if sync_remote:
+            sync_latest_config_from_github("natural_language_adjustments", CONFIG_DIR)
     except Exception:
         pass
     if not NOTE_ADJUSTMENT_FILE.exists():
@@ -769,6 +777,7 @@ def _apply_parsed_note_to_submission_data(
     author: str,
     parsed_note: ParsedNaturalLanguageNote,
     source_label: str = "自由記載",
+    *, sync_remote: bool = True,
 ) -> None:
     """解析済みの自由記載/管理者補正を生成入力へ重ねる。"""
     if parsed_note.has_constraints or parsed_note.ignored_optional_work_days:
@@ -870,7 +879,7 @@ def _apply_parsed_note_to_submission_data(
         existing_off.update(parsed_note.off_requests)
         data.off_requests[author] = sorted(existing_off)
 
-    only_on_request = _is_only_on_request_employee(author)
+    only_on_request = _is_only_on_request_employee(author, sync_remote=sync_remote)
     for day, store in parsed_note.conditional_store_requests:
         data.conditional_store_requests = [
             item for item in data.conditional_store_requests if item[:2] != (author, day)
@@ -1004,6 +1013,7 @@ def preview_note_adjustment(original_note: str, adjustment: dict, year: int, mon
 def load_submissions_for_month(
     year: int, month: int,
     expected_employees: Optional[list[str]] = None,
+    *, sync_remote: bool = True,
 ) -> SubmissionData:
     """
     指定月の全提出データを読み込み、generator に渡せる形式に変換する。
@@ -1022,7 +1032,8 @@ def load_submissions_for_month(
     try:
         from .github_backup import sync_preferences_from_github
 
-        sync_preferences_from_github(year, month, BACKUP_DIR)
+        if sync_remote:
+            sync_preferences_from_github(year, month, BACKUP_DIR)
     except Exception:
         pass
 
@@ -1037,7 +1048,7 @@ def load_submissions_for_month(
             data.pending_employees = list(expected_employees)
         return data
 
-    latest_note_adjustments = _load_latest_note_adjustments(year, month)
+    latest_note_adjustments = _load_latest_note_adjustments(year, month, sync_remote=sync_remote)
     expected_set = set(expected_employees or [])
 
     # 各従業員の最新提出を取得
@@ -1129,8 +1140,8 @@ def load_submissions_for_month(
             # 2026年4月の大塚さんは「13日出勤・3連勤NG」と同時に
             # 3連休もNGという運用。旧提出文に3連休NGが抜けていても補完する。
             parsed_note.max_consecutive_off_days = 2
-        _apply_parsed_note_to_submission_data(data, author, parsed_note)
-        only_on_request = _is_only_on_request_employee(author)
+        _apply_parsed_note_to_submission_data(data, author, parsed_note, sync_remote=sync_remote)
+        only_on_request = _is_only_on_request_employee(author, sync_remote=sync_remote)
 
         if only_on_request:
             # 旧データでは「○」の日を work_requests に保存していなかった。
@@ -1170,6 +1181,7 @@ def load_submissions_for_month(
                 author,
                 parsed_adjustment,
                 source_label="管理者補正",
+                sync_remote=sync_remote,
             )
 
     _exclude_off_days_from_note_work(data)
