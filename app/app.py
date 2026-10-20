@@ -196,7 +196,7 @@ def load_rule_ledger_v1() -> dict:
     return {**fallback, **data}
 
 
-def build_employee_suitability_rows_from_master() -> list[dict]:
+def build_employee_suitability_rows_from_master(year=None, month=None) -> list[dict]:
     """台帳の店舗適性欄が空の場合、現在の従業員マスターから表示用に作る。"""
     try:
         from prototype.employee_config import get_all_employees_including_retired
@@ -224,6 +224,9 @@ def build_employee_suitability_rows_from_master() -> list[dict]:
         return []
 
     for emp in employees:
+        from prototype.employees import employee_is_in_service
+        if not employee_is_in_service(emp, year, month):
+            continue
         if getattr(emp, "role", None) in (Role.REPRESENTATIVE, Role.ADVISOR):
             continue
         if getattr(emp, "is_auxiliary", False):
@@ -880,10 +883,10 @@ from prototype.models import (
     StationType,
     Store,
 )
-from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees
+from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employees, employee_is_in_service, employee_status_label
 from prototype.backup import ShiftBackup
 from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
-from prototype.export_config import EXPORT_COLUMN_ORDER
+from prototype.export_config import EXPORT_COLUMN_ORDER, export_column_order
 from prototype.consecutive_counts import consecutive_count_label
 from prototype.shift_lock import ShiftLockManager
 from prototype.rule_config import (
@@ -1423,17 +1426,18 @@ def render_shift_editor_fixed_header(
     paid_leave_days: Optional[dict[str, int]] = None,
 ) -> None:
     """直接編集グリッドの外側に、固定表示用の名前ヘッダーを描画する。"""
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     employee_width = 56
     grid_columns = (
         "42px 30px "
-        + " ".join([f"{employee_width}px"] * len(EXPORT_COLUMN_ORDER))
+        + " ".join([f"{employee_width}px"] * len(column_order))
         + " 42px 78px"
     )
     cells = [
         '<div class="shift-editor-fixed-head-cell">日</div>',
         '<div class="shift-editor-fixed-head-cell">曜</div>',
     ]
-    for name in EXPORT_COLUMN_ORDER:
+    for name in column_order:
         cells.append(
             '<div class="shift-editor-fixed-head-cell shift-editor-fixed-employee">'
             f'{employee_header_label(shift, name, html=True, paid_leave_days=paid_leave_days)}'
@@ -1466,6 +1470,7 @@ def render_shift_table(
     paid_leave_days: Optional[dict[str, int]] = None,
 ) -> None:
     """シフト表をHTMLテーブルで表示"""
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     days_in_month = monthrange(shift.year, shift.month)[1]
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
 
@@ -1490,7 +1495,7 @@ def render_shift_table(
             paid_leave_days = {}
 
     # ヘッダー
-    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 2
+    column_count = 2 + len(column_order) + 2
     wrapper_style = (
         "max-height:70vh; overflow:auto; border:1px solid #cbd5e1; "
         "border-radius:6px; background:white;"
@@ -1545,7 +1550,7 @@ def render_shift_table(
         f'<th style="padding:8px; border:1px solid #999; background:#1e3a8a; '
         f'{header_style} {left_weekday_style}">曜</th>'
     )
-    for name in EXPORT_COLUMN_ORDER:
+    for name in column_order:
         header_label = employee_header_label(
             shift, name, html=True, paid_leave_days=paid_leave_days,
         )
@@ -1597,7 +1602,7 @@ def render_shift_table(
 
         # 各従業員
         day_assignments = shift.get_day_assignments(d)
-        for name in EXPORT_COLUMN_ORDER:
+        for name in column_order:
             a = next((x for x in day_assignments if x.employee == name), None)
             if a is None:
                 cell_text = ""
@@ -1807,6 +1812,7 @@ def normalize_store_symbol(value) -> str:
 
 def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
     """シフトを編集表用の行データに変換する。"""
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     days_in_month = monthrange(shift.year, shift.month)[1]
     weekday_jp = ["月", "火", "水", "木", "金", "土", "日"]
     short_staff_by_store = detect_short_staff_by_store(shift)
@@ -1817,7 +1823,7 @@ def shift_to_editor_rows(shift: MonthlyShift) -> list[dict]:
             "日": day,
             "曜": weekday_jp[date(shift.year, shift.month, day).weekday()],
         }
-        for name in EXPORT_COLUMN_ORDER:
+        for name in column_order:
             row[name] = assignment_to_symbol(shift.get_assignment(name, day))
         row["人数少"] = format_short_staff_summary_for_day(short_staff_by_store.get(day, set()))
         row["鍵"] = format_key_warning_summary_for_day(key_warnings_by_store.get(day, {}))
@@ -1837,7 +1843,9 @@ def normalize_editor_records(rows: list[dict]) -> list[dict]:
             "日": day,
             "曜": str(row.get("曜") or ""),
         }
-        for name in EXPORT_COLUMN_ORDER:
+        for name in row:
+            if name in ("日", "曜", "人数少", "鍵") or name.startswith("_"):
+                continue
             normalized_row[name] = normalize_store_symbol(row.get(name, ""))
         normalized_row["人数少"] = str(row.get("人数少") or "")
         normalized_row["鍵"] = str(row.get("鍵") or "")
@@ -1851,7 +1859,7 @@ def editor_symbol_signature(rows: list[dict]) -> str:
     for row in normalize_editor_records(rows):
         payload.append([
             int(row["日"]),
-            [row.get(name, "") for name in EXPORT_COLUMN_ORDER],
+            [(name, row[name]) for name in sorted(row) if name not in ("日", "曜", "人数少", "鍵")],
         ])
     return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
@@ -1903,6 +1911,7 @@ def render_colored_shift_editor(
     paid_leave_days: Optional[dict[str, int]] = None,
 ):
     """色付きセルのまま編集できるシフト表を表示する。"""
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     header_shift = header_shift or shift
     if paid_leave_days is None:
         try:
@@ -2022,7 +2031,7 @@ def render_colored_shift_editor(
             "suppressColumnsToolPanel": True,
         },
     ]
-    for name in EXPORT_COLUMN_ORDER:
+    for name in column_order:
         workday_summary = employee_workday_summary(
             header_shift, name, paid_leave_days,
         )
@@ -2166,7 +2175,8 @@ def editor_rows_to_records(editor_value) -> list[dict]:
 
 def editor_rows_to_shift(base_shift: MonthlyShift, rows: list[dict]) -> MonthlyShift:
     """編集表の内容からプレビュー用シフトを作る。"""
-    visible_names = set(EXPORT_COLUMN_ORDER)
+    column_order = export_column_order(base_shift.year, base_shift.month, base_shift.assignments)
+    visible_names = set(column_order)
     updated = MonthlyShift(
         year=base_shift.year,
         month=base_shift.month,
@@ -2188,7 +2198,7 @@ def editor_rows_to_shift(base_shift: MonthlyShift, rows: list[dict]) -> MonthlyS
             day = int(row.get("日"))
         except (TypeError, ValueError):
             continue
-        for name in EXPORT_COLUMN_ORDER:
+        for name in column_order:
             symbol = normalize_store_symbol(row.get(name, ""))
             if not symbol:
                 continue
@@ -2232,13 +2242,14 @@ def apply_pending_symbol_changes(
 
 def get_editor_changed_cells(base_shift: MonthlyShift, rows: list[dict]) -> set[tuple[str, int]]:
     """編集表で変更されたセルを返す。"""
+    column_order = export_column_order(base_shift.year, base_shift.month, base_shift.assignments)
     changed = set()
     for row in rows:
         try:
             day = int(row.get("日"))
         except (TypeError, ValueError):
             continue
-        for name in EXPORT_COLUMN_ORDER:
+        for name in column_order:
             before = assignment_to_symbol(base_shift.get_assignment(name, day))
             after = normalize_store_symbol(row.get(name, ""))
             if before != after:
@@ -2311,7 +2322,7 @@ def restore_validation_context_for_month(
 
     days_in_month = monthrange(int(year), int(month))[1]
     sub_data = load_submissions_for_month(
-        int(year), int(month), shift_submission_employee_names(),
+        int(year), int(month), shift_submission_employee_names(year, month),
     )
 
     def _valid_days(days_list) -> list[int]:
@@ -2536,7 +2547,7 @@ def get_fixed_off_edit_violations(
             day = int(row.get("日"))
         except (TypeError, ValueError):
             continue
-        for name in EXPORT_COLUMN_ORDER:
+        for name in row:
             if (name, day) not in off_request_cells:
                 continue
             if normalize_store_symbol(row.get(name, "")) != "×":
@@ -3426,9 +3437,9 @@ def build_off_request_cells(off_requests: dict[str, list[int]]) -> set[tuple[str
     return cells
 
 
-def shift_submission_employee_names() -> list[str]:
+def shift_submission_employee_names(year=None, month=None) -> list[str]:
     """希望提出の対象者リスト。山本さんは補助・特別枠として含める。"""
-    names = [e.name for e in shift_active_employees() if not e.is_auxiliary]
+    names = [e.name for e in shift_active_employees(year, month) if not e.is_auxiliary]
     try:
         yamamoto = get_employee("山本")
         if yamamoto.name not in names:
@@ -3800,8 +3811,15 @@ def active_monthly_store_count_rules(
     month: int,
 ) -> list[dict]:
     """対象年月に有効な月別配置ルールだけを生成・検証用に取り出す。"""
-    active_rules = system_monthly_store_count_rules(year, month)
+    from prototype.employees import employee_rule_is_active
+
+    active_rules = [
+        r for r in system_monthly_store_count_rules(year, month)
+        if employee_rule_is_active(r.get("employee", ""), year, month)
+    ]
     for rule in getattr(rule_cfg, "custom_rules", []):
+        if not employee_rule_is_active(getattr(rule, "employee", ""), year, month):
+            continue
         if not getattr(rule, "enabled", True):
             continue
         if getattr(rule, "rule_type", "note") != "employee_store_count":
@@ -3832,8 +3850,12 @@ def active_monthly_required_assignment_rules(
     month: int,
 ) -> list[dict]:
     """対象年月に有効な、日付指定の月別配置ルールを取り出す。"""
+    from prototype.employees import employee_rule_is_active
+
     active_rules = []
     for rule in getattr(rule_cfg, "custom_rules", []):
+        if not employee_rule_is_active(getattr(rule, "employee", ""), year, month):
+            continue
         if not getattr(rule, "enabled", True):
             continue
         if getattr(rule, "rule_type", "note") != "required_assignment":
@@ -3868,8 +3890,12 @@ def active_monthly_custom_rules(
     month: int,
 ) -> list[CustomRule]:
     """対象年月に有効な、画面で追加された月別ルールを返す。"""
+    from prototype.employees import employee_rule_is_active
+
     active_rules = []
     for rule in getattr(rule_cfg, "custom_rules", []):
+        if not employee_rule_is_active(getattr(rule, "employee", ""), year, month):
+            continue
         if not getattr(rule, "enabled", True):
             continue
         try:
@@ -4698,7 +4724,7 @@ def render_monthly_exceptions_panel(year=None, month=None, section=None) -> None
         )
 
         _mx_emp_names = [
-            e.name for e in shift_active_employees() if not e.is_auxiliary
+            e.name for e in shift_active_employees(year, month) if not e.is_auxiliary
         ]
         _mx_store_options = [s.name for s in Store if s != Store.OFF]
         _mx_store_labels = {
@@ -5903,7 +5929,7 @@ if mode == "📊 経営者ビュー":
     # ============================================================
     # 希望シフト提出状況（リアルタイム）
     # ============================================================
-    expected_employees = shift_submission_employee_names()
+    expected_employees = shift_submission_employee_names(target_year, target_month)
     submission_status = backup_mgr.get_submission_status(
         int(target_year), int(target_month), expected_employees,
     )
@@ -6052,7 +6078,7 @@ if mode == "📊 経営者ビュー":
         st.dataframe(ledger_rows, width="stretch", hide_index=True, height=350)
         st.dataframe(build_numeric_ledger_rows_from_parameters(rule_cfg.parameters),
                      width="stretch", hide_index=True)
-        st.dataframe(build_employee_suitability_rows_from_master(),
+        st.dataframe(build_employee_suitability_rows_from_master(target_year, target_month),
                      width="stretch", hide_index=True)
         st.caption("基本ルールを土台に、下の対象月だけの変更を重ねます。本人の×休みは優先します。")
 
@@ -6205,7 +6231,7 @@ if mode == "📊 経営者ビュー":
                     placeholder=desc_placeholder,
                     height=80,
                 )
-                employee_options = ["指定なし"] + shift_submission_employee_names()
+                employee_options = ["指定なし"] + shift_submission_employee_names(target_year, target_month)
                 quick_employee = st.selectbox("対象スタッフ", employee_options)
                 quick_stores = []
                 quick_count = 0
@@ -7048,7 +7074,7 @@ if mode == "📊 経営者ビュー":
                                 diagnose_known_conflicts,
                             )
                             _diag_employees = [
-                                _e for _e in shift_active_employees()
+                                _e for _e in shift_active_employees(_saved_target_year, _saved_target_month)
                                 if not _e.is_auxiliary
                                 and getattr(_e, "role", None) != Role.ADVISOR
                             ]
@@ -7411,7 +7437,7 @@ if mode == "📊 経営者ビュー":
                 _lock_leave_confirmation = build_confirmation(
                     int(target_year), int(target_month),
                     (_lock_preview_metadata.get("input_summary") or {}).get("paid_leave_days"),
-                    shift_active_employees(), current_shift.assignments, now_jst(),
+                    shift_active_employees(current_shift.year, current_shift.month), current_shift.assignments, now_jst(),
                 )
                 st.markdown("#### 確定版に保存する有給日数")
                 st.dataframe([
@@ -7694,7 +7720,8 @@ if mode == "📊 経営者ビュー":
                 if lock_info is not None:
                     st.warning("この月は確定版としてロック中です。編集する場合は先にロックを解除してください。")
 
-                editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
+                column_order = export_column_order(shift.year, shift.month, shift.assignments)
+                editor_columns = ["日", "曜"] + column_order + ["人数少", "鍵"]
                 base_editor_rows = shift_to_editor_rows(shift)
                 base_signature = editor_symbol_signature(base_editor_rows)
                 if st.session_state.get(inline_base_signature_key) != base_signature:
@@ -7710,7 +7737,7 @@ if mode == "📊 経営者ビュー":
                     "日": st.column_config.NumberColumn("日", width="small"),
                     "曜": st.column_config.TextColumn("曜", width="small"),
                 }
-                for name in EXPORT_COLUMN_ORDER:
+                for name in column_order:
                     column_config[name] = st.column_config.SelectboxColumn(
                         name,
                         options=STORE_SYMBOL_OPTIONS,
@@ -8108,13 +8135,14 @@ if mode == "📊 経営者ビュー":
             if st.session_state.get(status_key):
                 st.success(st.session_state.pop(status_key))
 
-            editor_columns = ["日", "曜"] + EXPORT_COLUMN_ORDER + ["人数少", "鍵"]
+            column_order = export_column_order(shift.year, shift.month, shift.assignments)
+            editor_columns = ["日", "曜"] + column_order + ["人数少", "鍵"]
             editor_df = pd.DataFrame(shift_to_editor_rows(shift), columns=editor_columns)
             column_config = {
                 "日": st.column_config.NumberColumn("日", width="small"),
                 "曜": st.column_config.TextColumn("曜", width="small"),
             }
-            for name in EXPORT_COLUMN_ORDER:
+            for name in column_order:
                 column_config[name] = st.column_config.SelectboxColumn(
                     name,
                     options=STORE_SYMBOL_OPTIONS,
@@ -8396,7 +8424,7 @@ if mode == "📊 経営者ビュー":
             stats_paid_leave_days = stats_validation_context.get(
                 "paid_leave_days", {}
             )
-            for e in shift_active_employees():
+            for e in shift_active_employees(shift.year, shift.month):
                 if e.is_auxiliary:
                     continue
                 days_in_month = monthrange(shift.year, shift.month)[1]
@@ -9736,6 +9764,10 @@ elif mode == "👤 従業員ビュー":
                     st.session_state["emp_target_month"] = nn_month
                     st.rerun()
 
+    from prototype.employees import employee_is_in_service
+    if not employee_is_in_service(get_employee(selected), target_year, target_month):
+        st.info("この月は退職日以降のため、希望提出の対象外です。")
+        st.stop()
     days_in_month = monthrange(target_year, target_month)[1]
     free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
     free_text_draft_key = f"free_text_draft_{selected}_{target_year}_{target_month}"
@@ -10566,7 +10598,7 @@ elif mode == "⚙️ 設定":
                 )
             _csv_y, _csv_m = int(_csv_ym[:4]), int(_csv_ym[5:])
             _csv_expected = [
-                e.name for e in shift_active_employees() if not e.is_auxiliary
+                e.name for e in shift_active_employees(_csv_y, _csv_m) if not e.is_auxiliary
             ]
             _csv_rows = build_paid_leave_rows(
                 _csv_y, _csv_m, _csv_expected,
@@ -10625,11 +10657,13 @@ elif mode == "⚙️ 設定":
             part_time_names = [
                 e.name for e in get_all_employees_including_retired()
                 if e.employment_status == EmploymentStatus.PART_TIME
+                and employee_is_in_service(e, adj_year, adj_month)
             ]
             employee_options = part_time_names + [
                 e.name for e in get_all_employees_including_retired()
                 if e.name not in part_time_names
                 and e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
+                and employee_is_in_service(e, adj_year, adj_month)
             ]
             with adj_col3:
                 adj_employee = st.selectbox(
@@ -11417,7 +11451,7 @@ elif mode == "⚙️ 設定":
                 "土井さんメイン。休みの日は楯さん・春山さん・長尾さん・今津さんのいずれか。",
                 "反映中", "警告表示", "検証結果に表示",
                 "コード固定", "反映中",
-                "牧野さんの東口1名体制は当面対象外です。",
+                "対象者以外の東口1名体制は設定しません。",
             ),
             _rule_row(
                 "スタッフ別", "固定店舗",
@@ -11509,6 +11543,8 @@ elif mode == "⚙️ 設定":
         ledger = load_rule_ledger_v1()
         rule_inventory = list(ledger.get("rules", []))
         employee_suitability_rows = list(ledger.get("employee_store_suitability", []))
+        active_names = {e.name for e in get_all_employees_including_retired() if employee_is_in_service(e)}
+        employee_suitability_rows = [row for row in employee_suitability_rows if row.get("氏名") in active_names]
         numeric_ledger_rows = build_numeric_ledger_rows_from_parameters(
             cfg.parameters
         )
@@ -11542,7 +11578,7 @@ elif mode == "⚙️ 設定":
             rule_search_input = st.text_input(
                 "キーワード検索",
                 key="rule_inventory_search_input",
-                placeholder="例: 牧野、赤羽、連勤",
+                placeholder="例: 今津、赤羽、連勤",
             )
         with filter_col3:
             search_requested = st.button(
@@ -11958,6 +11994,7 @@ elif mode == "⚙️ 設定":
                 show_filter = st.selectbox(
                     "表示する雇用形態",
                     options=["すべて", "正社員・パートのみ", "退職者のみ", "顧問・補助のみ"],
+                    index=1,
                     key="emp_filter",
                 )
 
@@ -11966,11 +12003,12 @@ elif mode == "⚙️ 設定":
                 display_emps = [
                     e for e in all_emps
                     if e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
+                    and employee_is_in_service(e)
                 ]
             elif show_filter == "退職者のみ":
                 display_emps = [
                     e for e in all_emps
-                    if e.employment_status in (EmploymentStatus.RETIRED, EmploymentStatus.ON_LEAVE)
+                    if not employee_is_in_service(e)
                 ]
             elif show_filter == "顧問・補助のみ":
                 display_emps = [
@@ -11984,7 +12022,7 @@ elif mode == "⚙️ 設定":
             with filt_col2:
                 status_counts = {}
                 for e in all_emps:
-                    s = e.employment_status.value
+                    s = employee_status_label(e)
                     status_counts[s] = status_counts.get(s, 0) + 1
                 summary_str = "　".join(f"{k}: {v}名" for k, v in status_counts.items())
                 st.caption(f"**全社人員**: {summary_str}")
@@ -12008,7 +12046,7 @@ elif mode == "⚙️ 設定":
                     "役職": e.role.value,
                     "スキル": e.skill.value,
                     "勤務区分": "エコ主力" if getattr(e, "is_eco_core", False) else "-",
-                    "雇用形態": e.employment_status.value,
+                    "雇用形態": employee_status_label(e),
                     "ホーム店舗": e.home_store.display_name if e.home_store else "-",
                     "年間目標日数": e.annual_target_days if e.annual_target_days else "-",
                     "入社日": e.hired_at or "-",

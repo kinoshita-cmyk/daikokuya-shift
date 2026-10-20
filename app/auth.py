@@ -25,7 +25,7 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from prototype.employee_tokens import validate_token, is_salt_configured
-from prototype.employees import get_employee, shift_active_employees
+from prototype.employees import get_employee, shift_active_employees, employee_is_in_service
 
 
 # Streamlit Secrets のキー名
@@ -242,6 +242,15 @@ def require_auth() -> bool:
     """
     # 既に認証済み
     if st.session_state.get(SESSION_AUTHENTICATED):
+        if is_employee():
+            try:
+                in_service = employee_is_in_service(get_employee(get_logged_in_employee()))
+            except KeyError:
+                in_service = False
+            if not in_service:
+                logout()
+                st.warning("この従業員の利用期間は終了しています。")
+                return False
         return True
 
     # ローカル開発時のバイパス
