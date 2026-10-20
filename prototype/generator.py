@@ -364,7 +364,7 @@ def generate_shift(
     # 主要なメイン稼働メンバーリスト（山本を除く）。
     # 顧問は基本的に自動投入しない。必要な場合だけ advisor_max_days を上げる。
     main_employees = [
-        e for e in shift_active_employees()
+        e for e in shift_active_employees(year, month)
         if not e.is_auxiliary
         and not is_probationary_employee(e, year, month)
     ]

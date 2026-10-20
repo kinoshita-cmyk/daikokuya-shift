@@ -26,7 +26,7 @@ from openpyxl.utils import get_column_letter
 from .models import MonthlyShift, Store, OperationMode
 from .paths import OUTPUT_DIR
 from .employees import ALL_EMPLOYEES
-from .export_config import EXPORT_COLUMN_ORDER
+from .export_config import EXPORT_COLUMN_ORDER, export_column_order
 from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity
 from .calendar_utils import is_weekend_or_japanese_holiday
 
@@ -64,6 +64,15 @@ COLUMN_WIDTHS = {
     "X": 21.0,        # 人員少（店舗別マークが収まる幅）
     "Y": 18.0,        # 鍵確認
 }
+
+
+def export_column_widths(names):
+    """人数が変わっても、右端の日付・警告欄の幅は維持する。"""
+    employee_widths = {name: COLUMN_WIDTHS[get_column_letter(4 + i)]
+                       for i, name in enumerate(EXPORT_COLUMN_ORDER)}
+    values = [2.0, 8.5, 7.0] + [employee_widths.get(name, 13.0) for name in names]
+    values += [8.5, 7.0, 21.0, 18.0]
+    return {get_column_letter(i + 1): value for i, value in enumerate(values)}
 
 SHORT_STAFF_STORE_LABELS = {
     Store.AKABANE: "○赤羽",
@@ -177,6 +186,7 @@ def export_shift_to_excel(
         実際に書き込んだファイルパス
     """
     warnings.filterwarnings("ignore")
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -243,7 +253,7 @@ def export_shift_to_excel(
     )
 
     EMPLOYEE_START_COL = 4
-    RIGHT_DATE_COL = EMPLOYEE_START_COL + len(EXPORT_COLUMN_ORDER)
+    RIGHT_DATE_COL = EMPLOYEE_START_COL + len(column_order)
     RIGHT_WEEKDAY_COL = RIGHT_DATE_COL + 1
     SHORT_STAFF_COL = RIGHT_WEEKDAY_COL + 1
     KEY_COL = SHORT_STAFF_COL + 1
@@ -297,7 +307,7 @@ def export_shift_to_excel(
         ws.cell(row=7, column=col).border = border
 
     # D列以降: 従業員名
-    for i, name in enumerate(EXPORT_COLUMN_ORDER):
+    for i, name in enumerate(column_order):
         col = EMPLOYEE_START_COL + i
         c = ws.cell(row=7, column=col, value=name)
         c.font = header_font
@@ -367,7 +377,7 @@ def export_shift_to_excel(
             c.fill = special_business_day_fill
 
         # 従業員配属
-        for i, name in enumerate(EXPORT_COLUMN_ORDER):
+        for i, name in enumerate(column_order):
             col = EMPLOYEE_START_COL + i
             a = shift.get_assignment(name, d)
             value = a.store.value if a else ""
@@ -428,7 +438,7 @@ def export_shift_to_excel(
     # ============================================================
     # 列幅（テンプレート完全準拠）
     # ============================================================
-    for col_letter, width in COLUMN_WIDTHS.items():
+    for col_letter, width in export_column_widths(column_order).items():
         ws.column_dimensions[col_letter].width = width
 
     # ============================================================

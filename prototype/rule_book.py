@@ -20,6 +20,7 @@ from .submission_loader import load_submissions_for_month, parse_natural_languag
 from .submission_window import now_jst
 from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 from .consecutive_counts import consecutive_count_label
+from .employees import employee_is_in_service
 
 SCHEMA_VERSION = 1
 STORE_NAMES = {s: s.display_name for s in Store}
@@ -193,6 +194,8 @@ def submission_cards(sub, employees):
 
 
 def build_month(year, month, config, employees, ledger, sub=None):
+    inactive_names = {e.name for e in employees if not employee_is_in_service(e, year, month)}
+    employees = [e for e in employees if employee_is_in_service(e, year, month)]
     scope = f"{year}-{month:02d}"
     p = config.parameters
     core = "・".join(e.name for e in employees if getattr(e, "is_eco_core", False))
@@ -260,8 +263,14 @@ def build_month(year, month, config, employees, ledger, sub=None):
         "base:yamamoto", "山本さんの補助勤務",
         f"赤羽駅前で通常スタッフだけでは足りない日だけ補助配置します。それ以外の追加は手動。今月の上限は{policy['max_days']}日、連続{policy['max_consecutive']}日まで。上限まで出勤させる目標ではありません。本人の×休みは厳守します。",
         "絶対", scope if (year, month) in rules.MONTHLY_YAMAMOTO_POLICIES else "全月共通"))
-    monthly = monthly_cards(year, month)
+    inactive_monthly_ids = {
+        f"monthly:{kind}:{name}" for name in inactive_names for kind in ("store", "carryover")
+    }
+    monthly = [c for c in monthly_cards(year, month) if c["id"] not in inactive_monthly_ids]
+    inactive_custom_ids = {"custom:" + r.id for r in config.custom_rules if r.employee in inactive_names}
     for c in custom_cards(config, year, month):
+        if c["id"] in inactive_custom_ids:
+            continue
         (sections["individual"] if c["scope"] == "全月共通" else monthly).append(c)
     sections["store"].append(card(
         "base:keyholders", "店舗の鍵担当", "\n".join(
@@ -307,19 +316,18 @@ def build_snapshot(today=None, *, config_dir=CONFIG_DIR, include_submissions=Tru
         employees = list(ALL_EMPLOYEES)
     else:
         employees = [employee_from_dict(d) for d in employee_data["employees"]]
-    employees = [e for e in employees if e.employment_status != EmploymentStatus.RETIRED]
     ledger = read_json(config_dir / "rule_ledger_v1_0.json", {})
     if not ledger.get("rules"):
         raise ValueError("ルール台帳がないため、条件ブックの公開を見送りました")
     # Current month and the following 12 months always inherit the same live baseline.
     start = today.year * 12 + today.month - 1
     months = [(n // 12, n % 12 + 1) for n in range(start - 1, start + 13)]
-    names = [e.name for e in employees
-             if e.role not in (Role.ADVISOR, Role.REPRESENTATIVE)
-             and e.employment_status != EmploymentStatus.ON_LEAVE]
     paid_adjustments = read_json(config_dir / "admin_paid_leave_adjustments.json", {}).get("adjustments", [])
     books = {}
     for year, month in months:
+        names = [e.name for e in employees
+                 if e.role not in (Role.ADVISOR, Role.REPRESENTATIVE)
+                 and employee_is_in_service(e, year, month)]
         sub = load_submissions_for_month(year, month, names, sync_remote=False) if include_submissions else None
         if sub:
             for adj in paid_adjustments:

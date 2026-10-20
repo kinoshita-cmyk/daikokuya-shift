@@ -227,7 +227,7 @@ render_submission_review(rows, details, 2026, 10, lambda *args: None)
         scope = app_scope("restore_validation_context_for_month", "save_validation_context", "get_validation_context_for_shift")
         data = SubmissionData(2026, 10)
         _apply_parsed_note_to_submission_data(data, "岩野", parse_natural_language_note(ORIGINAL, 2026, 10))
-        scope.update(st=SimpleNamespace(session_state={}), shift_submission_employee_names=lambda: ["岩野"],
+        scope.update(st=SimpleNamespace(session_state={}), shift_submission_employee_names=lambda year=None, month=None: ["岩野"],
                      system_monthly_preferred_work_requests=lambda *_: [], combined_paid_leave_days=lambda *_: {},
                      load_locked_previous_month_carryover=lambda *_: SimpleNamespace(carryover=[]),
                      active_monthly_store_count_rules=lambda *_: [], active_monthly_required_assignment_rules=lambda *_: [])

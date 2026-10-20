@@ -154,7 +154,7 @@ class NoteParsingTest(unittest.TestCase):
         node = next(n for n in ast.parse(path.read_text(encoding="utf-8")).body
                     if isinstance(n, ast.FunctionDef) and n.name == "restore_validation_context_for_month")
         scope = dict(RuleConfig=SimpleNamespace, monthrange=monthrange,
-                     shift_submission_employee_names=lambda: ["大塚"],
+                     shift_submission_employee_names=lambda year=None, month=None: ["大塚"],
                      combined_paid_leave_days=lambda paid, year, month: paid,
                      get_employee=get_employee, get_monthly_work_target=get_monthly_work_target,
                      system_monthly_preferred_work_requests=lambda *args: [],

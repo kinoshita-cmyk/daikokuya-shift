@@ -45,7 +45,7 @@ def build_previous_month_carryover(
     """前月シフトの月末から、従業員ごとの連勤・連休持ち越しを作る。"""
     last_day = monthrange(int(previous_shift.year), int(previous_shift.month))[1]
     employee_names = list(dict.fromkeys(
-        [e.name for e in shift_active_employees()]
+        [e.name for e in shift_active_employees(previous_shift.year, previous_shift.month)]
         + [a.employee for a in previous_shift.assignments]
     ))
     carryover: list[PreviousMonthCarryover] = []

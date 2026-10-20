@@ -283,7 +283,7 @@ class ConsecutiveCountDisplayTest(unittest.TestCase):
         st = SimpleNamespace(session_state={})
         with patch.dict(scope, {
             "st": st, "monthrange": monthrange,
-            "shift_submission_employee_names": lambda: ["田中"],
+            "shift_submission_employee_names": lambda year=None, month=None: ["田中"],
             "system_monthly_preferred_work_requests": lambda *_: [],
             "combined_paid_leave_days": lambda paid, *_: paid,
             "load_locked_previous_month_carryover": lambda *_: SimpleNamespace(carryover=[]),

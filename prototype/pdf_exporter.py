@@ -25,12 +25,14 @@ from .excel_exporter import (
     COLUMN_WIDTHS,
     DEFAULT_FOOTER_NOTES,
     EXPORT_COLUMN_ORDER,
+    export_column_widths,
     SHORT_STAFF_STORE_LABELS,
     STORE_EXPORT_FILLS,
     STORE_EXPORT_FONT_COLORS,
     detect_key_warnings_by_store,
     format_key_warning_text,
 )
+from .export_config import export_column_order
 from .calendar_utils import is_weekend_or_japanese_holiday
 
 
@@ -221,6 +223,7 @@ def export_shift_to_pdf(
     シフトを Excel 印刷イメージに合わせた A4 縦 1ページ PDF に出力する。
     """
     output_path = Path(output_path)
+    column_order = export_column_order(shift.year, shift.month, shift.assignments)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     short_staff_days = short_staff_days or []
@@ -238,9 +241,10 @@ def export_shift_to_pdf(
     margin_x = 14.0
     margin_y = 14.0
 
-    column_count = 2 + len(EXPORT_COLUMN_ORDER) + 4
+    column_count = 2 + len(column_order) + 4
     columns = [get_column_letter(col) for col in range(2, 2 + column_count)]
-    col_widths_base = [COLUMN_WIDTHS[col] * EXCEL_WIDTH_TO_POINTS for col in columns]
+    widths = export_column_widths(column_order)
+    col_widths_base = [widths[col] * EXCEL_WIDTH_TO_POINTS for col in columns]
     row_heights_base = (
         [ROW_HEIGHTS["title"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment"], ROW_HEIGHTS["comment_last"]]
         + [ROW_HEIGHTS["legend"], ROW_HEIGHTS["header"]]
@@ -322,14 +326,14 @@ def export_shift_to_pdf(
         text=f"{shift.month}月", font_name=font_name,
         font_size=FONT_SIZES["header"] * scale, line_width=line_width,
     )
-    for i, name in enumerate(EXPORT_COLUMN_ORDER):
+    for i, name in enumerate(column_order):
         col_idx = 2 + i
         _draw_cell(
             pdf, col_x(col_idx), y, col_widths[col_idx], header_h,
             text=name, font_name=font_name,
             font_size=FONT_SIZES["header"] * scale, line_width=line_width,
         )
-    right_date_idx = 2 + len(EXPORT_COLUMN_ORDER)
+    right_date_idx = 2 + len(column_order)
     _draw_cell(
         pdf,
         col_x(right_date_idx),
@@ -390,7 +394,7 @@ def export_shift_to_pdf(
             line_width=line_width,
         )
 
-        for i, emp_name in enumerate(EXPORT_COLUMN_ORDER):
+        for i, emp_name in enumerate(column_order):
             col_idx = 2 + i
             assignment = shift.get_assignment(emp_name, day)
             value = assignment.store.value if assignment else ""

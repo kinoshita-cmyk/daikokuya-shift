@@ -127,10 +127,10 @@ def _employee_map() -> dict[str, Employee]:
 
 
 def _active_employees(employees: dict[str, Employee]) -> list[Employee]:
+    from .employees import employee_is_shift_eligible
     return [
         emp for emp in employees.values()
-        if emp.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
-        and not emp.is_auxiliary
+        if employee_is_shift_eligible(emp)
     ]
 
 

@@ -132,25 +132,11 @@ def is_probationary_employee(
     return month_start < probation_end and next_month > hired_on
 
 
-def _validation_employees() -> list:
+def _validation_employees(year=None, month=None) -> list:
     """検証対象の従業員を従業員マスターから動的に取得する。"""
     def _is_active_for_validation(emp) -> bool:
-        if getattr(emp, "is_auxiliary", False):
-            return False
-        if not getattr(emp, "is_shift_eligible", True):
-            return False
-
-        role = getattr(emp, "role", None)
-        role_text = str(getattr(role, "value", role))
-        if role_text in ("顧問", "ADVISOR", "代表取締役", "REPRESENTATIVE"):
-            return False
-
-        status = getattr(emp, "employment_status", None)
-        if status is not None:
-            status_text = str(getattr(status, "value", status))
-            if status_text not in ("正社員", "パート", "ACTIVE", "PART_TIME"):
-                return False
-        return True
+        from .employees import employee_is_shift_eligible
+        return employee_is_shift_eligible(emp, year, month)
 
     try:
         from .employee_config import get_all_employees_including_retired
@@ -243,7 +229,7 @@ def _check_close_long_work(shift, result, days_in_month, prev_month) -> None:
         value = month_start + timedelta(days=day - 1)
         return f"{value.month}/{value.day}"
 
-    for employee in _validation_employees():
+    for employee in _validation_employees(shift.year, shift.month):
         if not work_recovery_applies(employee, shift.year, shift.month):
             continue
         working = previous_working_map(prev_month, employee.name, shift.year, shift.month)
@@ -320,6 +306,19 @@ def validate(
     consecutive_count_rules = consecutive_count_rules or []
 
     days_in_month = monthrange(shift.year, shift.month)[1]
+    for assignment in shift.assignments:
+        if assignment.store == Store.OFF:
+            continue
+        try:
+            employee = get_employee(assignment.employee)
+        except KeyError:
+            continue
+        retired = _parse_iso_date(getattr(employee, "retired_at", None))
+        if retired is not None and date(shift.year, shift.month, assignment.day) > retired:
+            result.issues.append(Issue(
+                severity="ERROR", category="退職後の勤務", day=assignment.day,
+                employee=employee.name, message=f"退職日（{retired}）以降には配置できません。",
+            ))
     if allow_omiya_short is None:
         allow_omiya_short = is_omiya_two_person_allowed_month(
             shift.year, shift.month,
@@ -897,7 +896,7 @@ def _check_consecutive_work(
         shift.year, shift.month,
     )
 
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if not emp.is_shift_eligible:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
@@ -975,7 +974,7 @@ def _check_holiday_days(
 ) -> None:
     """月内の休日日数チェック"""
     exact_holiday_days = exact_holiday_days or {}
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if not emp.is_shift_eligible:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
@@ -1051,7 +1050,7 @@ def _check_consecutive_off(
                 return True
         return False
 
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if not emp.is_shift_eligible:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
@@ -1169,7 +1168,7 @@ def _check_tobishi_work_patterns(
     days: int,
 ) -> None:
     """エコ主力の「休み・出勤・休み」の単独出勤を確認する。"""
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if not emp.is_shift_eligible or getattr(emp, "is_auxiliary", False):
             continue
         if getattr(emp, "only_on_request_days", False):
@@ -1254,7 +1253,7 @@ def _check_absolute_forbidden_assignments(
         emp.name: monthly_training_store_days(
             shift.year, shift.month, emp.name,
         )
-        for emp in _validation_employees()
+        for emp in _validation_employees(shift.year, shift.month)
     }
     for day in range(1, days + 1):
         for assignment in shift.get_day_assignments(day):
@@ -1959,7 +1958,7 @@ def _check_balanced_normal_store_assignments(
     result: ValidationResult,
 ) -> None:
     """主担当なし・通常対応可複数店舗の配置偏りを確認する。"""
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if getattr(emp, "home_store", None) is not None:
             continue
         monthly_override = monthly_employee_store_override(
@@ -2264,7 +2263,7 @@ def _check_monthly_workday_balance(
     shortfall_warning_diff = int(WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS)
     overage_warning_diff = int(WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS)
     error_diff = int(WORK_TARGET_ERROR_DIFF_DAYS)
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if emp.is_auxiliary or emp.annual_target_days is None:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
@@ -2417,7 +2416,7 @@ def _compute_stats(
     paid_leave_days = paid_leave_days or {}
 
     # 各従業員の実出勤・有給・基準算入日数・目標達成度
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if emp.is_auxiliary:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):
@@ -2496,7 +2495,7 @@ def _compute_stats(
     total_target = 0
     total_actual = 0
     shortfall_employees = []
-    for emp in _validation_employees():
+    for emp in _validation_employees(shift.year, shift.month):
         if emp.is_auxiliary or emp.annual_target_days is None:
             continue
         if is_probationary_employee(emp, shift.year, shift.month):

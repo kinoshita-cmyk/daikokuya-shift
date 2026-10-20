@@ -176,7 +176,7 @@ def employee_from_dict(data: dict) -> Employee:
         notes=data.get("notes", ""),
         employment_status=_employment_status_from_value(data.get("employment_status")),
         hired_at=data.get("hired_at"),
-        retired_at=data.get("retired_at"),
+        retired_at=data.get("retired_at") or _default_employees.APPROVED_RETIREMENT_DATES.get(data["name"]),
         status_changed_at=data.get("status_changed_at"),
         constraint_check_excluded=data.get("constraint_check_excluded", False),
         is_auxiliary=data.get("is_auxiliary", False),
@@ -428,14 +428,14 @@ def get_manager() -> EmployeeConfigManager:
     return _global_mgr
 
 
-def get_active_employees() -> list[Employee]:
+def get_active_employees(year=None, month=None) -> list[Employee]:
     """
     現在アクティブな従業員リストを取得（雇用形態を考慮）。
     退職者は除外、シフト対象外も除外。
     """
     mgr = get_manager()
     all_emps = mgr.load_all()
-    return [e for e in all_emps if e.is_shift_eligible]
+    return [e for e in all_emps if _default_employees.employee_is_shift_eligible(e, year, month)]
 
 
 def get_all_employees_including_retired() -> list[Employee]:
@@ -444,7 +444,7 @@ def get_all_employees_including_retired() -> list[Employee]:
     return mgr.load_all()
 
 
-def get_active_for_shift_generation() -> list[Employee]:
+def get_active_for_shift_generation(year=None, month=None) -> list[Employee]:
     """
     シフト生成エンジンが使うべき従業員リスト。
     - 退職者は完全除外
@@ -455,10 +455,7 @@ def get_active_for_shift_generation() -> list[Employee]:
     all_emps = mgr.load_all()
     return [
         e for e in all_emps
-        if e.employment_status.is_shift_eligible
-        and not e.is_auxiliary
-        and e.role != Role.REPRESENTATIVE
-        and e.role != Role.ADVISOR
+        if _default_employees.employee_is_shift_eligible(e, year, month)
     ]
 
 

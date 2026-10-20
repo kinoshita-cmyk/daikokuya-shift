@@ -87,6 +87,7 @@ ECO_STAFF: list[Employee] = [
         name="牧野",
         full_name="牧野怜偉",
         employee_id="081",
+        retired_at="2026-10-31",
         skill=Skill.ECO,
         station_type=StationType.FLEXIBLE,
         affinities={
@@ -380,6 +381,57 @@ EXECUTIVES: list[Employee] = [
 ALL_EMPLOYEES: list[Employee] = ECO_STAFF + TICKET_STAFF + EXECUTIVES
 
 
+# Approved retirement dates also apply when an older master is restored.
+# Keep the employee record so past shifts and paid-leave records remain readable.
+APPROVED_RETIREMENT_DATES = {"牧野": "2026-10-31"}
+
+
+def employee_is_in_service(employee: Employee, year=None, month=None) -> bool:
+    """対象月に在籍するか。年月省略時は日本時間の本日で判定する。"""
+    from .submission_window import now_jst
+
+    target = date(int(year), int(month), 1) if year is not None and month is not None else now_jst().date()
+    retired = _parse_iso_date(getattr(employee, "retired_at", None) or APPROVED_RETIREMENT_DATES.get(employee.name))
+    if retired is not None and target > retired:
+        return False
+    status = getattr(employee, "employment_status", EmploymentStatus.ACTIVE)
+    if status == EmploymentStatus.ON_LEAVE:
+        return False
+    if status == EmploymentStatus.RETIRED:
+        return retired is not None and target <= retired
+    return True
+
+
+def employee_is_shift_eligible(employee: Employee, year=None, month=None) -> bool:
+    return (
+        employee_is_in_service(employee, year, month)
+        and getattr(employee, "employment_status", EmploymentStatus.ACTIVE) in (
+            EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME, EmploymentStatus.RETIRED,
+        )
+        and getattr(employee, "role", Role.STAFF) not in (Role.ADVISOR, Role.REPRESENTATIVE)
+        and not getattr(employee, "is_auxiliary", False)
+    )
+
+
+def employee_rule_is_active(name: str, year: int, month: int) -> bool:
+    """対象者の退職後は個人ルールを適用しない。未知の氏名の検証は妨げない。"""
+    if not name:
+        return True
+    try:
+        employee = get_employee(name)
+    except KeyError:
+        return True
+    return employee_is_in_service(employee, year, month)
+
+
+def employee_status_label(employee: Employee) -> str:
+    retired = _parse_iso_date(employee.retired_at or APPROVED_RETIREMENT_DATES.get(employee.name))
+    if retired is not None:
+        from .submission_window import now_jst
+        return "退職" if now_jst().date() > retired else f"{employee.employment_status.value}（{retired}退職予定）"
+    return employee.employment_status.value
+
+
 _DYNAMIC_EMPLOYEE_CACHE: dict[str, Employee] = {}
 _DYNAMIC_EMPLOYEE_CACHE_SIGNATURE: tuple[int, int] | None = None
 
@@ -485,7 +537,7 @@ def is_probationary_employee(
     return month_start < probation_end and next_month > hired_on
 
 
-def shift_active_employees() -> list[Employee]:
+def shift_active_employees(year=None, month=None) -> list[Employee]:
     """
     通常のシフト生成対象（employee_config 経由）。
     退職者・顧問・休職中は自動除外。
@@ -493,16 +545,13 @@ def shift_active_employees() -> list[Employee]:
     try:
         from .employee_config import get_all_employees_including_retired
         all_emps = get_all_employees_including_retired()
-        # 在籍 or パートのみ（顧問・退職・休職・補助は除外）
         return [
             e for e in all_emps
-            if e.employment_status in (EmploymentStatus.ACTIVE, EmploymentStatus.PART_TIME)
-            and e.role != Role.ADVISOR
-            and not e.is_auxiliary
+            if employee_is_shift_eligible(e, year, month)
         ]
     except ImportError:
         # フォールバック
-        return [e for e in ALL_EMPLOYEES if e.role != Role.ADVISOR]
+        return [e for e in ALL_EMPLOYEES if employee_is_shift_eligible(e, year, month)]
 
 
 if __name__ == "__main__":

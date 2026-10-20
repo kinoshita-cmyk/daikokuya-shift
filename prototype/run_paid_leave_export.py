@@ -62,7 +62,7 @@ def export_month(data_root: Path, year: int, month: int) -> Path:
         rows_to_csv_bytes,
     )
     expected = [
-        e.name for e in shift_active_employees() if not e.is_auxiliary
+        e.name for e in shift_active_employees(year, month) if not e.is_auxiliary
     ]
     admin_days, admin_dates = admin_totals_from_file(
         CODE_ROOT / "config" / "admin_paid_leave_adjustments.json",

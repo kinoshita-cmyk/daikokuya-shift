@@ -124,7 +124,7 @@ from calendar import monthrange
 from prototype.submission_window import now_jst
 from prototype.models import Store, Affinity
 from prototype.test_manager_conditions_ui import employees
-def shift_active_employees(): return employees()
+def shift_active_employees(year=None, month=None): return employees()
 def get_employee(name): return next(e for e in employees() if e.name == name)
 def format_timestamp_jst(value): return str(value)
 ''' + app_function("render_monthly_exceptions_panel") + '''
