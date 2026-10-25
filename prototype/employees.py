@@ -56,13 +56,13 @@ ECO_STAFF: list[Employee] = [
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.AKABANE: Affinity.MEDIUM,
-            Store.SUZURAN: Affinity.MEDIUM,
+            Store.SUZURAN: Affinity.STRONG,
             Store.HIGASHIGUCHI: Affinity.NONE,    # 配置不可
             Store.NISHIGUCHI: Affinity.NONE,      # 配置不可
             Store.OMIYA: Affinity.WEAK,
         },
         annual_target_days=265,
-        notes="通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
+        notes="主担当: すずらん。通常対応可: 赤羽。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="楯",

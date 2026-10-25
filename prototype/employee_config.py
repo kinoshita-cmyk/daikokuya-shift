@@ -34,6 +34,7 @@ from .eco_support import APPROVED_SUPPORT_NAMES, SKILL_UPDATE_KEY
 EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
 DEFAULT_ECO_CORE_NAMES = frozenset({"今津", "土井", "楯", "春山", "下地", "長尾"})
+SUZUKI_STORE_UPDATE_KEY = "suzuki_store_update_20261025"
 
 
 def _employment_status_from_value(value: str | None) -> EmploymentStatus:
@@ -153,6 +154,7 @@ def employee_to_dict(emp: Employee) -> dict:
         "is_eco_core": emp.is_eco_core,
         # 初回の承認済み変更後は、管理画面での昇格・変更を優先する。
         SKILL_UPDATE_KEY: True,
+        SUZUKI_STORE_UPDATE_KEY: True,
     }
 
 
@@ -164,6 +166,13 @@ def employee_from_dict(data: dict) -> Employee:
         if store is None or store == Store.OFF:
             continue
         affinities[store] = _enum_from_value(Affinity, aff_value, Affinity.NONE)
+    notes = data.get("notes", "")
+    if data["name"] == "鈴木" and not data.get(SUZUKI_STORE_UPDATE_KEY):
+        # 旧バックアップにも承認済みの原則変更を適用。保存後の管理者変更は維持する。
+        affinities[Store.SUZURAN] = Affinity.STRONG
+        affinities[Store.AKABANE] = Affinity.MEDIUM
+        if notes == "通常対応可: 赤羽・すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。":
+            notes = "主担当: すずらん。通常対応可: 赤羽。応援・巡回可: 大宮。絶対配置不可: 東口・西口。"
     return Employee(
         name=data["name"],
         full_name=data.get("full_name"),
@@ -178,7 +187,7 @@ def employee_from_dict(data: dict) -> Employee:
         ),
         affinities=affinities,
         annual_target_days=data.get("annual_target_days"),
-        notes=data.get("notes", ""),
+        notes=notes,
         employment_status=_employment_status_from_value(data.get("employment_status")),
         hired_at=data.get("hired_at"),
         retired_at=data.get("retired_at") or _default_employees.APPROVED_RETIREMENT_DATES.get(data["name"]),
