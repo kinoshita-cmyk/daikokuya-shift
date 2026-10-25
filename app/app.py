@@ -363,6 +363,7 @@ def build_effective_rule_visibility_rows(
         yamamoto_monthly_policy,
     )
     from prototype.models import Store
+    from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
     from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
     year = int(year)
@@ -549,6 +550,14 @@ def build_effective_rule_visibility_rows(
             "変更場所": "設定 → 月例外 → 山本の補助勤務方針",
         },
     ]
+    rows.extend([
+        {"対象": "エコサポート（不足時例外: 大類・田中）", "ルール": "エコサポートの配置",
+         "適用範囲": "全月固定", "強さ": "原則同伴 / 指定店舗の不足時のみ例外・WARNING",
+         "現在有効な内容": SUPPORT_DESCRIPTION, "変更場所": "スキルは従業員マスタ・例外店舗は固定ルール"},
+        {"対象": "下地・春山", "ルール": "下地・春山だけの2名体制回避",
+         "適用範囲": "全月固定", "強さ": "強い目標 / WARNING",
+         "現在有効な内容": OMIYA_PAIR_DESCRIPTION, "変更場所": "固定ルール"},
+    ])
     status = {
         "ym_key": ym_key,
         "general_hard_max": general_hard_max,
@@ -935,10 +944,13 @@ def _restore_monthly_exceptions_on_boot() -> str:
     try:
         from prototype.github_backup import fetch_config_from_github
         from prototype import rules as _rules_mod
-        from prototype.monthly_store_update import prepare_store_update, push_verified_monthly_settings
+        from prototype.monthly_store_update import (
+            prepare_store_update, prepare_november_store_update,
+            push_verified_monthly_settings, NOVEMBER_UPDATE_ID,
+        )
         success, remote_data, msg = fetch_config_from_github("monthly_exceptions")
         if not success:
-            return f"復元スキップ・10月店舗区分の自動追加は保留（{msg}）"
+            return f"復元スキップ・10月/11月店舗区分の自動追加は保留（{msg}）"
         remote_at = str(remote_data.get("updated_at", ""))
         local_at = str(_rules_mod.load_monthly_exceptions_raw().get("updated_at", ""))
         restore_status = "ローカルの設定が最新（復元不要）"
@@ -957,19 +969,23 @@ def _restore_monthly_exceptions_on_boot() -> str:
         updated, changed = prepare_store_update(
             _rules_mod.load_monthly_exceptions_raw(), get_all_employees_including_retired(),
         )
+        updated, november_changed = prepare_november_store_update(
+            updated, get_all_employees_including_retired(),
+        )
+        changed = changed or november_changed
         if changed:
             ok, status = _rules_mod.save_monthly_exceptions(
-                updated, actor="管理者依頼", action="2026年10月の鈴木・田中・牧野の店舗区分を追加",
+                updated, actor="管理者依頼", action="承認済み2026年10月/11月の店舗区分を初期追加",
             )
             if not ok:
-                return f"10月店舗区分の追加失敗（{status}）"
+                return f"月別店舗区分の追加失敗（{status}）"
         # 適用済みの印も同期する。削除・編集後の再起動で元の指定を復活させない。
         from prototype.monthly_store_update import UPDATE_ID
-        if UPDATE_ID not in remote_data.get("applied_updates", []):
+        if not {UPDATE_ID, NOVEMBER_UPDATE_ID}.issubset(remote_data.get("applied_updates", [])):
             pushed, push_msg = push_verified_monthly_settings(_rules_mod.load_monthly_exceptions_raw())
             if not pushed:
-                return f"10月店舗区分はローカルに追加済み・バックアップ未保存（{push_msg}）"
-        return restore_status + " ／ 10月店舗区分の初期追加は適用済み"
+                return f"月別店舗区分はローカルに追加済み・バックアップ未保存（{push_msg}）"
+        return restore_status + " ／ 10月/11月店舗区分の初期追加は適用済み"
     except Exception as exc:
         return f"復元エラー（{type(exc).__name__}）"
 
@@ -3619,6 +3635,11 @@ def render_generation_metadata_summary(metadata: dict, title: str = "保存済�
             st.write(f"- 休日日数の固定指定: {input_summary['exact_holiday_days']}")
         if input_summary.get("employee_max_consecutive_work"):
             st.write(f"- 個別の連勤上限: {input_summary['employee_max_consecutive_work']}")
+        support_search = input_summary.get("eco_support_search") or {}
+        if support_search.get("fallback_used"):
+            st.write("- エコサポート: 同伴ありでは成立せず、許可店舗での不足時例外を使用。対象日は検証警告を確認してください。")
+            if not support_search.get("minimum_proven"):
+                st.write("- 例外日数は少なくなるよう探索しましたが、最小日数の証明には至っていません。")
         for rule in input_summary.get("consecutive_count_rules", []):
             st.write(f"- {rule['employee']}: {consecutive_count_label(rule)}")
         if input_summary.get("tobishi_definition"):
@@ -6810,6 +6831,7 @@ if mode == "📊 経営者ビュー":
                         "random_seed": rule_cfg.parameters.get("solver_seed", 42),
                         "verbose": False,
                         "consecutive_count_rules": use_consecutive_count_rules,
+                        "status_out": {},
                     }
                     generator_params = inspect.signature(generate_shift).parameters
                     generation_kwargs["conditional_store_requests"] = use_conditional_store_requests
@@ -6859,6 +6881,7 @@ if mode == "📊 経営者ビュー":
                             "\n※警告が出ない条件では解が見つからなかったため、"
                             "一部の警告条件だけ緩めて生成しました。"
                         )
+                    support_search = generation_kwargs["status_out"].get("eco_support_search", {})
 
                     if shift is not None:
                         # 通常生成後も同じ飛び石定義で安全な勤務交換を試す。
@@ -7007,6 +7030,7 @@ if mode == "📊 経営者ビュー":
 
                         if shift is None and advisor_probe_shift is not None:
                             shift = strip_advisor_assignments(advisor_probe_shift)
+                            support_search = generation_kwargs["status_out"].get("eco_support_search", {})
                             advisor_candidate_base_used = True
                             data_source_msg += (
                                 "\n顧問なしでは解が見つからなかったため、"
@@ -7032,6 +7056,7 @@ if mode == "📊 経営者ビュー":
                             emergency_probe_shift = generate_shift(**emergency_probe_kwargs)
                             if emergency_probe_shift is not None:
                                 shift = strip_advisor_assignments(emergency_probe_shift)
+                                support_search = generation_kwargs["status_out"].get("eco_support_search", {})
                                 advisor_candidates = advisor_candidate_rows_from_shift(
                                     emergency_probe_shift
                                 )
@@ -7067,6 +7092,7 @@ if mode == "📊 経営者ビュー":
                             consec_exceptions=use_consec_exceptions,
                         )
                         incomplete_manual_draft_used = True
+                        support_search = {}
 
                         # 解なしの原因を即時検査し、結果を画面用に保存する。
                         # 緩和探索（ボタン実行）用に生成条件一式も保存する。
@@ -7119,6 +7145,13 @@ if mode == "📊 経営者ビュー":
                             "\n⚠ 完全な自動生成はできませんでした。"
                             "本人×休み・月別日付指定・店舗指定の出勤希望だけを入れた"
                             "未完成下書きを表示します。空白セルを手動で埋めてください。"
+                        )
+
+                    if support_search.get("fallback_used"):
+                        data_source_msg += (
+                            "\n※独り立ち済みエコの同伴ありでは成立しないため、"
+                            "許可店舗でのエコサポート単独担当を不足時例外として使用しました。"
+                            "対象日・店舗は「エコサポート不足時例外」の警告で確認してください。"
                         )
 
                 # session_state を再度確実にセット（生成中にリセットされた場合の保険）
@@ -7188,6 +7221,7 @@ if mode == "📊 経営者ビュー":
                         "休み・出勤・休みの1日だけの単独出勤"
                     ),
                     "tobishi_post_adjustment": dict(tobishi_post_adjustment),
+                    "eco_support_search": dict(support_search),
                     "parsed_note_summaries": dict(
                         getattr(sub_data, "parsed_note_summaries", {})
                     ),
@@ -10373,14 +10407,23 @@ elif mode == "👤 従業員ビュー":
     )
     with st.expander("希望条件の記入例"):
         st.text(
-            "6日 赤羽出勤希望\n"
+            "【勤務する日・店舗】\n"
+            "18日 赤羽出勤希望\n"
+            "1日・2日・3日・4日は出勤希望\n\n"
+            "【候補日のどちらかを休みたい】\n"
             "16日・17日のどちらか1日休み希望\n"
-            "5日・6日のどちらか1日休み希望。出勤の場合5日・6日は赤羽希望\n"
+            "5日・6日のどちらか1日休み希望。出勤の場合5日・6日は赤羽希望\n\n"
+            "【月の出勤・休日日数】\n"
             "有給2日を含め、合計10日休み希望\n"
-            "月12日勤務希望\n"
-            "2連休は月1回のみ"
+            "月12日勤務希望\n\n"
+            "【連休・連勤】\n"
+            "連休の希望なし（連休になっても構わない）\n"
+            "2連休以上は不可（休みを連続させたくない）\n"
+            "2連休は月1回のみ\n"
+            "最大5連勤まで可能"
         )
         st.caption("日付・日数・店舗などを具体的に、1つの希望ごとに改行してください。×・△で指定済みの日付の再記入は不要です。")
+        st.caption("「連休の希望なし」と「2連休以上は不可」は意味が異なります。「12日勤務」では日付か日数か分からないため、「12日出勤希望」または「月12日勤務希望」と記入してください。事情や理由は下の経営者への連絡欄へご記入ください。")
     st.session_state.setdefault(
         free_text_key, st.session_state.get(free_text_draft_key, (existing_submission or {}).get("note", "") or ""),
     )
@@ -11347,7 +11390,20 @@ elif mode == "⚙️ 設定":
                 "メモ": note,
             }
 
+        from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
         rule_inventory = [
+            _rule_row(
+                "技能・配置", "エコサポートの配置",
+                SUPPORT_DESCRIPTION,
+                "反映中", "原則違反はERROR・許可店舗の単独担当はWARNING", "有効ルール・条件ブックに反映",
+                "スキルは従業員マスタで変更可", "反映中",
+            ),
+            _rule_row(
+                "店舗・人数", "下地・春山だけの2名体制回避",
+                OMIYA_PAIR_DESCRIPTION,
+                "強い目標", "WARNING", "有効ルール・条件ブックに反映",
+                "コード固定", "反映中",
+            ),
             _rule_row(
                 "店舗・人数", "赤羽駅前店の基本体制",
                 "基本はエコ対応1名以上+合計3名。エコ担当はチケット対応も可。チケット対応不足時は山本さん補助。",
@@ -12102,9 +12158,8 @@ elif mode == "⚙️ 設定":
                             options=[s.value for s in Skill],
                             index=[s.value for s in Skill].index(target.skill.value),
                             help=(
-                                "エコサポートは研修終了直後の区分です。"
-                                "シフトでは必ず同じ店舗に独り立ち済みのエコ担当を置き、"
-                                "単独のエコ担当にはしません。"
+                                "エコサポートは原則、独り立ち済みエコが同店舗に必要です。"
+                                "不足時のみ大類はすずらん、田中はすずらん・赤羽で単独エコ担当を許容します。"
                             ),
                         )
                         new_status = st.selectbox(
@@ -12248,8 +12303,8 @@ elif mode == "⚙️ 設定":
                         index=[s.value for s in Skill].index(Skill.TICKET.value),
                         help=(
                             "新入社員はまずチケット担当から開始するのが慣例です。"
-                            "エコサポートは研修終了直後の区分で、"
-                            "独り立ち済みのエコ担当との同店舗勤務が必須です。"
+                            "エコサポートは原則同伴が必要な区分で、"
+                            "独り立ち済みエコと同店舗勤務にします。不足時の単独エコ例外は指定スタッフ・店舗に限定します。"
                         ),
                     )
                 with a_col2:
