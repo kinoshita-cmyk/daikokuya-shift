@@ -4,11 +4,15 @@ import streamlit as st
 
 def build_review_rows(names, submitted, adjustments, summaries, year, month,
                       reflection_builder, label_builder, day_formatter,
-                      admin_leave=None):
+                      admin_leave=None, *, include_personal_notes=False):
     submitted_by_name = {item["employee"]: item for item in submitted}
     rows, details = [], {}
     for name in names:
-        item = submitted_by_name.get(name, {})
+        item = dict(submitted_by_name.get(name, {}))
+        personal_note = item.get("personal_note", "") or ""
+        if not include_personal_notes:
+            item.pop("personal_note", None)
+            personal_note = ""
         original = item.get("note", "") or item.get("note_excerpt", "")
         adjustment = adjustments.get(name, {})
         reflection = reflection_builder(original, adjustment, year, month, item.get("off_request_days", []))
@@ -24,7 +28,7 @@ def build_review_rows(names, submitted, adjustments, summaries, year, month,
             review = "反映しない"
         details[name] = dict(item=item, original=original, adjustment=adjustment,
                              reflection=reflection, labels=labels, notes=notes, review=review,
-                             available=summaries is not None)
+                             available=summaries is not None, personal_note=personal_note)
         rows.append({
             "氏名": name,
             "提出": "提出済み" if item else "未提出",
@@ -36,6 +40,8 @@ def build_review_rows(names, submitted, adjustments, summaries, year, month,
             "自由記載の原文": original,
             "生成に使う自由記載条件": " / ".join(labels) if summaries is not None else "取得できませんでした",
         })
+        if include_personal_notes:
+            rows[-1]["事情・相談"] = "あり" if personal_note.strip() else "-"
     return rows, details
 
 
@@ -43,6 +49,9 @@ def render_submission_review(rows, details, year, month, editor):
     needs_review = [name for name, item in details.items() if item["review"] == "要確認"]
     if needs_review:
         st.warning("自由記載の要確認: " + "、".join(needs_review))
+    personal_names = [name for name, item in details.items() if item.get("personal_note", "").strip()]
+    if personal_names:
+        st.info("経営者への事情・相談: " + "、".join(personal_names))
     with st.expander("本人提出希望・自由記載の確認と補正", expanded=False):
         if not rows:
             st.info("対象スタッフがいません。")
@@ -67,6 +76,9 @@ def render_submission_review(rows, details, year, month, editor):
         detail = details[selected]
         st.markdown("**原文（本人提出・変更不可）**")
         st.text(detail["original"] or "自由記載なし")
+        if detail.get("personal_note", "").strip():
+            st.markdown("**経営者への事情・相談（自動反映の対象外）**")
+            st.text(detail["personal_note"])
         st.markdown("**現在、生成に使う自由記載条件**")
         if detail["available"]:
             st.text("\n".join(detail["labels"]) or "自由記載由来の条件なし")
@@ -80,3 +92,29 @@ def render_submission_review(rows, details, year, month, editor):
             st.write("反映方式: " + detail["reflection"]["source_label"])
         editor(detail["original"], detail["adjustment"], year, month, selected,
                detail["item"].get("off_request_days", []))
+
+
+def render_employee_note_texts(condition_text, personal_text, *, show_personal=True):
+    """本人が提出した文章を、省略せずに確認できる表示。"""
+    st.markdown("#### 希望条件（入力した原文）")
+    st.text(condition_text if str(condition_text or "").strip() else "記載なし")
+    if show_personal:
+        st.markdown("#### 経営者への事情・相談（入力した原文）")
+        st.text(personal_text if str(personal_text or "").strip() else "記載なし")
+
+
+def render_employee_note_review(condition_text, personal_text, summary, *, show_personal=True):
+    render_employee_note_texts(condition_text, personal_text, show_personal=False)
+    if str(condition_text or "").strip():
+        st.markdown("#### 読み取れた希望条件")
+        st.text("\n".join(summary.get("auto_labels", [])) or "読み取れた希望条件はありません。")
+        if summary.get("review_labels"):
+            st.markdown("**自動で読み切れなかった点・確認が必要な点**")
+            st.text("\n".join(dict.fromkeys(summary["review_labels"])))
+            st.info("このまま提出できます。原文と確認が必要な点は管理者へ届きます。意図と違う場合は、入力に戻って修正してください。")
+        st.caption("読み取り結果はシフト確定ではありません。必要な補正・調整は管理者が行います。")
+    if show_personal:
+        st.markdown("#### 経営者への事情・相談（入力した原文）")
+        st.text(personal_text if str(personal_text or "").strip() else "記載なし")
+        if str(personal_text or "").strip():
+            st.caption("事情・相談は経営者へ届けます。自動ではシフト条件に変換しません。")

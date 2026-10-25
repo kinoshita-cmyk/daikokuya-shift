@@ -179,6 +179,11 @@ class ShiftBackup:
         flexible_off: list[tuple],
         natural_language_notes: dict[str, str],
         author: str = "system",
+        *,
+        personal_notes: Optional[dict[str, str]] = None,
+        paid_leave_days: Optional[int] = None,
+        monthly_target_workdays: Optional[int] = None,
+        base_holidays: Optional[int] = None,
     ) -> Path:
         """希望データをスナップショット化"""
         month_dir = self._get_month_dir(year, month)
@@ -202,6 +207,15 @@ class ShiftBackup:
             ],
             "natural_language_notes": natural_language_notes,
         }
+        # Keep private context separate from text used to generate constraints.
+        if personal_notes is not None:
+            data["personal_notes"] = dict(personal_notes)
+        if paid_leave_days is not None:
+            data["paid_leave_days"] = int(paid_leave_days)
+        if monthly_target_workdays is not None:
+            data["monthly_target_workdays"] = int(monthly_target_workdays)
+        if base_holidays is not None:
+            data["base_holidays"] = int(base_holidays)
         self._write_json_atomic(file_path, data)
         return file_path
 
@@ -380,6 +394,8 @@ class ShiftBackup:
                     notes = data.get("natural_language_notes", {})
                     if isinstance(notes, dict):
                         note_text = notes.get(author, "")
+                    personal_notes = data.get("personal_notes", {})
+                    personal_note = personal_notes.get(author, "") if isinstance(personal_notes, dict) else ""
                     submission_map[author] = {
                         "employee": author,
                         "submitted_at": saved_at,
@@ -393,6 +409,7 @@ class ShiftBackup:
                         "has_note": bool(note_text and note_text.strip()),
                         "note": note_text,
                         "note_excerpt": note_text[:50] + ("..." if len(note_text) > 50 else ""),
+                        "personal_note": personal_note,
                     }
             except (json.JSONDecodeError, OSError) as e:
                 load_warnings.append(
