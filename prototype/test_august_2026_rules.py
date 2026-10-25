@@ -1,6 +1,8 @@
 """固定ルール・2026年8月条件・山本さん補助上限の回帰テスト。"""
 
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from prototype.generator import (
     AVOID_SAME_OFF_PENALTY,
@@ -21,6 +23,7 @@ from prototype.models import (
     OperationMode,
     ShiftAssignment,
     Store,
+    Skill,
 )
 from prototype.rules import (
     YamamotoLogic,
@@ -257,12 +260,10 @@ class August2026RulesTest(unittest.TestCase):
             ),
         ]
         result = ValidationResult()
-        _check_store_capacity(
-            shift,
-            result,
-            21,
-            allow_omiya_short=True,
-        )
+        # 過去の研修時点のスキル。現在の昇格済みマスタに依存させない。
+        with patch("prototype.validator.get_employee", side_effect=lambda name:
+                   replace(get_employee(name), skill=Skill.TICKET) if name == "田中" else get_employee(name)):
+            _check_store_capacity(shift, result, 21, allow_omiya_short=True)
         day_21_east_errors = [
             issue for issue in result.issues
             if issue.day == 21
@@ -287,12 +288,9 @@ class August2026RulesTest(unittest.TestCase):
             ),
         ]
         result = ValidationResult()
-        _check_store_capacity(
-            shift,
-            result,
-            1,
-            allow_omiya_short=True,
-        )
+        with patch("prototype.validator.get_employee", side_effect=lambda name:
+                   replace(get_employee(name), skill=Skill.TICKET) if name == "大類" else get_employee(name)):
+            _check_store_capacity(shift, result, 1, allow_omiya_short=True)
         omiya_issues = [
             issue for issue in result.issues
             if issue.day == 1 and "大宮駅前店" in issue.message

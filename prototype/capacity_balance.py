@@ -186,7 +186,8 @@ def compute_monthly_capacity_balance(
             "氏名": name,
             "供給人区": supply,
             "計算式": formula,
-            "エコ": "○" if is_eco else "",
+            "エコ": ("○" if is_eco else "同伴必要（独立エコ供給には含めない）"
+                       if getattr(e, "skill", None) == Skill.ECO_SUPPORT else ""),
         })
 
     # ---- 判定 ---------------------------------------------------

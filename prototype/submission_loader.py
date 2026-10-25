@@ -408,7 +408,7 @@ def _extract_ng_consecutive_limit(text: str, label: str) -> Optional[int]:
         r"必要ありません|なくていい|なくてもいい)"
     )
     patterns = [
-        rf"(\d{{1,2}})\s*{label}\s*(?:は|を|が)?\s*{negative_words}",
+        rf"(\d{{1,2}})\s*{label}\s*(?:以上)?\s*(?:は|を|が)?\s*{negative_words}",
         rf"{negative_words}\s*[:：]?\s*(\d{{1,2}})\s*{label}",
     ]
     for pattern in patterns:
@@ -619,12 +619,24 @@ def parse_natural_language_note(
     if max_consecutive_work is not None:
         result.max_consecutive_work_days = max_consecutive_work
     max_consecutive_off = _extract_ng_consecutive_limit(normalized, "連休")
+    if max_consecutive_off is None and re.search(
+        r"(?:^|[。\n])\s*連休\s*(?:は)?\s*(?:なし|無し|不可|禁止)\s*(?:です)?\s*(?=$|[。\n])",
+        normalized,
+    ):
+        max_consecutive_off = 1
     if max_consecutive_off is None:
         max_consecutive_off = _extract_allowed_consecutive_limit(normalized, "連休")
     if max_consecutive_off is not None:
         result.max_consecutive_off_days = max_consecutive_off
 
     consecutive_off_negated = _has_consecutive_off_negation(normalized)
+    if (max_consecutive_off is None and consecutive_off_negated
+            and not any(r["kind"] == "off" and r["days"] == 2 for r in result.consecutive_count_rules)):
+        # 最低回数だけ解除する。「希望しない」を連休禁止に格上げしない。
+        result.consecutive_count_rules.append({
+            "kind": "off", "days": 2, "count": 0, "comparison": "min",
+            "source": "no_off_preference",
+        })
     consecutive_off = _extract_number([r"(\d{1,2})\s*連休"], normalized)
     if consecutive_off is not None and consecutive_off >= 2:
         if max_consecutive_off is None and not consecutive_off_negated:
@@ -715,6 +727,14 @@ def parse_natural_language_note(
             and "希望" in sentence
             and "休み" not in sentence
         )
+        # 希望条件欄の「18日赤羽」のような短い一文だけを補う。
+        # 理由・否定・他者への言及や複数店舗を含む文章は推測しない。
+        short_store_request = re.fullmatch(
+            r"\s*\d{1,2}\s*日\s*(?:は)?\s*"
+            r"(?:赤羽駅前|赤羽東口|大宮駅前|大宮西口|大宮すずらん通り|"
+            r"すずらん通り|赤羽|大宮|東口|西口|すずらん)(?:店)?\s*",
+            sentence,
+        ) is not None
         direct_work_request = bool(re.search(
             r"日\s*(?:は|に|全て|すべて|全部|すべての|全ての)*\s*"
             r"(?:(?:赤羽駅前|赤羽東口|大宮駅前|大宮西口|大宮すずらん通り|赤羽|大宮|東口|西口|すずらん)(?:店)?(?:に|で)?\s*)?"
@@ -723,7 +743,7 @@ def parse_natural_language_note(
         is_work_request = any(
             word in sentence
             for word in ("出勤希望", "出勤したい", "出たい", "出れます", "出られます", "出勤確定")
-        ) or is_store_request or direct_work_request
+        ) or is_store_request or direct_work_request or short_store_request
         if re.search(r"(?:出勤|勤務)(?:は)?\s*(?:不可|しない|できない|しません|希望しない)", sentence):
             is_work_request = False
         if requested_work_days is not None and re.fullmatch(

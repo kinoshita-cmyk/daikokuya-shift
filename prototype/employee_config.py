@@ -29,6 +29,7 @@ from .models import Employee, Skill, Role, Store, StationType, Affinity, Employm
 from . import employees as _default_employees
 from .paths import CONFIG_DIR
 from .submission_window import now_jst
+from .eco_support import APPROVED_SUPPORT_NAMES, SKILL_UPDATE_KEY
 
 EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
@@ -150,6 +151,8 @@ def employee_to_dict(emp: Employee) -> dict:
         "is_auxiliary": emp.is_auxiliary,
         "only_on_request_days": emp.only_on_request_days,
         "is_eco_core": emp.is_eco_core,
+        # 初回の承認済み変更後は、管理画面での昇格・変更を優先する。
+        SKILL_UPDATE_KEY: True,
     }
 
 
@@ -166,7 +169,9 @@ def employee_from_dict(data: dict) -> Employee:
         full_name=data.get("full_name"),
         employee_id=data.get("employee_id"),
         role=_enum_from_value(Role, data.get("role"), Role.STAFF),
-        skill=_skill_from_value(data.get("skill")),
+        skill=(Skill.ECO_SUPPORT
+               if data["name"] in APPROVED_SUPPORT_NAMES and not data.get(SKILL_UPDATE_KEY)
+               else _skill_from_value(data.get("skill"))),
         home_store=_store_from_value(data.get("home_store")),
         station_type=_enum_from_value(
             StationType, data.get("station_type"), StationType.FLEXIBLE,

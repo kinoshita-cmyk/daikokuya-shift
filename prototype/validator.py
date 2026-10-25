@@ -12,6 +12,10 @@
 
 from __future__ import annotations
 from .conditional_store import conditional_store_mismatches
+from .eco_support import (
+    solo_exception_allowed, SOLO_EXCEPTION_CATEGORY, OMIYA_PAIR_CATEGORY,
+    OMIYA_PAIR_DESCRIPTION, is_omiya_anchor_pair_only,
+)
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from calendar import monthrange
@@ -329,6 +333,7 @@ def validate(
 
     # 1-2. 大宮駅前2名体制の構成員チェック
     _check_omiya_two_person_excluded_staff(shift, result, days_in_month)
+    _check_omiya_anchor_pair(shift, result, days_in_month)
 
     # 2. 1日全体の人数上限チェック
     _check_daily_staffing_limit(shift, result, days_in_month)
@@ -336,7 +341,7 @@ def validate(
     # 3. エコ配置チェック（東口・西口必須）
     _check_eco_placement(shift, result, days_in_month)
 
-    # 3-2. エコサポートは同店舗に独り立ち済みエコが必須
+    # 3-2. エコサポートの同伴原則と、指定店舗のみの不足時例外
     _check_eco_support_pairing(shift, result, days_in_month)
 
     # 4. 連勤チェック
@@ -870,6 +875,15 @@ def _check_eco_support_pairing(
                 continue
             if assignment.store in independent_eco_stores:
                 continue
+            if solo_exception_allowed(employee, assignment.store):
+                result.issues.append(Issue(
+                    severity="WARNING", category=SOLO_EXCEPTION_CATEGORY,
+                    day=day, employee=assignment.employee,
+                    message=(f"{assignment.store.display_name}で独り立ち済みエコの同伴がありません。"
+                             "この店舗では人員不足時のみ単独エコ担当を許容します。"
+                             "同伴できる配置を優先してください。店舗の必要人数は別途確認します。"),
+                ))
+                continue
             result.issues.append(Issue(
                 severity="ERROR",
                 category="エコサポート単独",
@@ -879,6 +893,18 @@ def _check_eco_support_pairing(
                     f"{assignment.store.display_name}のエコサポート勤務には、"
                     "同じ店舗に独り立ち済みのエコ担当が必要です"
                 ),
+            ))
+
+
+def _check_omiya_anchor_pair(shift, result, days):
+    for day in range(1, days + 1):
+        names = [a.employee for a in shift.get_day_assignments(day)
+                 if a.store == Store.OMIYA
+                 and not is_probationary_employee(get_employee(a.employee), shift.year, shift.month, day)]
+        if is_omiya_anchor_pair_only(names):
+            result.issues.append(Issue(
+                severity="WARNING", category=OMIYA_PAIR_CATEGORY, day=day,
+                employee=None, message=OMIYA_PAIR_DESCRIPTION,
             ))
 
 
@@ -1063,6 +1089,15 @@ def _check_consecutive_off(
         emp_max_off = employee_max_consecutive_off.get(emp.name)
         if emp_max_off is not None:
             max_allowed_off = min(max_allowed_off, int(emp_max_off))
+        if max_allowed_off == 1:
+            for day in range(1, days):
+                pair = [shift.get_assignment(emp.name, d) for d in (day, day + 1)]
+                if (all(a is None or a.store == Store.OFF for a in pair)
+                        and not {day, day + 1}.issubset(emp_off_requests)):
+                    result.issues.append(Issue(
+                        severity="ERROR", category="連休上限", day=day, employee=emp.name,
+                        message=f"{day}日・{day + 1}日が連休です。本人の指定は2連休以上不可です（本人×希望の連続は除く）。",
+                    ))
 
         consec_off = 0
         two_off_count = 0
@@ -1121,7 +1156,7 @@ def _check_consecutive_off(
 
         personal_counts = [r for r in consecutive_count_rules or []
                            if r["employee"] == emp.name and r["kind"] == "off" and r["days"] == 2]
-        if two_off_count < min_2off and not any(r["comparison"] in {"exact", "min"} for r in personal_counts):
+        if max_allowed_off != 1 and two_off_count < min_2off and not any(r["comparison"] in {"exact", "min"} for r in personal_counts):
             result.issues.append(Issue(
                 severity="WARNING",
                 category="2連休不足",

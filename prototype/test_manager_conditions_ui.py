@@ -10,6 +10,7 @@ from unittest.mock import patch
 from prototype import rules
 from prototype.models import Store, Affinity
 from prototype.monthly_store_update import prepare_store_update, push_verified_monthly_settings, UPDATE_ID, STORE_CHANGES
+from prototype.monthly_store_update import NOVEMBER_UPDATE_ID
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +29,7 @@ def employees():
         Store.OMIYA: Affinity.WEAK,
         Store.HIGASHIGUCHI: Affinity.NONE,
         Store.NISHIGUCHI: Affinity.NONE,
-    }) for name in STORE_CHANGES]
+    }) for name in [*STORE_CHANGES, "岩野"]]
 
 
 class StoreUpdateTest(unittest.TestCase):
@@ -79,6 +80,8 @@ class StoreUpdateTest(unittest.TestCase):
             result, _ = prepare_store_update({}, employees())
             self.assertTrue(rules.save_monthly_exceptions(result)[0])
             for employee in employees():
+                if employee.name not in STORE_CHANGES:
+                    continue
                 primary, normal = STORE_CHANGES[employee.name]
                 affinities = rules.effective_employee_store_affinities(employee, 2026, 10)
                 self.assertEqual(affinities[primary], Affinity.STRONG)
@@ -210,9 +213,11 @@ render_monthly_exceptions_panel(st.session_state.get("year", 2026), st.session_s
         self.assertIn("適用済み", status)
         saved = rules.load_monthly_exceptions_raw()
         self.assertIn(UPDATE_ID, saved["applied_updates"])
-        self.assertEqual(saved["employee_store_overrides"]["2026-11"], remote["employee_store_overrides"]["2026-11"])
+        self.assertEqual(saved["employee_store_overrides"]["2026-11"]["鈴木"], remote["employee_store_overrides"]["2026-11"]["鈴木"])
+        self.assertEqual(saved["employee_store_overrides"]["2026-11"]["田中"]["normal_stores"], ["AKABANE", "SUZURAN", "OMIYA"])
+        self.assertEqual(saved["employee_store_overrides"]["2026-11"]["岩野"]["primary_store"], "SUZURAN")
         self.assertEqual(saved["operation_modes"], remote["operation_modes"])
-        self.assertEqual(push.call_args.args[1]["applied_updates"], [UPDATE_ID])
+        self.assertEqual(push.call_args.args[1]["applied_updates"], [UPDATE_ID, NOVEMBER_UPDATE_ID])
         del saved["employee_store_overrides"]["2026-10"]["鈴木"]
         rules.save_monthly_exceptions(saved)
         remote = rules.load_monthly_exceptions_raw()

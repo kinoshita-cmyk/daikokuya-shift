@@ -827,6 +827,9 @@ def active_code_managed_monthly_rules(year: int, month: int, *, include_fixed: b
     """既存の生成結果説明用。固定ルールと月別条件を含む（互換用）。"""
     notes = []
     if include_fixed:
+        from .eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
+        notes.append("固定ルール（原則同伴・不足時のみ例外）: " + SUPPORT_DESCRIPTION)
+        notes.append("固定の強い目標: " + OMIYA_PAIR_DESCRIPTION)
         notes.append(
             f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
         )

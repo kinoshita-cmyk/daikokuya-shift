@@ -8,6 +8,8 @@ from calendar import monthrange
 
 
 def consecutive_count_label(rule: dict) -> str:
+    if rule.get("source") == "no_off_preference":
+        return "連休の希望なし（連休の最低回数指定なし・連休は禁止しない）"
     kind = "連休" if rule["kind"] == "off" else "連勤"
     comparison = {"exact": "ちょうど", "max": "最大", "min": "最低"}[rule["comparison"]]
     return f"{kind}回数: {rule['days']}{kind}を月内{comparison}{rule['count']}回"

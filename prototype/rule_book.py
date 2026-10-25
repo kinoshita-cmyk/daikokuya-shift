@@ -242,7 +242,8 @@ def build_month(year, month, config, employees, ledger, sub=None):
         "絶対担当": "配置可能な店舗が1店舗のみの従業員は、その店舗だけが勤務候補です。下の従業員別店舗区分が現在の設定です。",
         "今津の赤羽比率": "今津さんの主担当・通常・応援は下の最新店舗区分に従います。月曜・土日は別途、赤羽駅前を強く優先します。",
     }
-    skip = {"山本補助", "従業員別の店舗適性"}
+    skip = {"山本補助", "従業員別の店舗適性", "エコサポートの同伴原則と不足時例外",
+            "下地・春山だけの2名体制回避"}
     for item in ledger.get("rules", []):
         title = item.get("ルール", "")
         if item.get("分類") == "月別例外" or title in skip:
@@ -256,8 +257,11 @@ def build_month(year, month, config, employees, ledger, sub=None):
             "base:" + title, title, text, strength,
             scope if title == "大宮駅前アンカー" and rules.is_omiya_anchor_relaxed_month(year, month) else "全月共通",
         ))
+    from .eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
     sections["basic"].append(card("base:eco-support", "エコサポートの配置",
-        "エコサポートは、独り立ちしたエコ担当と一緒に配置します。エコサポートだけでエコ担当の最低人数を満たす扱いにはしません。", "絶対"))
+        SUPPORT_DESCRIPTION, "絶対"))
+    sections["store"].append(card("base:omiya-anchor-pair", "下地・春山だけの2名体制回避",
+        OMIYA_PAIR_DESCRIPTION, "目標"))
     policy = rules.yamamoto_monthly_policy(year, month)
     sections["individual"].append(card(
         "base:yamamoto", "山本さんの補助勤務",

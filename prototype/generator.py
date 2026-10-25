@@ -24,10 +24,14 @@ from __future__ import annotations
 from .conditional_store import normalize_conditional_store_requests, conditional_store_penalties
 from calendar import monthrange
 from datetime import date
+from time import monotonic
 from typing import Optional
 
 from ortools.sat.python import cp_model
 from .consecutive_counts import add_consecutive_count_constraints
+from .eco_support import (
+    solo_exception_allowed, OMIYA_PAIR_PENALTY, OMIYA_PAIR_DESCRIPTION,
+)
 from .work_recovery import (
     CLOSE_LONG_WORK_DESCRIPTION, CLOSE_LONG_WORK_PENALTY,
     add_close_long_work_indicators, previous_working_map, work_recovery_applies,
@@ -219,8 +223,10 @@ def _add_eco_support_pairing_constraints(
     stores: list[Store],
     independent_eco_employees: list,
     eco_support_employees: list,
-) -> None:
-    """エコサポートに同店舗の独り立ち済みエコを必須とする。"""
+    *, allow_shortage_exceptions: bool = False,
+) -> dict:
+    """許可店舗でも例外を明示変数にし、通常探索では必ずゼロに固定する。"""
+    exceptions = {}
     for support in eco_support_employees:
         for day in days:
             for store in stores:
@@ -228,9 +234,74 @@ def _add_eco_support_pairing_constraints(
                     x[employee.name][day][store]
                     for employee in independent_eco_employees
                 )
-                model.Add(
-                    x[support.name][day][store] <= independent_eco_here
-                )
+                assignment = x[support.name][day][store]
+                if allow_shortage_exceptions and solo_exception_allowed(support, store):
+                    solo = model.NewBoolVar(f"eco_support_solo_{support.name}_{day}_{store.name}")
+                    model.Add(solo <= assignment)
+                    model.Add(independent_eco_here == 0).OnlyEnforceIf(solo)
+                    model.Add(independent_eco_here >= 1).OnlyEnforceIf([assignment, solo.Not()])
+                    exceptions[(support.name, day, store)] = solo
+                else:
+                    model.Add(assignment <= independent_eco_here)
+    return exceptions
+
+
+def _add_omiya_anchor_pair_indicators(model, x, days, employee_names):
+    """下地・春山だけの2名体制。3名以上の日は減点しない。"""
+    if not {"下地", "春山"}.issubset(x):
+        return []
+    terms = []
+    for day in days:
+        third = sum(x[name][day][Store.OMIYA] for name in employee_names
+                    if name not in {"下地", "春山"})
+        pair = model.NewBoolVar(f"omiya_anchor_pair_only_{day}")
+        shim = x["下地"][day][Store.OMIYA]
+        haru = x["春山"][day][Store.OMIYA]
+        model.Add(pair <= shim)
+        model.Add(pair <= haru)
+        model.Add(third == 0).OnlyEnforceIf(pair)
+        model.Add(third >= 1).OnlyEnforceIf([shim, haru, pair.Not()])
+        terms.append(pair)
+    return terms
+
+
+def _solve_support_priority(model, objective, exceptions, new_solver, limit, *, allow_fallback):
+    """時間切れでは緩和しない。通常解なしを証明した場合だけ例外を探索する。"""
+    start = monotonic()
+    info = {"fallback_used": False, "fallback_attempted": False,
+            "normal_status": None, "fallback_status": None, "minimum_proven": False}
+    terms = list(exceptions.values())
+    if terms:
+        normal = model.NewBoolVar("require_independent_eco")
+        model.Add(sum(terms) == 0).OnlyEnforceIf(normal)
+        model.AddAssumption(normal)
+    solver = new_solver(limit)
+    status = solver.Solve(model)
+    info["normal_status"] = solver.StatusName(status)
+    remaining = lambda: max(0.0, float(limit) - (monotonic() - start))
+    if terms and allow_fallback and status == cp_model.INFEASIBLE and remaining() >= 1:
+        info["fallback_attempted"] = True
+        model.ClearAssumptions()
+        model.Add(normal == 0)
+        model.Minimize(sum(terms))
+        fallback_solver = new_solver(max(1.0, remaining() / 2))
+        fallback_status = fallback_solver.Solve(model)
+        info["fallback_status"] = fallback_solver.StatusName(fallback_status)
+        solver, status = fallback_solver, fallback_status
+        if status in (cp_model.FEASIBLE, cp_model.OPTIMAL):
+            count = sum(solver.Value(term) for term in terms)
+            info.update(fallback_used=True, exception_count=count,
+                        minimum_proven=status == cp_model.OPTIMAL)
+            # 店舗配分や飛び石改善のために例外日数が増えることは許さない。
+            model.Add(sum(terms) == count)
+            model.Maximize(objective)
+            if remaining() >= 1:
+                quality_solver = new_solver(remaining())
+                quality_status = quality_solver.Solve(model)
+                if quality_status in (cp_model.FEASIBLE, cp_model.OPTIMAL):
+                    solver, status = quality_solver, quality_status
+    info["wall_time_seconds"] = round(monotonic() - start, 2)
+    return solver, status, info
 
 
 def _add_omiya_two_person_exclusion_constraints(
@@ -972,7 +1043,7 @@ def generate_shift(
         OperationMode.CLOSED: {},
     }
     # ECO_SUPPORT は研修終了直後のエコ要員として人数に含めるが、
-    # 必ず同店舗に独り立ち済みの Skill.ECO が必要。チケット枠には含めない。
+    # 原則同店舗に独り立ち済みの Skill.ECO が必要。許可店舗の不足時例外は後段で探索。
     independent_eco_employees = [
         e for e in main_employees if e.skill == Skill.ECO
     ]
@@ -984,14 +1055,18 @@ def generate_shift(
         e for e in main_employees if e.skill == Skill.TICKET
     ]
 
-    # エコサポート単独でのエコ担当を絶対に作らない。
-    _add_eco_support_pairing_constraints(
+    # 指定店舗の例外も、まずは全件ゼロで通常探索する。
+    eco_support_exceptions = _add_eco_support_pairing_constraints(
         model,
         x,
         days,
         main_stores,
         independent_eco_employees,
         eco_support_employees,
+        allow_shortage_exceptions=True,
+    )
+    omiya_anchor_pair_terms = _add_omiya_anchor_pair_indicators(
+        model, x, days, list(main_employee_names),
     )
 
     # 大宮の「エコ対応1名以上・合計2名」の需給調整体制を表す変数。
@@ -1338,7 +1413,8 @@ def generate_shift(
                                if r["employee"] == e.name and r["kind"] == "off" and r["days"] == 2]
             has_two_day_block = model.NewBoolVar(f"has_two_off_block_{e.name}")
             model.AddMaxEquality(has_two_day_block, two_day_blocks)
-            if not any(r["comparison"] in {"exact", "min"} for r in personal_counts):
+            if (employee_max_consecutive_off.get(e.name) != 1
+                    and not any(r["comparison"] in {"exact", "min"} for r in personal_counts)):
                 if strict_warning_constraints:
                     model.Add(has_two_day_block == 1)
                 two_off_goal_terms.append(has_two_day_block)
@@ -1901,6 +1977,7 @@ def generate_shift(
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
     # 赤羽3人目に回り、他店の最低・標準は削られない。
     obj = obj - AKABANE_SHORTAGE_PENALTY * sum(akabane_short.values())
+    obj = obj - OMIYA_PAIR_PENALTY * sum(omiya_anchor_pair_terms)
     if higashi_unexpected_assignments:
         # 東口は土井さんまたは指定代替4名を強く優先する。
         # ただし過去月の実態確認前なので、解なしにせず大きめのペナルティに留める。
@@ -1920,7 +1997,6 @@ def generate_shift(
         configured.parameters.random_seed = random_seed
         return configured
 
-    solver = _new_solver(float(time_limit_seconds))
     if verbose:
         print(
             "ソルバー実行中... "
@@ -1928,12 +2004,19 @@ def generate_shift(
             f"上限: {float(time_limit_seconds):.0f}秒, シード: {random_seed})"
         )
 
-    status = solver.Solve(model)
+    solver, status, support_search = _solve_support_priority(
+        model, obj, eco_support_exceptions, _new_solver, float(time_limit_seconds),
+        # 先に既存の警告条件を緩める。警告を消すために単独担当を増やさない。
+        allow_fallback=not strict_warning_constraints,
+    )
+    print(f"[shift-generator] eco_support_search={support_search}", flush=True)
 
     if status_out is not None:
         # 解なしの原因調査用: INFEASIBLE(矛盾) と UNKNOWN(時間切れ) を区別できるようにする
         status_out["status"] = solver.StatusName(status)
-        status_out["wall_time_seconds"] = round(float(solver.WallTime()), 1)
+        status_out["wall_time_seconds"] = support_search["wall_time_seconds"]
+        status_out["eco_support_search"] = support_search
+        status_out["omiya_anchor_pair_rule"] = OMIYA_PAIR_DESCRIPTION
         status_out["omiya_staffing_rule"] = {
             "normal": "エコ対応1名以上・合計3名",
             "reduced": "エコ対応1名以上・合計2名",
@@ -1949,6 +2032,12 @@ def generate_shift(
             "target_days": imazu_weekend_days,
         }
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["eco_support_solo_days"] = [
+                {"employee": name, "day": day, "store": store.display_name}
+                for (name, day, store), term in eco_support_exceptions.items()
+                if solver.Value(term)
+            ]
+            status_out["omiya_anchor_pair_days"] = sum(solver.Value(t) for t in omiya_anchor_pair_terms)
             status_out["imazu_monday_preference"]["assigned_days"] = [
                 day for day in imazu_monday_days
                 if solver.Value(imazu_monday_terms[day])

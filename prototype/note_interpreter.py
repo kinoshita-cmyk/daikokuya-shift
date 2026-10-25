@@ -63,6 +63,9 @@ max_work_streak/max_off_streak/preferred_off_streak: valueは連続日数、days
 work_streak_count/off_streak_count: lengthは連続日数、valueは回数、comparisonはexact/min/max、daysは空、storeはnull。
 「2連休1回のみ」はoff_streak_count(length=2,value=1,comparison=exact)。
 「5連勤可能」はmax_work_streak(value=5)。「2連休不可」はmax_off_streak(value=1)。
+「18日赤羽」はwork_dates(days=[18],store=AKABANE)という出勤希望です。絶対休みの解除ではありません。
+「連休希望しない」「連休の希望なし」「連休不要」は連休禁止ではありません。off_streak_count(length=2,value=0,comparison=min)で最低回数だけを外してください。
+「連休なし」「2連休以上は不可」はmax_off_streak(value=1)です。希望なしと禁止を混同しないでください。
 店舗名は渡されたstoresだけを使い、記載がなければnull。他月の日付は対象月へ転用しないでください。
 """
 
@@ -117,6 +120,13 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
         store = STORES.get(store_name)
         store_text = store.display_name if store else ""
         value, length, comparison = item["value"], item["length"], item["comparison"]
+        no_off_preference = any(
+            rule.get("source") == "no_off_preference"
+            for rule in parse_natural_language_note(quote, year, month).consecutive_count_rules
+        )
+        if no_off_preference and kind in {"max_off_streak", "preferred_off_streak", "off_streak_count"}:
+            if (kind, length, value, comparison) != ("off_streak_count", 2, 0, "min"):
+                raise ValueError("連休の希望なしが、連休禁止など別の条件に変わっています。AIの案は採用できません。")
         if comparison is not None and not isinstance(comparison, str):
             raise ValueError("回数の比較方法が正しくありません。")
         if kind in {"off_dates", "work_dates", "choice_off", "choice_work", "conditional_store"}:
@@ -159,7 +169,13 @@ def validate_note_interpretation(payload: dict, text: str, year: int, month: int
                 if comparison not in {"exact", "min", "max"}:
                     raise ValueError("回数の比較方法が正しくありません。")
                 run_kind = "off" if kind == "off_streak_count" else "work"
-                expected.consecutive_count_rules.append(dict(kind=run_kind, days=length, count=value, comparison=comparison))
+                rule = dict(kind=run_kind, days=length, count=value, comparison=comparison)
+                if no_off_preference and kind == "off_streak_count":
+                    rule["source"] = "no_off_preference"
+                    expected.consecutive_count_rules.append(rule)
+                    lines.append("連休の希望なし。")
+                    continue
+                expected.consecutive_count_rules.append(rule)
                 label = "連休" if run_kind == "off" else "連勤"
                 suffix = {"exact": "のみ", "min": "以上", "max": "まで"}[comparison]
                 lines.append(f"{length}{label}は{value}回{suffix}。")

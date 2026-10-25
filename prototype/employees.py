@@ -202,7 +202,7 @@ TICKET_STAFF: list[Employee] = [
     Employee(
         name="田中",
         full_name="田中美紅",
-        skill=Skill.TICKET,
+        skill=Skill.ECO_SUPPORT,
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.AKABANE: Affinity.STRONG,
@@ -234,7 +234,7 @@ TICKET_STAFF: list[Employee] = [
         name="大類",
         full_name="大類麻梨亜",
         employee_id="079",
-        skill=Skill.TICKET,
+        skill=Skill.ECO_SUPPORT,
         station_type=StationType.FLEXIBLE,
         affinities={
             Store.SUZURAN: Affinity.MEDIUM,
