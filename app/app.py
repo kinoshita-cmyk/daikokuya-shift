@@ -6041,6 +6041,7 @@ if mode == "📊 経営者ビュー":
         actual_note_summaries, int(target_year), int(target_month),
         build_note_reflection_review, parsed_note_summary_to_labels, format_day_list,
         admin_paid_leave_days_for_month(int(target_year), int(target_month)),
+        include_personal_notes=is_manager(),
     )
     render_submission_review(
         review_rows, review_details, int(target_year), int(target_month),
@@ -9619,6 +9620,7 @@ elif mode == "👤 従業員ビュー":
         can_manage_shifts,
     )
     logged_in_emp = get_logged_in_employee()
+    can_view_employee_personal_notes = is_employee() or is_manager()
 
     # employee_names は後でボタンキー生成に使うので、ここで必ず定義しておく
     employee_names = shift_submission_employee_names()
@@ -9771,11 +9773,14 @@ elif mode == "👤 従業員ビュー":
     days_in_month = monthrange(target_year, target_month)[1]
     free_text_key = f"free_text_{selected}_{target_year}_{target_month}"
     free_text_draft_key = f"free_text_draft_{selected}_{target_year}_{target_month}"
+    personal_text_key = f"personal_text_{selected}_{target_year}_{target_month}"
+    personal_text_draft_key = f"personal_text_draft_{selected}_{target_year}_{target_month}"
     paid_leave_key = f"paid_leave_days_{selected}_{target_year}_{target_month}"
     paid_leave_draft_key = f"paid_leave_days_draft_{selected}_{target_year}_{target_month}"
     review_key = f"pref_review_{selected}_{target_year}_{target_month}"
     done_key = f"pref_done_{selected}_{target_year}_{target_month}"
     github_backup_status_key = f"pref_github_backup_status_{selected}_{target_year}_{target_month}"
+    from prototype.submission_review_ui import render_employee_note_texts, render_employee_note_review
 
     if "user_prefs" not in st.session_state:
         st.session_state.user_prefs = {}
@@ -9820,9 +9825,12 @@ elif mode == "👤 従業員ビュー":
             {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_submitted), "日数": len(triangle_days_submitted)},
             {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_submitted), "日数": len(ok_days_submitted)},
             {"項目": "希望有給日数", "内容": f"{paid_leave_submitted}日", "日数": paid_leave_submitted},
-            {"項目": "自由記述", "内容": existing_submission.get("note", "").strip() or "なし", "日数": ""},
         ]
         render_scrollable_review_table(submitted_rows)
+        render_employee_note_texts(
+            existing_submission.get("note", ""), existing_submission.get("personal_note", ""),
+            show_personal=can_view_employee_personal_notes,
+        )
         if st.button(
             "内容を修正して再提出する",
             key=f"edit_existing_submission_{selected}_{target_year}_{target_month}",
@@ -9865,9 +9873,12 @@ elif mode == "👤 従業員ビュー":
             {"項目": "△ できれば休み", "内容": format_day_list(triangle_days_done), "日数": len(triangle_days_done)},
             {"項目": "○ 出勤可能", "内容": format_day_list(ok_days_done), "日数": len(ok_days_done)},
             {"項目": "希望有給日数", "内容": f"{paid_leave_done}日", "日数": paid_leave_done},
-            {"項目": "自由記述", "内容": done_info.get("free_text", "").strip() or "なし", "日数": ""},
         ]
         render_scrollable_review_table(completion_rows)
+        render_employee_note_texts(
+            done_info.get("free_text", ""), done_info.get("personal_text", ""),
+            show_personal=can_view_employee_personal_notes,
+        )
         if st.button(
             "内容を修正して再提出する",
             key=f"edit_after_done_{selected}_{target_year}_{target_month}",
@@ -10069,6 +10080,9 @@ elif mode == "👤 従業員ビュー":
             st.session_state.setdefault(
                 free_text_draft_key, existing_submission.get("note", "") or "",
             )
+            st.session_state.setdefault(
+                personal_text_draft_key, existing_submission.get("personal_note", "") or "",
+            )
             st.session_state.setdefault(paid_leave_draft_key, paid_leave_default_value)
         st.session_state.user_prefs[user_key] = initial_prefs
     elif existing_submission:
@@ -10102,7 +10116,9 @@ elif mode == "👤 従業員ビュー":
         monthly_target = None
         base_holidays = None
 
-    def _save_employee_preferences(paid_leave_days_value: int, free_text_value: str) -> Path:
+    def _save_employee_preferences(paid_leave_days_value: int, free_text_value: str, personal_text_value: str) -> Path:
+        if not can_view_employee_personal_notes:
+            personal_text_value = (existing_submission or {}).get("personal_note", "")
         backup = ShiftBackup()
         off_requests = {selected: [d for d, m in prefs.items() if m == "×"]}
         work_requests = []
@@ -10121,18 +10137,11 @@ elif mode == "👤 従業員ビュー":
             flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
             natural_language_notes=natural_language_notes,
             author=selected,
+            personal_notes={selected: personal_text_value},
+            paid_leave_days=int(paid_leave_days_value),
+            monthly_target_workdays=monthly_target,
+            base_holidays=base_holidays,
         )
-        try:
-            import json
-            with open(save_path, encoding="utf-8") as f:
-                _data = json.load(f)
-            _data["paid_leave_days"] = int(paid_leave_days_value)
-            _data["monthly_target_workdays"] = monthly_target
-            _data["base_holidays"] = base_holidays
-            with open(save_path, "w", encoding="utf-8") as f:
-                json.dump(_data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
 
         try:
             from prototype.github_backup import push_preference_to_github
@@ -10162,6 +10171,9 @@ elif mode == "👤 従業員ビュー":
             free_text_draft_key,
             st.session_state.get(free_text_key, ""),
         )
+        personal_text_review = st.session_state.get(
+            personal_text_draft_key, st.session_state.get(personal_text_key, ""),
+        )
         x_days = [d for d, m in prefs.items() if m == "×"]
         triangle_days = [d for d, m in prefs.items() if m == "△"]
         ok_days = [d for d, m in prefs.items() if m == "○"]
@@ -10176,46 +10188,36 @@ elif mode == "👤 従業員ビュー":
             {"項目": "△ できれば休み", "内容": format_day_list(triangle_days), "日数": len(triangle_days)},
             {"項目": "○ 出勤可能", "内容": format_day_list(ok_days), "日数": len(ok_days)},
             {"項目": "希望有給日数", "内容": f"{paid_leave_days_review}日", "日数": paid_leave_days_review},
-            {"項目": "自由記述", "内容": free_text_review.strip() or "なし", "日数": ""},
         ]
         render_scrollable_review_table(review_rows)
 
-        if free_text_review.strip():
-            note_summary = summarize_natural_language_note_for_review(
-                free_text_review, target_year, target_month,
-            )
-            st.markdown("#### 自由記載から以下を読み取りました")
-            note_review_rows = [
-                {
-                    "項目": "自動反映する内容",
-                    "内容": "\n".join(note_summary.get("auto_labels", [])) or "なし",
-                    "日数": "",
-                },
-                {
-                    "項目": "管理者確認",
-                    "内容": "\n".join(note_summary.get("review_labels", [])) or "なし",
-                    "日数": "",
-                },
-            ]
-            render_scrollable_review_table(note_review_rows)
-            if note_summary.get("review_labels"):
-                st.info(
-                    "管理者確認と表示された内容は、提出後に管理者側にも表示されます。"
-                    "意図と違う場合は、入力に戻って日付や希望内容を具体的に書き直してください。"
-                )
+        note_summary = summarize_natural_language_note_for_review(
+            free_text_review, target_year, target_month,
+        )
+        render_employee_note_review(
+            free_text_review, personal_text_review, note_summary,
+            show_personal=can_view_employee_personal_notes,
+        )
 
         confirm_col1, confirm_col2 = st.columns([1, 1])
         with confirm_col1:
             if st.button("入力に戻る", key="emp_review_back", width="stretch"):
                 st.session_state[free_text_key] = free_text_review
+                st.session_state[personal_text_key] = personal_text_review
                 st.session_state[paid_leave_draft_key] = paid_leave_days_review
                 st.session_state[review_key] = False
                 st.rerun()
         with confirm_col2:
             if st.button("この内容で提出する", key="emp_review_submit", type="primary", width="stretch"):
                 st.session_state[free_text_key] = free_text_review
+                st.session_state[personal_text_key] = personal_text_review
                 st.session_state[paid_leave_draft_key] = paid_leave_days_review
-                _save_employee_preferences(paid_leave_days_review, free_text_review)
+                try:
+                    _save_employee_preferences(paid_leave_days_review, free_text_review, personal_text_review)
+                except (OSError, ValueError) as exc:
+                    _startup_log(f"preference save failed: {type(exc).__name__}")
+                    st.error("提出内容を保存できませんでした。入力内容はこの画面に残っています。もう一度提出してください。")
+                    return
                 st.session_state[review_key] = False
                 st.session_state[done_key] = {
                     "submitted_at": now_jst().isoformat(timespec="seconds"),
@@ -10224,6 +10226,7 @@ elif mode == "👤 従業員ビュー":
                     "ok_days": ok_days,
                     "paid_leave_days": paid_leave_days_review,
                     "free_text": free_text_review,
+                    "personal_text": personal_text_review,
                 }
                 st.session_state.pop(edit_existing_key, None)
                 st.rerun()
@@ -10363,48 +10366,49 @@ elif mode == "👤 従業員ビュー":
             )
 
     st.markdown("---")
-    st.subheader("自由記述（任意）")
+    st.subheader("希望条件と経営者への連絡（任意）")
     st.caption(
-        "シフト作成時に考慮してほしい点があれば、下の書き方に合わせてご記入ください。"
-        "日付と内容がはっきりしているほど反映されやすくなります。"
+        "シフトに反映してほしい希望と、その理由・事情は分けてご記入ください。"
+        "どちらも任意です。"
     )
-    st.info(
-        "**おすすめの書き方**\n\n"
-        "日付を入れて、何を希望しているかを短く書いてください。\n\n"
-        "```\n"
-        "22日 出勤希望\n"
-        "6日 赤羽出勤希望\n"
-        "1日 すずらん出勤希望\n"
-        "3日か29日のいずれか1日は出勤したい\n"
-        "16日・17日のどちらか1日休み希望\n"
-        "23日・24日のどちらか1日休み希望\n"
-        "有給2日利用で、合計9日休み希望\n"
-        "4連休希望\n"
-        "```"
+    with st.expander("希望条件の記入例"):
+        st.text(
+            "6日 赤羽出勤希望\n"
+            "16日・17日のどちらか1日休み希望\n"
+            "5日・6日のどちらか1日休み希望。出勤の場合5日・6日は赤羽希望\n"
+            "有給2日を含め、合計10日休み希望\n"
+            "月12日勤務希望\n"
+            "2連休は月1回のみ"
+        )
+        st.caption("日付・日数・店舗などを具体的に、1つの希望ごとに改行してください。×・△で指定済みの日付の再記入は不要です。")
+    st.session_state.setdefault(
+        free_text_key, st.session_state.get(free_text_draft_key, (existing_submission or {}).get("note", "") or ""),
     )
-    st.warning(
-        "**ダメな例（反映しづらい書き方）**\n\n"
-        "```\n"
-        "月末あたり休みたいです\n"
-        "どこかで連休ください\n"
-        "なるべく赤羽がいいです\n"
-        "出られる日はあります\n"
-        "いい感じにお願いします\n"
-        "```"
+    st.session_state.setdefault(
+        personal_text_key, st.session_state.get(personal_text_draft_key, (existing_submission or {}).get("personal_note", "") or ""),
     )
     free_text = st.text_area(
-        "自然言語で希望を書いてください",
+        "希望条件（自動読取の対象）",
         placeholder=(
-            "例:\n"
-            "22日 出勤希望\n"
-            "3日か29日のいずれか1日は出勤したい\n"
             "16日・17日のどちらか1日休み希望\n"
-            "有給2日利用で、合計9日休み希望"
+            "6日 赤羽出勤希望\n"
+            "有給2日を含め、合計10日休み希望"
         ),
         height=180,
         key=free_text_key,
     )
     st.session_state[free_text_draft_key] = free_text
+    if can_view_employee_personal_notes:
+        personal_text = st.text_area(
+            "経営者への事情・相談（自動読取しない）",
+            placeholder="例：子どもの運動会があるため、16日を×にしました。\nその他、経営者に伝えたい事情や相談をご記入ください。",
+            height=140,
+            key=personal_text_key,
+        )
+        st.caption("事情・相談は経営者だけが確認します。休みたい日は日程回答の×・△、追加の希望条件は上の欄にもご記入ください。")
+    else:
+        personal_text = (existing_submission or {}).get("personal_note", "") or ""
+    st.session_state[personal_text_draft_key] = personal_text
 
     if st.button(
         f"確認画面へ進む",
@@ -10412,6 +10416,7 @@ elif mode == "👤 従業員ビュー":
         width="stretch",
     ):
         st.session_state[free_text_draft_key] = free_text
+        st.session_state[personal_text_draft_key] = personal_text
         st.session_state[paid_leave_draft_key] = int(paid_leave_days or 0)
         st.session_state[review_key] = True
         st.rerun()
