@@ -353,9 +353,13 @@ def validate_receipt(receipt: dict, payload: dict, digest: str) -> dict:
 
 class AttendanceSender:
     def __init__(self, url: str, token: str, session=None):
+        # Secret files and pasted values can contain a trailing newline.
+        url, token = url.strip(), token.strip()
         parsed = urlsplit(url)
         if (parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password
-                or parsed.query or parsed.fragment or not token or len(token) < 32):
+                or parsed.query or parsed.fragment or not token or len(token) < 32
+                or not token.isascii() or any(char.isspace() for char in token)
+                or any(char.isspace() for char in url)):
             raise SyncError("勤務表のHTTPS連携URLと、32文字以上の専用連携キーを設定してください。")
         self.url, self.token = url, token
         self.session = session or requests.Session()
@@ -367,8 +371,13 @@ class AttendanceSender:
                 headers={"Authorization": f"Bearer {self.token}", "Content-Type": "application/json",
                          "Idempotency-Key": payload["sync_id"], "X-Payload-SHA256": digest},
             )
-        except requests.RequestException:
-            raise SyncError("勤務表への送信結果が不明です。同じ内容で再送し、二重登録を防ぎます。") from None
+        except requests.exceptions.InvalidHeader:
+            raise SyncError("勤務表の専用連携キーの書式を確認してください。送信は行われていません。") from None
+        except requests.RequestException as exc:
+            category = ("接続タイムアウト" if isinstance(exc, requests.Timeout)
+                        else "接続エラー" if isinstance(exc, requests.ConnectionError)
+                        else "通信設定エラー")
+            raise SyncError(f"勤務表への送信結果が不明です（{category}）。同じ内容で再送し、二重登録を防ぎます。") from None
         if response.status_code == 409:
             raise SyncError("勤務表側が受付を停止しました。月締め済み、または同じ月の別データ登録を確認してください。")
         if response.status_code not in (200, 201):

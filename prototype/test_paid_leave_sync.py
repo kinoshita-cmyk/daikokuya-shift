@@ -364,6 +364,27 @@ class TransportTest(unittest.TestCase):
         with self.assertRaises(SyncError):
             AttendanceSender("https://example.test", "weak")
 
+    def test_pasted_secret_boundary_whitespace_is_removed(self):
+        sender = AttendanceSender(" https://example.test/api\n", "\n" + "x" * 32 + "\r\n", self.session)
+        self.session.post.return_value = Mock(status_code=201, json=lambda: receipt(self.payload, self.digest))
+        sender(self.payload, self.digest)
+        self.assertEqual("https://example.test/api", self.session.post.call_args.args[0])
+        self.assertEqual("Bearer " + "x" * 32, self.session.post.call_args.kwargs["headers"]["Authorization"])
+
+    def test_invalid_secret_characters_are_not_sent(self):
+        for token in ("x" * 32 + "\nSECRET", "x" * 32 + " SECRET", "x" * 32 + "秘密"):
+            with self.assertRaises(SyncError) as caught:
+                AttendanceSender("https://example.test", token, self.session)
+            self.assertNotIn(token, str(caught.exception))
+        self.session.post.assert_not_called()
+
+    def test_invalid_header_is_not_reported_as_uncertain_delivery(self):
+        self.session.post.side_effect = requests.exceptions.InvalidHeader("SECRET")
+        with self.assertRaises(SyncError) as caught:
+            self.sender(self.payload, self.digest)
+        self.assertIn("送信は行われていません", str(caught.exception))
+        self.assertNotIn("SECRET", str(caught.exception))
+
     def test_no_secret_leak_from_http_errors(self):
         for status in (301, 401, 403, 409, 422, 500):
             self.session.post.return_value = Mock(status_code=status, text="SECRET private contents")
