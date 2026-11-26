@@ -364,6 +364,7 @@ def build_effective_rule_visibility_rows(
     )
     from prototype.models import Store
     from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
+    from prototype.staffing_policy import SUZURAN_BACKUP_DESCRIPTION, ADVISOR_DESCRIPTION
     from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
     year = int(year)
@@ -413,6 +414,10 @@ def build_effective_rule_visibility_rows(
     )
 
     rows = [
+        {"対象": "長尾・鈴木", "ルール": "長尾不在時のすずらん担当", "適用範囲": "全月固定",
+         "強さ": "絶対条件 / ERROR", "現在有効な内容": SUZURAN_BACKUP_DESCRIPTION, "変更場所": "固定ルール"},
+        {"対象": "顧問", "ルール": "顧問の勤務", "適用範囲": "全月固定",
+         "強さ": "月3日上限 / 配置は任意", "現在有効な内容": ADVISOR_DESCRIPTION, "変更場所": "固定ルール"},
         {
             "対象": IMAZU_MONDAY_EMPLOYEE,
             "ルール": IMAZU_MONDAY_CATEGORY,
@@ -480,6 +485,7 @@ def build_effective_rule_visibility_rows(
                 "エコ主力は強く回避し、その他のスタッフも重要条件を崩さない"
                 "範囲で弱く回避する。管理者向けWARNINGはエコ主力だけに表示する。"
                 "「出勤・休み・出勤」と「休み・出勤・出勤・休み」は対象外。"
+                "前月記録がある場合は、前月最終日・当月1日の月境界もWARNINGで確認する。"
             ),
             "変更場所": "従業員マスタ > エコ主力",
         },
@@ -523,6 +529,7 @@ def build_effective_rule_visibility_rows(
                 "本人の×は必ず休み。通常スタッフを配置した後、"
                 "赤羽のチケット対応が不足する日にだけ自動で赤羽へ配置。"
                 "それ以外は空白とし、追加勤務は管理者が手動入力する。"
+                "明示した日付限定の配置目標は別途適用する。"
             ),
             "変更場所": "自動配置条件は固定",
         },
@@ -3993,7 +4000,8 @@ def advisor_candidate_limit(year: int, month: int) -> int:
     # 2日候補では下書き自体が出ない。候補表示だけ3日まで広げ、最終確定は手動で行う。
     if int(year) == 2026 and int(month) == 5:
         return 3
-    return 2
+    from prototype.staffing_policy import ADVISOR_MAX_DAYS
+    return ADVISOR_MAX_DAYS
 
 
 def emergency_advisor_candidate_limit(year: int, month: int) -> int:
@@ -4480,7 +4488,11 @@ def render_monthly_exceptions_panel(year=None, month=None, section=None) -> None
         return store_labels.get(raw_text.upper(), raw_text or "なし")
 
     if section == "店舗区分・研修など":
-        _has_any = _mx_ym in _anchor_list or any(
+        from prototype.staffing_events import staffing_events
+        from prototype.staffing_policy import attendance_events
+        _mx_events = (staffing_events(int(year), int(month), include_disabled=True)
+                      + attendance_events(int(year), int(month), include_disabled=True))
+        _has_any = bool(_mx_events) or _mx_ym in _anchor_list or any(
             mapping.get(_mx_ym) for mapping in [
                 _training_map, _training_plans_map, _employee_override_map,
                 _carry_map, _avoid_map, _yamamoto_policy_map,
@@ -4488,6 +4500,25 @@ def render_monthly_exceptions_panel(year=None, month=None, section=None) -> None
         )
         if not _has_any:
             st.info("この月の店舗区分・研修などの追加条件はありません。")
+
+        for _event in _mx_events:
+            st.markdown(f"**{_event.title}（目標・未達を許容）**")
+            st.write(_event.description)
+            _event_disabled = set(_mx_raw.get("disabled_staffing_events", []))
+            _event_enabled = st.checkbox(
+                "この日付限定の配置目標を有効にする",
+                value=_event.id not in _event_disabled,
+                key=context_key + "event_enabled_" + _event.id,
+            )
+            if st.button("配置目標の設定を保存", key=context_key + "event_save_" + _event.id):
+                if _event_enabled:
+                    _event_disabled.discard(_event.id)
+                else:
+                    _event_disabled.add(_event.id)
+                _new = dict(_mx_raw)
+                _new["disabled_staffing_events"] = sorted(_event_disabled)
+                _mx_save_and_push(_new, actor=_mx_actor,
+                                  action=_event.title + ("を有効化" if _event_enabled else "を無効化"))
 
         if _mx_ym in _anchor_list:
             st.markdown("**🏬 大宮アンカー緩和**（「大宮に春山・下地のどちらか必須」をその月だけ外す）")
@@ -6854,10 +6885,10 @@ if mode == "📊 経営者ビュー":
                     if "strict_warning_constraints" in generator_params:
                         generation_kwargs["strict_warning_constraints"] = True
                     if "advisor_max_days" in generator_params:
-                        # 顧問は自動では確定しない。必要時だけ候補試算として別途確認する。
-                        generation_kwargs["advisor_max_days"] = 0
+                        from prototype.staffing_policy import ADVISOR_MAX_DAYS
+                        generation_kwargs["advisor_max_days"] = ADVISOR_MAX_DAYS
                         data_source_msg += (
-                            "\n顧問は自動配置せず、必要な場合だけ候補として表示します。"
+                            "\n顧問は不足を補うため月最大3日まで配置可能です（3日勤務を必須とするものではありません）。"
                         )
                     tobishi_post_adjustment = {
                         "definition": "休み・出勤・休みの1日だけの単独出勤",
@@ -7004,7 +7035,8 @@ if mode == "📊 経営者ビュー":
                             candidate_validation
                         )
 
-                    if shift is None or advisor_candidate_triggers:
+                    if (shift is None and advisor_candidate_limit(_saved_target_year, _saved_target_month)
+                            > generation_kwargs.get("advisor_max_days", 0)):
                         advisor_probe_kwargs = dict(generation_kwargs)
                         if "advisor_max_days" in generator_params:
                             advisor_probe_kwargs["advisor_max_days"] = advisor_candidate_limit(
@@ -7025,17 +7057,16 @@ if mode == "📊 経営者ビュー":
                             advisor_candidate_triggers = [{
                                 "日付": "",
                                 "区分": "解なし",
-                                "内容": "顧問なしでは条件を満たすシフトを見つけられませんでした。",
+                                "内容": "顧問を月3日まで含めても条件を満たすシフトを見つけられませんでした。",
                             }]
 
                         if shift is None and advisor_probe_shift is not None:
-                            shift = strip_advisor_assignments(advisor_probe_shift)
+                            shift = advisor_probe_shift
                             support_search = generation_kwargs["status_out"].get("eco_support_search", {})
-                            advisor_candidate_base_used = True
+                            advisor_candidate_base_used = False
+                            advisor_candidates = []
                             data_source_msg += (
-                                "\n顧問なしでは解が見つからなかったため、"
-                                "顧問候補を外した確認用下書きを表示します。"
-                                "候補を手動で入れるか、条件を調整してください。"
+                                "\n再探索で顧問月3日以内のシフトを作成しました。"
                             )
 
                     if shift is None and "advisor_max_days" in generator_params:
@@ -10168,7 +10199,8 @@ elif mode == "👤 従業員ビュー":
             year=target_year, month=target_month,
             off_requests=off_requests,
             work_requests=work_requests,
-            flexible_off=[(selected, flexible_days, len(flexible_days) // 2)] if flexible_days else [],
+            flexible_off=[(selected, flexible_days, 0)] if flexible_days else [],
+            triangle_off_days=flexible_days,
             natural_language_notes=natural_language_notes,
             author=selected,
             personal_notes={selected: personal_text_value},
