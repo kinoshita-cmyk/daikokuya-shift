@@ -205,14 +205,14 @@ TICKET_STAFF: list[Employee] = [
         skill=Skill.ECO_SUPPORT,
         station_type=StationType.FLEXIBLE,
         affinities={
-            Store.AKABANE: Affinity.STRONG,
-            Store.OMIYA: Affinity.WEAK,           # 大宮+すずらん合わせて弱
+            Store.AKABANE: Affinity.MEDIUM,
+            Store.OMIYA: Affinity.MEDIUM,
             Store.SUZURAN: Affinity.MEDIUM,
             Store.HIGASHIGUCHI: Affinity.NONE,
             Store.NISHIGUCHI: Affinity.NONE,
         },
         annual_target_days=265,
-        notes="主担当: 赤羽。通常対応可: すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。",
+        notes="主担当: なし。通常対応可: 赤羽・すずらん・大宮。応援・巡回可: なし。絶対配置不可: 東口・西口。",
     ),
     Employee(
         name="岩野",

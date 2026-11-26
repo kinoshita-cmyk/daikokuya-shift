@@ -35,6 +35,7 @@ EMPLOYEE_CONFIG_FILE = CONFIG_DIR / "employees.json"
 EMPLOYEE_HISTORY_FILE = CONFIG_DIR / "employee_history.jsonl"
 DEFAULT_ECO_CORE_NAMES = frozenset({"今津", "土井", "楯", "春山", "下地", "長尾"})
 SUZUKI_STORE_UPDATE_KEY = "suzuki_store_update_20261025"
+TANAKA_STORE_UPDATE_KEY = "tanaka_store_update_20261126"
 
 
 def _employment_status_from_value(value: str | None) -> EmploymentStatus:
@@ -155,6 +156,7 @@ def employee_to_dict(emp: Employee) -> dict:
         # 初回の承認済み変更後は、管理画面での昇格・変更を優先する。
         SKILL_UPDATE_KEY: True,
         SUZUKI_STORE_UPDATE_KEY: True,
+        TANAKA_STORE_UPDATE_KEY: True,
     }
 
 
@@ -167,6 +169,14 @@ def employee_from_dict(data: dict) -> Employee:
             continue
         affinities[store] = _enum_from_value(Affinity, aff_value, Affinity.NONE)
     notes = data.get("notes", "")
+    home_store = _store_from_value(data.get("home_store"))
+    if data["name"] == "田中" and not data.get(TANAKA_STORE_UPDATE_KEY):
+        # 保存済みマスタにも原則変更を適用。保存後の管理者編集は再適用で消さない。
+        for store in (Store.AKABANE, Store.SUZURAN, Store.OMIYA):
+            affinities[store] = Affinity.MEDIUM
+        home_store = None
+        if notes == "主担当: 赤羽。通常対応可: すずらん。応援・巡回可: 大宮。絶対配置不可: 東口・西口。":
+            notes = "主担当: なし。通常対応可: 赤羽・すずらん・大宮。応援・巡回可: なし。絶対配置不可: 東口・西口。"
     if data["name"] == "鈴木" and not data.get(SUZUKI_STORE_UPDATE_KEY):
         # 旧バックアップにも承認済みの原則変更を適用。保存後の管理者変更は維持する。
         affinities[Store.SUZURAN] = Affinity.STRONG
@@ -181,7 +191,7 @@ def employee_from_dict(data: dict) -> Employee:
         skill=(Skill.ECO_SUPPORT
                if data["name"] in APPROVED_SUPPORT_NAMES and not data.get(SKILL_UPDATE_KEY)
                else _skill_from_value(data.get("skill"))),
-        home_store=_store_from_value(data.get("home_store")),
+        home_store=home_store,
         station_type=_enum_from_value(
             StationType, data.get("station_type"), StationType.FLEXIBLE,
         ),
