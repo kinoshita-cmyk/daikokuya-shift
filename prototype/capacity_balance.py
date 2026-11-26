@@ -136,7 +136,7 @@ def compute_monthly_capacity_balance(
         role = getattr(e, "role", None)
         role_text = str(getattr(role, "value", role) or "")
         if role_text in ("顧問", "ADVISOR"):
-            continue  # 顧問は自動配置しない方針のため供給に数えない
+            continue  # 顧問は任意の補助枠であり、確約された事前供給には数えない
         if getattr(e, "is_auxiliary", False):
             # 補助要員は生成前の供給人数に含めない。
             # 山本さんは通常シフト完成後の不足日だけ自動表示し、
@@ -239,6 +239,7 @@ def balance_summary_lines(result: dict) -> list:
         f"**1. 全体の需給**: 必要 {result['demand_total']}人区"
         "（全日を標準人数で計算） ／ "
         f"供給 {result['supply_total']}人区 → {verdict1}"
+        "。顧問の任意補助（月最大3日）は、この供給数とは別枠です"
     )
     reduction = int(result.get("mode_reduction", 0) or 0)
     if reduction > 0:

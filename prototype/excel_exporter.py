@@ -14,6 +14,7 @@ data/may_2026_shift.xlsx の「シフト表2026年5月」シートと完全に�
 
 from __future__ import annotations
 import warnings
+from copy import copy
 from datetime import date
 from pathlib import Path
 from typing import Optional
@@ -236,7 +237,7 @@ def export_shift_to_excel(
     # 罫線・スタイル
     thin = Side(border_style="thin", color="000000")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    off_request_side = Side(border_style="thick", color="DC2626")
+    off_request_side = Side(border_style="thick", color="FF0000")
     off_request_border = Border(
         left=off_request_side,
         right=off_request_side,
@@ -421,6 +422,17 @@ def export_shift_to_excel(
         c.font = cell_font
         c.alignment = center
         c.border = border
+
+    # Excelの共有境界は隣のセルの細線も影響するため、両側を最太の赤線に揃える。
+    for name, day in off_request_cells:
+        if name not in column_order or not 1 <= day <= days_in_month:
+            continue
+        row, col = 7 + day, EMPLOYEE_START_COL + column_order.index(name)
+        for dr, dc, edge in ((0, -1, "right"), (0, 1, "left"), (-1, 0, "bottom"), (1, 0, "top")):
+            neighbor = ws.cell(row=row + dr, column=col + dc)
+            neighbor_border = copy(neighbor.border)
+            setattr(neighbor_border, edge, off_request_side)
+            neighbor.border = neighbor_border
 
     # ============================================================
     # 末尾: 注意書き（行間1空けて）

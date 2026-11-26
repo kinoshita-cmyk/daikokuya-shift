@@ -7,7 +7,7 @@ OR-Tools の CP-SAT ソルバーを使い、希望データから最適なシフ
 - ハード制約は CP-SAT のモデルに直接エンコード
 - ソフト制約（在勤割合・目標日数）は目的関数の重み付き最適化
 - 山本さんの特殊ロジックは本体ソルバー後の後処理で対応
-- 顧問は通常シフト対象外（緊急時のみ手動追加）
+- 顧問は不足を補うため月最大3日まで配置可能（出勤ノルマなし）
 
 使い方:
     from prototype.generator import generate_shift
@@ -29,6 +29,11 @@ from typing import Optional
 
 from ortools.sat.python import cp_model
 from .consecutive_counts import add_consecutive_count_constraints
+from .staffing_events import add_staffing_event_goals, STAFFING_EVENT_REWARD
+from .staffing_policy import (
+    ADVISOR_MAX_DAYS, ADVISOR_DAY_PENALTY, add_suzuran_backup_constraint,
+    attendance_events, add_attendance_goals, ATTENDANCE_EVENT_REWARD,
+)
 from .eco_support import (
     solo_exception_allowed, OMIYA_PAIR_PENALTY, OMIYA_PAIR_DESCRIPTION,
 )
@@ -186,7 +191,7 @@ SUZURAN_CORE_ABSENCE_PENALTY = 1000
 # 大宮はエコ対応1名以上の合計2名体制を需給調整として許容するが、
 # 通常対応可店舗間の配分バランスや赤羽の山本さん補助よりは、
 # エコ対応1名以上の合計3名体制を明確に優先する。
-# 顧問投入（50000）とは桁が異なり、同じ緊急措置としては扱わない。
+# 顧問の補助配置も月3日以内で比較し、大宮3名体制への改善に利用できる。
 REMOVED_SUPPORT_STORE_ASSIGNMENT_PENALTY = 80
 OMIYA_SHORTAGE_PENALTY = 400
 AKABANE_SHORTAGE_PENALTY = 60
@@ -223,7 +228,7 @@ def _add_eco_support_pairing_constraints(
     stores: list[Store],
     independent_eco_employees: list,
     eco_support_employees: list,
-    *, allow_shortage_exceptions: bool = False,
+    *, allow_shortage_exceptions: bool = False, year=None, month=None,
 ) -> dict:
     """許可店舗でも例外を明示変数にし、通常探索では必ずゼロに固定する。"""
     exceptions = {}
@@ -235,7 +240,7 @@ def _add_eco_support_pairing_constraints(
                     for employee in independent_eco_employees
                 )
                 assignment = x[support.name][day][store]
-                if allow_shortage_exceptions and solo_exception_allowed(support, store):
+                if allow_shortage_exceptions and solo_exception_allowed(support, store, year, month):
                     solo = model.NewBoolVar(f"eco_support_solo_{support.name}_{day}_{store.name}")
                     model.Add(solo <= assignment)
                     model.Add(independent_eco_here == 0).OnlyEnforceIf(solo)
@@ -388,7 +393,7 @@ def generate_shift(
     required_assignments: Optional[list[dict]] = None,
     historical_actual_preferences: Optional[list[tuple[str, int, Store]]] = None,
     strict_warning_constraints: bool = True,
-    advisor_max_days: Optional[int] = 0,
+    advisor_max_days: Optional[int] = ADVISOR_MAX_DAYS,
     default_holidays: int = DEFAULT_HOLIDAY_DAYS_MAY,
     operation_modes: Optional[dict[int, OperationMode]] = None,
     consec_exceptions: Optional[list[str]] = None,
@@ -433,7 +438,7 @@ def generate_shift(
     consec_exceptions = consec_exceptions or []
 
     # 主要なメイン稼働メンバーリスト（山本を除く）。
-    # 顧問は基本的に自動投入しない。必要な場合だけ advisor_max_days を上げる。
+    # 顧問は原則月3日まで。月目標日数は設定せず、不要な出勤は避ける。
     main_employees = [
         e for e in shift_active_employees(year, month)
         if not e.is_auxiliary
@@ -651,6 +656,10 @@ def generate_shift(
             mandatory_single_work_days_by_employee.setdefault(name, set()).add(int(d))
     for name, candidate_days, _required, _store in preferred_work_groups:
         request_allowed_days_by_employee.setdefault(name, set()).update(int(d) for d in candidate_days)
+    for event in attendance_events(year, month):
+        for name in event.employees:
+            if event.day not in off_requests.get(name, []):
+                request_allowed_days_by_employee.setdefault(name, set()).add(event.day)
     for e in main_employees:
         if not getattr(e, "only_on_request_days", False):
             continue
@@ -678,10 +687,20 @@ def generate_shift(
     # ============================================================
     # 制約 4: 柔軟休み希望（候補日のうち N 日を休みに）
     # ============================================================
+    preferred_off_terms = []
+    preferred_off_seen = set()
     for name, candidate_days, n_required in flexible_off:
         if name not in main_employee_names:
             continue
-        model.Add(sum(off[name][d] for d in candidate_days) >= n_required)
+        if n_required > 0:
+            model.Add(sum(off[name][d] for d in candidate_days) >= n_required)
+        else:
+            for d in candidate_days:
+                if (name, d) not in preferred_off_seen:
+                    preferred_off_terms.append(off[name][d])
+                    preferred_off_seen.add((name, d))
+
+    add_suzuran_backup_constraint(model, x, off, days, operation_modes)
 
     # ============================================================
     # 制約 5: 配置不可な店舗には配置しない（Affinity.NONE）
@@ -1064,6 +1083,7 @@ def generate_shift(
         independent_eco_employees,
         eco_support_employees,
         allow_shortage_exceptions=True,
+        year=year, month=month,
     )
     omiya_anchor_pair_terms = _add_omiya_anchor_pair_indicators(
         model, x, days, list(main_employee_names),
@@ -1085,6 +1105,8 @@ def generate_shift(
 
         # 営業停止日：全員休み
         if mode == OperationMode.CLOSED:
+            model.Add(akabane_short[d] == 0)
+            model.Add(omiya_short[d] == 0)
             for e in main_employees:
                 model.Add(off[e.name][d] == 1)
             continue
@@ -1172,10 +1194,10 @@ def generate_shift(
             # 赤羽駅前店:
             # 基本はエコ1+チケット2。例外としてエコ2+チケット1も可。
             # チケット対応が1名分だけの日は、後処理で山本さんを補助投入する。
-            if s == Store.AKABANE and mode == OperationMode.NORMAL:
+            if s == Store.AKABANE:
                 model.Add(eco_at_store >= 1)
-                if d in yamamoto_off_days:
-                    model.Add(total_at_store >= 3)
+                if d in yamamoto_off_days or yamamoto is None:
+                    model.Add(total_at_store >= (3 if mode == OperationMode.NORMAL else 2))
                     model.Add(akabane_short[d] == 0)
                 else:
                     model.Add(total_at_store >= 2)
@@ -1217,17 +1239,39 @@ def generate_shift(
             model.Add(eco_at_store >= store_cap.eco_min)
             model.Add(total_at_store >= store_cap.eco_min + store_cap.ticket_min)
 
+    from .employees import employee_is_in_service
+    event_goals, event_yamamoto_days = add_staffing_event_goals(
+        model, x, year, month, off_requests, operation_modes,
+        yamamoto_available=(yamamoto is not None and employee_is_in_service(yamamoto, year, month)
+                            and yamamoto.affinities.get(Store.AKABANE) != Affinity.NONE),
+    )
+    attendance_terms, attendance_yamamoto_days = add_attendance_goals(
+        model, off, x, year, month, off_requests, operation_modes, akabane_short,
+        yamamoto_available=(yamamoto is not None and employee_is_in_service(yamamoto, year, month)
+                            and yamamoto.affinities.get(Store.AKABANE) != Affinity.NONE),
+    )
+    event_yamamoto_days.update(attendance_yamamoto_days)
+    # 日付限定の明示依頼も、山本の通常の月間・連続勤務上限に合算する。
+    yamamoto_day_terms = {
+        d: akabane_short[d] + event_yamamoto_days.get(d, 0) for d in days
+    }
+    for d, event_term in event_yamamoto_days.items():
+        model.Add(
+            sum(1 - off[e.name][d] for e in main_employees) + 1
+            <= int(GLOBAL_DAILY_STAFFING_LIMIT.max_total)
+        ).OnlyEnforceIf(event_term)
     # 山本さんは通常スタッフを組んだ後、赤羽が正規2名の日だけ補助投入する。
-    # 自動投入数も手動調整後と同じ月上限内に収める。ただし通常スタッフの
+    # 明示された日付限定目標の追加配置も、手動調整後と同じ月上限内に収める。
+    # ただし通常スタッフの
     # 月間目標や事前供給人数には含めない。
     if yamamoto is not None:
         yamamoto_policy = yamamoto_monthly_policy(year, month)
         yamamoto_auto_days = [
-            akabane_short[d]
+            yamamoto_day_terms[d]
             for d in days
             if (
                 operation_modes.get(d, OperationMode.NORMAL)
-                == OperationMode.NORMAL
+                != OperationMode.CLOSED
                 and d not in yamamoto_off_days
             )
         ]
@@ -1243,14 +1287,14 @@ def generate_shift(
             1, days_in_month - max_yamamoto_consecutive + 1
         ):
             window = [
-                akabane_short[d]
+                yamamoto_day_terms[d]
                 for d in range(
                     start_day,
                     start_day + max_yamamoto_consecutive + 1,
                 )
                 if (
                     operation_modes.get(d, OperationMode.NORMAL)
-                    == OperationMode.NORMAL
+                    != OperationMode.CLOSED
                     and d not in yamamoto_off_days
                 )
             ]
@@ -1513,8 +1557,7 @@ def generate_shift(
         store_weight = 130
         no_store_weight = 90
         if name == "顧問":
-            # 顧問は通常は最終手段として強く回避するが、
-            # 月別例外で明示された日・店舗がある場合はその中で実態に寄せる。
+            # 明示された日・店舗の希望は優先するが、月間上限は解除しない。
             any_work_weight = 5000
             store_weight = 9000
             no_store_weight = 6000
@@ -1917,6 +1960,8 @@ def generate_shift(
         obj = obj + sum(preferred_work_terms)
     if monthly_rule_terms:
         obj = obj + MONTHLY_RULE_REWARD * sum(monthly_rule_terms)
+    if event_goals:
+        obj = obj + STAFFING_EVENT_REWARD * sum(event_goals.values())
     if monthly_rule_penalty_terms:
         obj = obj - MONTHLY_RULE_PENALTY * sum(monthly_rule_penalty_terms)
     if generic_training_reward_terms:
@@ -1960,7 +2005,7 @@ def generate_shift(
             * sum(removed_support_assignment_terms)
         )
     if "顧問" in main_employee_names:
-        # 顧問は本当に足りない時だけの最終手段。通常スタッフで解がある限り使わない。
+        # 3日まで不足を補う。上限はノルマではなく、不要な出勤には減点する。
         advisor_assignments = [x["顧問"][d][s] for d in days for s in main_stores]
         if advisor_max_days is not None:
             model.Add(sum(advisor_assignments) <= int(advisor_max_days))
@@ -1969,10 +2014,12 @@ def generate_shift(
             cp_model.CHOOSE_FIRST,
             cp_model.SELECT_MIN_VALUE,
         )
-        obj = obj - 50000 * sum(advisor_assignments)
+        obj = obj - ADVISOR_DAY_PENALTY * sum(advisor_assignments)
+    obj = obj + ATTENDANCE_EVENT_REWARD * sum(attendance_terms)
+    obj = obj + 80 * sum(preferred_off_terms)
     # 大宮の合計2名体制は需給調整として許容するが、店舗配分の
     # 均等さより通常の合計3名体制を優先する。
-    # 顧問投入と同じ緊急措置にはしない。
+    # 顧問の少数日補助を含めて通常体制に近づける。
     obj = obj - OMIYA_SHORTAGE_PENALTY * sum(omiya_short.values())
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
     # 赤羽3人目に回り、他店の最低・標準は削られない。
@@ -2016,6 +2063,9 @@ def generate_shift(
         status_out["status"] = solver.StatusName(status)
         status_out["wall_time_seconds"] = support_search["wall_time_seconds"]
         status_out["eco_support_search"] = support_search
+        status_out["advisor_policy"] = {"max_days": advisor_max_days, "day_penalty": ADVISOR_DAY_PENALTY}
+        status_out["triangle_off_preferences"] = len(preferred_off_terms)
+        status_out["december_support_restriction"] = (year, month) == (2026, 12)
         status_out["omiya_anchor_pair_rule"] = OMIYA_PAIR_DESCRIPTION
         status_out["omiya_staffing_rule"] = {
             "normal": "エコ対応1名以上・合計3名",
@@ -2032,6 +2082,18 @@ def generate_shift(
             "target_days": imazu_weekend_days,
         }
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["advisor_policy"]["assigned_days"] = [
+                d for d in days if "顧問" in off and solver.Value(off["顧問"][d]) == 0
+            ]
+            status_out["attendance_event_goals"] = {
+                event.id: {name: (bool(solver.Value(yamamoto_day_terms[event.day])) if name == "山本"
+                                else bool(1 - solver.Value(off[name][event.day])) if name in off else False)
+                           for name in event.employees}
+                for event in attendance_events(year, month)
+            }
+            status_out["staffing_event_goals"] = {
+                event_id: bool(solver.Value(term)) for event_id, term in event_goals.items()
+            }
             status_out["eco_support_solo_days"] = [
                 {"employee": name, "day": day, "store": store.display_name}
                 for (name, day, store), term in eco_support_exceptions.items()
@@ -2129,7 +2191,7 @@ def generate_shift(
                 1 for a in akabane_workers
                 if get_employee(a.employee).skill == Skill.TICKET
             )
-            if YamamotoLogic.should_deploy(akabane_eco, akabane_ticket, False):
+            if solver.Value(yamamoto_day_terms[d]):
                 shift.assignments.append(ShiftAssignment(
                     employee="山本", day=d, store=Store.AKABANE,
                 ))

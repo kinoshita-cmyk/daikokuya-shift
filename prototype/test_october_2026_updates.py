@@ -236,6 +236,7 @@ class SupportUpdatesTest(unittest.TestCase):
             diagnostics = {}
             shift = generate_shift(
                 2026, 11, requests, [("南", day, None)], [], operation_modes=modes,
+                advisor_max_days=0,
                 required_assignments=[
                     {"employee": "田中", "day": day, "store": Store.AKABANE, "severity": "ERROR"},
                     {"employee": "大類", "day": day, "store": Store.SUZURAN, "severity": "ERROR"},

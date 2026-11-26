@@ -24,7 +24,9 @@ OMIYA_PAIR_DESCRIPTION = (
 OMIYA_PAIR_PENALTY = 600
 
 
-def solo_exception_allowed(employee, store):
+def solo_exception_allowed(employee, store, year=None, month=None):
+    if (year, month) == (2026, 12) and employee.name == "大類":
+        return False
     return (employee.skill == Skill.ECO_SUPPORT
             and store in SOLO_EXCEPTION_STORES.get(employee.name, ()))
 

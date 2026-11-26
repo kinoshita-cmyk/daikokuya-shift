@@ -184,6 +184,7 @@ class ShiftBackup:
         paid_leave_days: Optional[int] = None,
         monthly_target_workdays: Optional[int] = None,
         base_holidays: Optional[int] = None,
+        triangle_off_days: Optional[list[int]] = None,
     ) -> Path:
         """希望データをスナップショット化"""
         month_dir = self._get_month_dir(year, month)
@@ -208,6 +209,8 @@ class ShiftBackup:
             "natural_language_notes": natural_language_notes,
         }
         # Keep private context separate from text used to generate constraints.
+        if triangle_off_days is not None:
+            data["triangle_off_days"] = list(triangle_off_days)
         if personal_notes is not None:
             data["personal_notes"] = dict(personal_notes)
         if paid_leave_days is not None:

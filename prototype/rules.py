@@ -279,6 +279,7 @@ OMIYA_ANCHOR_STAFF: tuple[str, ...] = ("春山", "下地")
 MONTHLY_EXCEPTIONS_FILE = CONFIG_DIR / "monthly_exceptions.json"
 MONTHLY_EXCEPTIONS_STATUS = "未読み込み"
 MONTHLY_EXCEPTIONS_HISTORY_LIMIT = 20
+DISABLED_STAFFING_EVENTS: frozenset[str] = frozenset()
 
 
 def _parse_ym(text: str) -> Optional[tuple]:
@@ -342,6 +343,9 @@ def validate_monthly_exceptions_data(data: dict) -> tuple[list[str], list[str]]:
     """管理画面で保存する月例外設定の矛盾・入力漏れを確認する。"""
     errors: list[str] = []
     warnings: list[str] = []
+    disabled_events = data.get("disabled_staffing_events", [])
+    if not isinstance(disabled_events, list) or any(not isinstance(value, str) for value in disabled_events):
+        errors.append("日付限定の配置目標の無効設定が不正です。")
 
     for ym_text, employee_rules in dict(
         data.get("employee_store_overrides", {}) or {}
@@ -522,6 +526,7 @@ def summarize_monthly_exceptions_change(before: dict, after: dict) -> list[str]:
         "avoid_same_off": "同時休み回避",
         "operation_modes": "営業モード",
         "yamamoto_policy": "山本の補助勤務方針",
+        "disabled_staffing_events": "日付限定の配置目標",
     }
     before_clean = _clean_monthly_exceptions_snapshot(before)
     after_clean = _clean_monthly_exceptions_snapshot(after)
@@ -827,6 +832,9 @@ def active_code_managed_monthly_rules(year: int, month: int, *, include_fixed: b
     """既存の生成結果説明用。固定ルールと月別条件を含む（互換用）。"""
     notes = []
     if include_fixed:
+        from .staffing_policy import SUZURAN_BACKUP_DESCRIPTION, ADVISOR_DESCRIPTION
+        notes.append("固定絶対条件: " + SUZURAN_BACKUP_DESCRIPTION)
+        notes.append("固定ルール: " + ADVISOR_DESCRIPTION)
         from .eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
         notes.append("固定ルール（原則同伴・不足時のみ例外）: " + SUPPORT_DESCRIPTION)
         notes.append("固定の強い目標: " + OMIYA_PAIR_DESCRIPTION)
@@ -928,10 +936,10 @@ def active_code_managed_monthly_rules(year: int, month: int, *, include_fixed: b
     if include_fixed or (int(year), int(month)) in MONTHLY_YAMAMOTO_POLICIES:
         policy = yamamoto_monthly_policy(year, month)
         notes.append(
-            "山本さん: 赤羽で通常スタッフだけでは不足する日に限り自動投入。"
+            "山本さん: 原則、赤羽で通常スタッフだけでは不足する日に限り自動投入。"
             f"月間上限{policy['max_days']}日、"
             f"連続{policy['max_consecutive']}日まで。"
-            "追加勤務は完成後に手動調整"
+            "追加勤務は完成後に手動調整（明示した日付限定の配置目標は別途適用）"
         )
     return notes
 
@@ -948,6 +956,12 @@ def active_monthly_exception_descriptions(year: int, month: int) -> list[str]:
         notes.append(f"{first}・{second}: 同時休みをできるだけ回避" + (f"（{reason}）" if reason else ""))
     for day, mode in sorted(monthly_operation_mode_overrides(year, month).items()):
         notes.append(f"{day}日: 営業体制を{mode.value}に変更")
+    from .staffing_events import staffing_events
+    notes.extend(event.description for event in staffing_events(year, month))
+    from .staffing_policy import attendance_events, DECEMBER_SUPPORT_DESCRIPTION
+    notes.extend(event.description for event in attendance_events(year, month))
+    if ym == (2026, 12):
+        notes.append(DECEMBER_SUPPORT_DESCRIPTION)
     return notes
 
 # 月内の最低巡回条件。
@@ -1045,8 +1059,13 @@ def reload_monthly_exceptions() -> str:
     global MONTHLY_TRAINING_PLANS
     global MONTHLY_EMPLOYEE_STORE_OVERRIDES
     global MONTHLY_YAMAMOTO_POLICIES
+    global DISABLED_STAFFING_EVENTS
 
     data = _load_monthly_exceptions()
+    disabled_events = (data or {}).get("disabled_staffing_events", [])
+    DISABLED_STAFFING_EVENTS = frozenset(
+        value for value in disabled_events if isinstance(value, str)
+    ) if isinstance(disabled_events, list) else frozenset()
 
     # まずデフォルトへ戻す（ファイル削除・キー削除にも追随できるように）
     OMIYA_ANCHOR_RELAXED_MONTHS = _DEFAULT_OMIYA_ANCHOR_RELAXED_MONTHS
@@ -1381,6 +1400,7 @@ def load_monthly_exceptions_raw() -> dict:
     if data:
         return data
     return {
+        "disabled_staffing_events": sorted(DISABLED_STAFFING_EVENTS),
         "omiya_anchor_relaxed_months": [
             f"{y:04d}-{m:02d}" for (y, m) in OMIYA_ANCHOR_RELAXED_MONTHS
         ],

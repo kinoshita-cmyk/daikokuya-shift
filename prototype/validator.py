@@ -12,6 +12,11 @@
 
 from __future__ import annotations
 from .conditional_store import conditional_store_mismatches
+from .staffing_events import staffing_events, event_satisfied, event_workers, STAFFING_EVENT_CATEGORY
+from .staffing_policy import (
+    ADVISOR_MAX_DAYS, SUZURAN_BACKUP_CATEGORY, SUZURAN_BACKUP_DESCRIPTION,
+    suzuran_backup_violation, attendance_events,
+)
 from .eco_support import (
     solo_exception_allowed, SOLO_EXCEPTION_CATEGORY, OMIYA_PAIR_CATEGORY,
     OMIYA_PAIR_DESCRIPTION, is_omiya_anchor_pair_only,
@@ -343,6 +348,7 @@ def validate(
 
     # 3-2. エコサポートの同伴原則と、指定店舗のみの不足時例外
     _check_eco_support_pairing(shift, result, days_in_month)
+    _check_staffing_policy(shift, result, days_in_month, off_requests)
 
     # 4. 連勤チェック
     _check_consecutive_work(
@@ -373,7 +379,7 @@ def validate(
     _check_consecutive_counts(shift, result, consecutive_count_rules, prev_month)
 
     # 6-2. 飛び石勤務はソフト条件。残った場合は管理者確認用に表示する。
-    _check_tobishi_work_patterns(shift, result, days_in_month)
+    _check_tobishi_work_patterns(shift, result, days_in_month, prev_month)
 
     # 7. 休み希望厳守チェック
     _check_off_requests(shift, result, off_requests)
@@ -459,6 +465,7 @@ def validate(
 
     # 26. 山本さんの手動調整後の月間・連続勤務上限
     _check_yamamoto_monthly_max(shift, result)
+    _check_staffing_events(shift, result)
 
     # 25. 統計情報の集計
     _compute_stats(
@@ -638,7 +645,10 @@ def _check_store_capacity(
                             f"／配属: {all_worker_str}"
                         ),
                     ))
-                elif staffing_total > staffing_limit.standard_total:
+                elif staffing_total > staffing_limit.standard_total and not any(
+                    event.day == day and event.store == store and event_satisfied(shift, event)
+                    for event in staffing_events(shift.year, shift.month)
+                ):
                     result.issues.append(Issue(
                         severity="WARNING",
                         category="店舗人数多め",
@@ -875,7 +885,7 @@ def _check_eco_support_pairing(
                 continue
             if assignment.store in independent_eco_stores:
                 continue
-            if solo_exception_allowed(employee, assignment.store):
+            if solo_exception_allowed(employee, assignment.store, shift.year, shift.month):
                 result.issues.append(Issue(
                     severity="WARNING", category=SOLO_EXCEPTION_CATEGORY,
                     day=day, employee=assignment.employee,
@@ -1201,6 +1211,7 @@ def _check_tobishi_work_patterns(
     shift: MonthlyShift,
     result: ValidationResult,
     days: int,
+    prev_month=None,
 ) -> None:
     """エコ主力の「休み・出勤・休み」の単独出勤を確認する。"""
     for emp in _validation_employees(shift.year, shift.month):
@@ -1226,6 +1237,23 @@ def _check_tobishi_work_patterns(
             and working[day]
             and not working[day + 1]
         ]
+        boundary = previous_working_map(prev_month, emp.name, shift.year, shift.month)
+        for day in (1, 2):
+            assignment = shift.get_assignment(emp.name, day)
+            if assignment is not None:
+                boundary[day] = assignment.store != Store.OFF
+        for center in (0, 1):
+            if (all(d in boundary for d in (center - 1, center, center + 1))
+                    and not boundary[center - 1] and boundary[center] and not boundary[center + 1]):
+                prev_year, prev_number = ((shift.year, shift.month - 1) if shift.month > 1
+                                          else (shift.year - 1, 12))
+                label = (f"{prev_number}/{monthrange(prev_year, prev_number)[1]}（前月最終日）"
+                         if center == 0 else f"{shift.month}/1")
+                result.issues.append(Issue(
+                    severity="WARNING", category="月境界の飛び石勤務", day=1, employee=emp.name,
+                    message=f"{label}が月をまたぐ「休み・出勤・休み」の単独出勤です。"
+                            "確認できた前月の記録と当月の配置で判定。本人希望は維持して確認してください。",
+                ))
         if not isolated_work_days:
             continue
 
@@ -1241,6 +1269,41 @@ def _check_tobishi_work_patterns(
                 "可能なら前後日との入れ替えを確認してください"
             ),
         ))
+
+
+def _check_staffing_policy(shift, result, days, off_requests):
+    for day in range(1, days + 1):
+        if shift.operation_modes.get(day) in (OperationMode.CLOSED, OperationMode.MINIMUM):
+            continue
+        first = shift.get_assignment("長尾", day)
+        second = shift.get_assignment("鈴木", day)
+        if suzuran_backup_violation(first.store if first else None, second.store if second else None):
+            result.issues.append(Issue(
+                severity="ERROR", category=SUZURAN_BACKUP_CATEGORY, day=day,
+                employee="鈴木", message=SUZURAN_BACKUP_DESCRIPTION,
+            ))
+    advisor_days = {a.day for a in shift.assignments if a.employee == "顧問" and a.store != Store.OFF}
+    if len(advisor_days) > ADVISOR_MAX_DAYS:
+        result.issues.append(Issue(
+            severity="ERROR", category="顧問の月間出勤上限", day=None, employee="顧問",
+            message=f"顧問の出勤{len(advisor_days)}日（原則上限{ADVISOR_MAX_DAYS}日）。",
+        ))
+    active = {e.name for e in _validation_employees(shift.year, shift.month)}
+    for event in attendance_events(shift.year, shift.month):
+        if shift.operation_modes.get(event.day) == OperationMode.CLOSED:
+            continue
+        missed = []
+        for name in event.employees:
+            if name not in active or event.day in off_requests.get(name, []):
+                continue
+            assignment = shift.get_assignment(name, event.day)
+            if assignment is None or assignment.store == Store.OFF:
+                missed.append(name)
+        if missed:
+            result.issues.append(Issue(
+                severity="INFO", category="忘年会当日の出勤目標", day=event.day, employee=None,
+                message="任意目標の未達: " + "・".join(missed) + "。他の重要条件を優先する場合は許容します。",
+            ))
 
 
 def _check_off_requests(
@@ -2369,6 +2432,18 @@ def _check_monthly_workday_balance(
                     "人数が余る月でなければ、休みに寄せてください。"
                     f"{note}"
                 ),
+            ))
+
+
+def _check_staffing_events(shift, result):
+    for event in staffing_events(shift.year, shift.month):
+        if not event_satisfied(shift, event):
+            result.issues.append(Issue(
+                severity="WARNING", category=STAFFING_EVENT_CATEGORY,
+                day=event.day, employee=None,
+                message=event.description + " 現在の配属: "
+                + ("・".join(sorted(event_workers(shift, event))) or "なし")
+                + "。未達でも、他の重要条件を優先して構いません。",
             ))
 
 

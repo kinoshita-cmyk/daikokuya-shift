@@ -19,7 +19,8 @@ def source_signature():
     paths = list(CONFIG_DIR.glob("*.json"))
     paths += list(BACKUP_DIR.glob("*/preferences_*.json"))
     paths += [Path(__file__).with_name(name) for name in (
-        "rules.py", "rule_book.py", "employees.py", "submission_loader.py",
+        "rules.py", "rule_book.py", "employees.py", "submission_loader.py", "staffing_events.py",
+        "staffing_policy.py", "eco_support.py", "preferred_off.py",
     )]
     return digest({
         "month": now_jst().strftime("%Y-%m"),

@@ -483,7 +483,7 @@ def _extract_store_from_text(text: str) -> Optional[Store]:
 def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> list[tuple[list[int], int]]:
     """「16,17日のいずれか1日休み」のような候補休を拾う。"""
     normalized = _normalize_note_text(sentence)
-    if not any(word in normalized for word in ("いずれか", "どちらか", "どれか")):
+    if not any(word in normalized for word in ("いずれか", "どちらか", "どれか", "のうち")):
         return []
     if not any(word in normalized for word in ("休み", "休日", "休暇")):
         return []
@@ -492,7 +492,7 @@ def _extract_flexible_off_from_sentence(sentence: str, days_in_month: int) -> li
         r"(?P<candidates>\d{1,2}\s*日?"
         r"(?:(?:\s*(?:[,\.・]|と|か|または|もしくは|or)\s*|\s+)"
         r"\d{1,2}\s*日?)+)"
-        r"\s*(?:の)?(?:いずれか|どちらか|どれか)"
+        r"\s*(?:の)?(?:いずれか|どちらか|どれか|うち)"
         r"(?:(?!。|\n).*?(?P<count>\d{1,2})\s*日)?"
     )
     results: list[tuple[list[int], int]] = []
@@ -684,13 +684,14 @@ def parse_natural_language_note(
         previous_choice_days = choice_days
         if not sentence.strip():
             continue
-        for flex in _extract_flexible_off_from_sentence(sentence, days_in_month):
+        flexible_groups = _extract_flexible_off_from_sentence(sentence, days_in_month)
+        for flex in flexible_groups:
             result.flexible_off.append(flex)
 
         for work_group in _extract_work_group_from_sentence(sentence, days_in_month):
             result.work_groups.append(work_group)
 
-        if any(word in sentence for word in ("どちらか", "いずれか", "どれか")):
+        if flexible_groups or any(word in sentence for word in ("どちらか", "いずれか", "どれか")):
             continue
         if "休み希望はなし" in sentence or "休み希望なし" in sentence:
             continue
@@ -1119,16 +1120,8 @@ def load_submissions_for_month(
                 data.work_requests.append((emp, int(day), store))
 
         # flexible_off: [{"employee": ..., "candidate_days": [...], "n_required": ...}, ...]
-        for fo in d.get("flexible_off", []):
-            if isinstance(fo, dict):
-                emp = fo.get("employee")
-                cand = fo.get("candidate_days", [])
-                n = fo.get("n_required", 0)
-                if emp and cand:
-                    data.flexible_off.append((emp, list(cand), int(n)))
-            elif isinstance(fo, list) and len(fo) >= 3:
-                # 旧形式（タプルで保存されたもの）
-                data.flexible_off.append(tuple(fo))
+        from .preferred_off import submitted_flexible_off
+        data.flexible_off.extend(submitted_flexible_off(d))
 
         # 自由記述
         notes = d.get("natural_language_notes", {})

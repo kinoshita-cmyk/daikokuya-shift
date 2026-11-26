@@ -200,7 +200,7 @@ class OmiyaLimitIntegrationTest(unittest.TestCase):
         # 1営業日の月に絞り、実際の生成処理で3名成立・4名不可を確認する。
         modes = {d: OperationMode.CLOSED for d in range(1, 32)}
         modes[15] = OperationMode.NORMAL
-        employees = shift_active_employees()
+        employees = shift_active_employees(2026, 10)
         available = {"下地", "春山", "黒澤", "今津", "土井", "楯", "長尾", "板倉", "岩野", "野澤", "大類", "牧野"}
         for names, expected in ((["下地", "春山", "黒澤"], True),
                                 (["下地", "春山", "黒澤", "大類"], False)):

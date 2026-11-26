@@ -93,7 +93,9 @@ class StoreUpdateTest(unittest.TestCase):
             lines = rules.active_monthly_exception_descriptions(2026, 10)
             self.assertEqual(len(lines), 3)
             self.assertFalse(any(line.startswith("固定") for line in lines))
-            self.assertEqual(rules.active_monthly_exception_descriptions(2026, 11), [])
+            from prototype.staffing_events import staffing_events
+            self.assertEqual(rules.active_monthly_exception_descriptions(2026, 11),
+                             [event.description for event in staffing_events(2026, 11)])
         rules.reload_monthly_exceptions()
 
     def test_full_name_default_and_old_alias_both_supported(self):
@@ -194,6 +196,51 @@ render_monthly_exceptions_panel(st.session_state.get("year", 2026), st.session_s
         modes = rules.load_monthly_exceptions_raw()["operation_modes"]
         self.assertEqual(modes["2026-10"], {"3": "省人員"})
         self.assertEqual(modes["2026-09"], {"2": "省人員"})
+
+    def test_november_event_toggle_confirm_save_and_reload(self):
+        from prototype.staffing_events import staffing_events
+        app = self.AppTest.from_string(self.script)
+        app.session_state["month"] = 11
+        app.run()
+        self.assertFalse(app.exception)
+        checkbox = self.element(app.checkbox, "この日付限定の配置目標を有効にする")
+        self.assertTrue(checkbox.value)
+        checkbox.uncheck()
+        self.element(app.button, "配置目標の設定を保存").click().run()
+        self.assertTrue(staffing_events(2026, 11))
+        with patch("prototype.github_backup.push_config_to_github", return_value=(True, "test")):
+            self.element(app.button, "✅ 内容を確認して保存").click().run()
+        self.assertFalse(app.exception)
+        rules.reload_monthly_exceptions()
+        self.assertFalse(staffing_events(2026, 11))
+        app.session_state["month"] = 1
+        app.run()
+        self.assertFalse(app.exception)
+        self.assertFalse(any(c.label == "この日付限定の配置目標を有効にする" for c in app.checkbox))
+
+    def test_december_event_toggle_keeps_existing_december_rules(self):
+        from prototype.staffing_policy import attendance_events
+        original = rules.load_monthly_exceptions_raw()
+        original["employee_store_overrides"]["2026-12"] = {
+            "鈴木": {"primary_store": "SUZURAN", "normal_stores": ["AKABANE"]}}
+        original["operation_modes"]["2026-12"] = {"8": "省人員"}
+        original["future_admin_field"] = {"keep": [1, 2, 3]}
+        rules.save_monthly_exceptions(original)
+        app = self.AppTest.from_string(self.script)
+        app.session_state["month"] = 12
+        app.run()
+        self.assertFalse(app.exception)
+        checkbox = self.element(app.checkbox, "この日付限定の配置目標を有効にする")
+        self.assertTrue(checkbox.value)
+        checkbox.uncheck()
+        self.element(app.button, "配置目標の設定を保存").click().run()
+        with patch("prototype.github_backup.push_config_to_github", return_value=(True, "test")):
+            self.element(app.button, "✅ 内容を確認して保存").click().run()
+        self.assertFalse(app.exception)
+        saved = rules.load_monthly_exceptions_raw()
+        for key in ("employee_store_overrides", "operation_modes", "future_admin_field"):
+            self.assertEqual(saved[key], original[key])
+        self.assertFalse(attendance_events(2026, 12))
 
     def test_boot_restores_remote_before_update_and_backs_up_marker(self):
         from prototype.submission_window import timestamp_sort_key

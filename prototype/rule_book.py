@@ -139,6 +139,14 @@ def monthly_cards(year, month):
         metadata.append(("same-off:" + first + ":" + second, first + "さん・" + second + "さんの同時休み回避", "目標"))
     for day in sorted(rules.monthly_operation_mode_overrides(year, month)):
         metadata.append(("mode:" + str(day), f"{day}日の営業体制", "絶対"))
+    from .staffing_events import staffing_events
+    for event in staffing_events(year, month):
+        metadata.append(("event:" + event.id, event.title, "目標"))
+    from .staffing_policy import attendance_events
+    for event in attendance_events(year, month):
+        metadata.append(("event:" + event.id, event.title, "目標"))
+    if ym == (2026, 12):
+        metadata.append(("eco-support", "大類の単独エコ担当禁止", "絶対"))
     descriptions = rules.active_monthly_exception_descriptions(year, month)
     if len(metadata) != len(descriptions):
         raise ValueError("月別条件の表示形式が更新されています。条件ブックの対応を確認してください")
@@ -166,7 +174,8 @@ def submission_cards(sub, employees):
                         lines.append(text)
         for who, candidates, required in sub.flexible_off:
             if who == name:
-                lines.append(f"候補休み：{days_text(candidates)}のうち{required}日")
+                lines.append(f"候補休み：{days_text(candidates)}のうち{required}日"
+                             if required > 0 else "△できれば休み：" + days_text(candidates))
         for who, candidates, required, store in sub.preferred_work_groups:
             if who == name:
                 lines.append(f"候補出勤：{days_text(candidates)}のうち{required}日・{store_name(store)}")
@@ -205,7 +214,7 @@ def build_month(year, month, config, employees, ledger, sub=None):
         "4連勤超過回避": f"生成時は{rules.HARD_CONSTRAINTS['max_consecutive_work_days']}連勤を超える勤務をできるだけ避けます。",
         "2連休": f"月内に最低{p['min_2off_per_month']}回、最大{p['max_2off_per_month']}回を目標にします。個別の連休上限・回数指定は別途適用します。",
         "月別基準勤務日数": f"{month}月の基準は{rules.STANDARD_265_MONTHLY_WORK_TARGETS[month]}日（年間265日対象者）。実出勤＋有給で判定します。不足{rules.WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS}日以上・超過{rules.WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS}日以上は警告、差が{rules.WORK_TARGET_ERROR_DIFF_DAYS}日以上はエラー。個別指定・補助要員は別扱いです。",
-        "飛び石勤務の回避": f"「休み・出勤・休み」の1日だけの単独出勤を指します。エコ主力（{core or '対象者なし'}）は強く回避。その他は重要条件を崩さない範囲で回避。「出勤・休み・出勤」や2連勤は対象外です。",
+        "飛び石勤務の回避": f"「休み・出勤・休み」の1日だけの単独出勤を指します。エコ主力（{core or '対象者なし'}）は強く回避。その他は重要条件を崩さない範囲で回避。「出勤・休み・出勤」や2連勤は対象外です。前月記録がある場合は、前月最終日・当月1日の月境界もWARNINGで確認します。",
         "5連勤の近接回避": CLOSE_LONG_WORK_DESCRIPTION,
         "今津の月曜赤羽優先": rules.IMAZU_MONDAY_DESCRIPTION,
         "今津の土日赤羽優先": rules.IMAZU_WEEKEND_DESCRIPTION,
@@ -265,7 +274,7 @@ def build_month(year, month, config, employees, ledger, sub=None):
     policy = rules.yamamoto_monthly_policy(year, month)
     sections["individual"].append(card(
         "base:yamamoto", "山本さんの補助勤務",
-        f"赤羽駅前で通常スタッフだけでは足りない日だけ補助配置します。それ以外の追加は手動。今月の上限は{policy['max_days']}日、連続{policy['max_consecutive']}日まで。上限まで出勤させる目標ではありません。本人の×休みは厳守します。",
+        f"原則、赤羽駅前で通常スタッフだけでは足りない日だけ補助配置します。それ以外の追加は手動（明示した日付限定の配置目標は別途適用）。今月の上限は{policy['max_days']}日、連続{policy['max_consecutive']}日まで。上限まで出勤させる目標ではありません。本人の×休みは厳守します。",
         "絶対", scope if (year, month) in rules.MONTHLY_YAMAMOTO_POLICIES else "全月共通"))
     inactive_monthly_ids = {
         f"monthly:{kind}:{name}" for name in inactive_names for kind in ("store", "carryover")

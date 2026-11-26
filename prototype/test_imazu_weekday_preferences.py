@@ -179,7 +179,7 @@ class ImazuWeekdayIntegrationTest(unittest.TestCase):
                 available_today = available - ({"土井"} if day == 5 else set())
                 off_requests = {
                     e.name: [d for d in modes if d != day or e.name not in available_today]
-                    for e in shift_active_employees()
+                    for e in shift_active_employees(2026, 10)
                 }
                 required = []
                 if forced_store == Store.OFF:
