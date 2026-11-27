@@ -27,6 +27,7 @@ from calendar import monthrange
 from typing import Optional
 from .consecutive_counts import (
     consecutive_count_label, matching_block_ends, previous_run_length,
+    unavoidable_off_days,
 )
 from .work_recovery import (
     CLOSE_LONG_WORK_CATEGORY, LONG_WORK_RUN_DAYS,
@@ -1094,7 +1095,9 @@ def _check_consecutive_off(
         if emp.name in CONSTRAINT_EXCLUDED and emp.name not in employee_max_consecutive_off:
             continue
 
-        emp_off_requests = set(off_requests.get(emp.name, []))
+        emp_off_requests = unavoidable_off_days(
+            off_requests.get(emp.name, []), shift.operation_modes,
+        )
         max_allowed_off = int(HARD_CONSTRAINTS.get("max_consecutive_off_days", 2) or 2)
         emp_max_off = employee_max_consecutive_off.get(emp.name)
         if emp_max_off is not None:
@@ -1106,7 +1109,7 @@ def _check_consecutive_off(
                         and not {day, day + 1}.issubset(emp_off_requests)):
                     result.issues.append(Issue(
                         severity="ERROR", category="連休上限", day=day, employee=emp.name,
-                        message=f"{day}日・{day + 1}日が連休です。本人の指定は2連休以上不可です（本人×希望の連続は除く）。",
+                        message=f"{day}日・{day + 1}日が連休です。本人の指定は2連休以上不可です（本人×希望・全店休業だけで生じる連休は除く）。",
                     ))
 
         consec_off = 0
@@ -1135,7 +1138,7 @@ def _check_consecutive_off(
                             message=(
                                 f"{consec_off}連休"
                                 f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
-                                "。本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可です。"
+                                "。本人の×休み希望・全店休業だけで生じる場合を除き、3連休は不可です。"
                             ),
                         ))
                 consec_off = 0
@@ -1157,7 +1160,7 @@ def _check_consecutive_off(
                         message=(
                             f"{consec_off}連休"
                             f"（{shift.month}/{off_block[0]}〜{shift.month}/{off_block[-1]}）"
-                            "。本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可です。"
+                            "。本人の×休み希望・全店休業だけで生じる場合を除き、3連休は不可です。"
                         ),
                     ))
 
@@ -2003,6 +2006,9 @@ def _check_monthly_avoid_same_off_rules(
     """全月共通のすずらん不在と月限定の同時休みを警告確認する。"""
     for first_name, second_name, reason in fixed_suzuran_core_presence_rules():
         for day in range(1, days + 1):
+            if not is_store_open_on_day(shift.year, shift.month, day, Store.SUZURAN,
+                                       shift.operation_modes.get(day, OperationMode.NORMAL)):
+                continue
             first_assignment = shift.get_assignment(first_name, day)
             second_assignment = shift.get_assignment(second_name, day)
             first_at_suzuran = (

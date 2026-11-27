@@ -19,7 +19,7 @@ from .rule_config import RuleConfig
 from .submission_loader import load_submissions_for_month, parse_natural_language_note
 from .submission_window import now_jst
 from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
-from .consecutive_counts import consecutive_count_label
+from .consecutive_counts import consecutive_count_label, CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION
 from .employees import employee_is_in_service
 
 SCHEMA_VERSION = 1
@@ -213,6 +213,7 @@ def build_month(year, month, config, employees, ledger, sub=None):
         "最大連勤": f"基本の最大連勤は{p['max_consec_work']}日。個別指定がある場合は個別条件を使用します。",
         "4連勤超過回避": f"生成時は{rules.HARD_CONSTRAINTS['max_consecutive_work_days']}連勤を超える勤務をできるだけ避けます。",
         "2連休": f"月内に最低{p['min_2off_per_month']}回、最大{p['max_2off_per_month']}回を目標にします。個別の連休上限・回数指定は別途適用します。",
+        "3連休回避": CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION,
         "月別基準勤務日数": f"{month}月の基準は{rules.STANDARD_265_MONTHLY_WORK_TARGETS[month]}日（年間265日対象者）。実出勤＋有給で判定します。不足{rules.WORK_TARGET_SHORTFALL_WARNING_DIFF_DAYS}日以上・超過{rules.WORK_TARGET_OVERAGE_WARNING_DIFF_DAYS}日以上は警告、差が{rules.WORK_TARGET_ERROR_DIFF_DAYS}日以上はエラー。個別指定・補助要員は別扱いです。",
         "飛び石勤務の回避": f"「休み・出勤・休み」の1日だけの単独出勤を指します。エコ主力（{core or '対象者なし'}）は強く回避。その他は重要条件を崩さない範囲で回避。「出勤・休み・出勤」や2連勤は対象外です。前月記録がある場合は、前月最終日・当月1日の月境界もWARNINGで確認します。",
         "5連勤の近接回避": CLOSE_LONG_WORK_DESCRIPTION,

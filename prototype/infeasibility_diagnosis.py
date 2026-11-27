@@ -22,12 +22,17 @@
 
 from __future__ import annotations
 import inspect
+from copy import deepcopy
 from calendar import monthrange
 from datetime import date
+from itertools import combinations
+from time import monotonic
 from typing import Any, Callable, Optional
 
 from .models import OperationMode, Skill, Store
+from .consecutive_counts import consecutive_off_limit_windows
 from .rules import (
+    HARD_CONSTRAINTS,
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     compute_prev_consecutive_run,
     get_capacity,
@@ -65,6 +70,7 @@ def diagnose_known_conflicts(
     holiday_overrides: Optional[dict] = None,
     operation_modes: Optional[dict] = None,
     employees: Optional[list] = None,
+    employee_max_consecutive_off: Optional[dict] = None,
 ) -> list[dict]:
     """既知の衝突パターンを即座に検査し、日本語の所見リストを返す。
 
@@ -80,6 +86,7 @@ def diagnose_known_conflicts(
     exact_holiday_days = exact_holiday_days or {}
     holiday_overrides = holiday_overrides or {}
     operation_modes = operation_modes or {}
+    employee_max_consecutive_off = employee_max_consecutive_off or {}
 
     days_in_month = monthrange(int(year), int(month))[1]
     findings: list[dict] = []
@@ -121,6 +128,23 @@ def diagnose_known_conflicts(
         d for d in range(1, days_in_month + 1)
         if operation_modes.get(d) == OperationMode.CLOSED
     ]
+    for employee in employees or []:
+        name = employee.name
+        if (getattr(employee, "constraint_check_excluded", False)
+                and name not in employee_max_consecutive_off):
+            continue
+        default_max_off = int(HARD_CONSTRAINTS.get("max_consecutive_off_days", 2) or 2)
+        personal_max_off = int(employee_max_consecutive_off.get(name, 0) or 0)
+        max_off = min(default_max_off, personal_max_off) if personal_max_off > 0 else default_max_off
+        _, exemptions = consecutive_off_limit_windows(
+            days_in_month, max_off, off_requests.get(name, []), operation_modes,
+        )
+        for window in exemptions:
+            findings.append({
+                "区分": "全店休業を含む連休の自動免除", "確度": "情報",
+                "内容": f"{name}: {'・'.join(map(str, window))}日は本人×休み・全店休業だけで必ず連休になるため、連休上限{max_off}日の例外です。",
+                "対処": "本人の×休みと全店休業は維持します。追加の自然休で上限を超える連休は作りません。",
+            })
     # 出勤希望専任スタッフ（南さん型）の「希望していない日」
     on_request_only_workdays: dict = {}
     for name, d, _store in work_requests:
@@ -132,7 +156,8 @@ def diagnose_known_conflicts(
     forced_work: list[tuple] = []
 
     for name, d, store in work_requests:
-        if 1 <= int(d) <= days_in_month:
+        # 生成側と同じく、出勤希望と重複した×休みを最優先する。
+        if 1 <= int(d) <= days_in_month and int(d) not in off_requests.get(name, []):
             forced_work.append(
                 (str(name), int(d), store, "出勤希望（絶対）")
             )
@@ -185,10 +210,8 @@ def diagnose_known_conflicts(
                     f"「{reason}」と「{rest_reason}」が同時に成立できません。"
                 ),
                 "対処": (
-                    "どちらを優先するか決めてください。"
-                    "出勤を優先する場合は「⚙️ 設定 → 📅 月例外」で"
-                    "境界連勤の延長を許可し、"
-                    "休みを優先する場合は該当の出勤条件を取り下げてください。"
+                    "本人の×休み・連勤上限は維持し、該当の出勤指定を見直してください。"
+                    "前月連勤との衝突に限り、必要なら月境界の扱いを管理者で確認してください。"
                 ),
             })
         if d in closed_days:
@@ -257,8 +280,8 @@ def diagnose_known_conflicts(
                     f"×休み＋全店休業日だけで{min_off}日が必ず休みになります。"
                 ),
                 "対処": (
-                    "休日数の指定（自由記載など）を見直すか、"
-                    "×休みの一部を△に変更してもらってください。"
+                    "本人の×休みと全店休業は維持したまま、"
+                    "休日数の指定（自由記載・管理者補正）が実際の希望と一致するか確認してください。"
                 ),
             })
         max_off = days_in_month - n_forced_work
@@ -345,7 +368,7 @@ def diagnose_known_conflicts(
                         f"休み確定を除くと出勤可能なエコが{available_eco}名です。"
                     ),
                     "対処": (
-                        "該当日の×休みの調整を依頼するか、"
+                        "本人の×休みは維持し、応援候補または"
                         "「⚙️ 設定 → 📅 月例外 → 営業モード」で"
                         "この日を省人員に設定することを検討してください。"
                     ),
@@ -359,7 +382,7 @@ def diagnose_known_conflicts(
                         f"休み確定を除く出勤可能者が{available_total}名です。"
                     ),
                     "対処": (
-                        "該当日の×休みの調整・応援の検討、または"
+                        "本人の×休みは維持し、応援の検討、または"
                         "「⚙️ 設定 → 📅 月例外 → 営業モード」での"
                         "省人員設定を検討してください。"
                     ),
@@ -369,103 +392,162 @@ def diagnose_known_conflicts(
 
 
 # ============================================================
-# 2. ルール群を1つずつ外す緩和探索（ソルバー使用）
+# 2. 保存設定を変更しない、優先順の緩和試算（ソルバー使用）
 # ============================================================
 
-# (表示名, base_kwargs を変換する関数)
-PROBE_DEFINITIONS: list[tuple[str, Callable[[dict], dict]]] = [
-    (
-        "前月からの連勤持ち越し",
-        lambda kw: {**kw, "prev_month": []},
-    ),
-    (
-        "月末月初の固定配置",
-        lambda kw: {**kw, "disable_month_edge_rules": True},
-    ),
-    (
-        "出勤希望（絶対）",
-        lambda kw: {**kw, "work_requests": []},
-    ),
-    (
-        "×休み希望",
-        lambda kw: {**kw, "off_requests": {}},
-    ),
-    (
-        "柔軟休み（△・どちらか休み）",
-        lambda kw: {**kw, "flexible_off": []},
-    ),
-    (
-        "自由記載から反映した条件（休日数・連勤上限・日付指定）",
-        lambda kw: {
-            **kw,
-            "exact_holiday_days": {},
-            "employee_max_consecutive_work": {},
-            "employee_max_consecutive_off": {},
-            "required_assignments": [],
-        },
-    ),
-]
+def run_generation_attempt(generate, kwargs, attempts, label):
+    """各探索の終了理由を残す。後続の緊急探索で通常探索の記録を消さない。"""
+    status = {}
+    actual = dict(kwargs, status_out=status)
+    started = monotonic()
+    try:
+        shift = generate(**actual)
+    except Exception as exc:
+        attempts.append({"段階": label, "状態": "ERROR", "例外": type(exc).__name__,
+                         "経過秒": round(monotonic() - started, 2)})
+        raise
+    attempts.append({
+        "段階": label,
+        "状態": status.get("status", "FEASIBLE" if shift is not None else "UNKNOWN"),
+        "経過秒": round(monotonic() - started, 2),
+        "ソルバー秒": status.get("wall_time_seconds"),
+        "上限秒": kwargs.get("time_limit_seconds"),
+        "警告条件も必須": bool(kwargs.get("strict_warning_constraints", True)),
+        "顧問上限": kwargs.get("advisor_max_days"),
+        "エコサポート探索": deepcopy(status.get("eco_support_search", {})),
+        "モデル検査": status.get("model_validation_error", ""),
+    })
+    print(f"[shift-generation-attempt] {attempts[-1]}", flush=True)
+    if isinstance(kwargs.get("status_out"), dict):
+        kwargs["status_out"].clear()
+        kwargs["status_out"].update(status)
+    return shift
+
+
+def _diagnostic_flag(kwargs, flag):
+    return {**kwargs, "_diagnostic_relaxations":
+            set(kwargs.get("_diagnostic_relaxations", ())) | {flag}}
+
+
+def _probe_definitions(base):
+    from .rules import monthly_training_plans, tanaka_pair_training_rule
+
+    year, month = int(base["year"]), int(base["month"])
+    # 順位は検討順であり、承認や安全性の順位ではない。×休み・勤務可能日・技能は外さない。
+    definitions = [
+        ("月別の日付指定配置", lambda kw: {**kw, "required_assignments": []},
+         any(str(r.get("severity") or "ERROR").upper() == "ERROR"
+             for r in base.get("required_assignments", []) if isinstance(r, dict))),
+        ("店舗別の勤務回数指定", lambda kw: {**kw, "monthly_store_count_rules": []},
+         bool(base.get("monthly_store_count_rules"))),
+        ("月別の研修日数・組み合わせ", lambda kw: _diagnostic_flag(kw, "monthly_training"),
+         bool(monthly_training_plans(year, month) or tanaka_pair_training_rule(year, month))),
+        ("長尾不在時の鈴木すずらん必須", lambda kw: _diagnostic_flag(kw, "suzuran_backup"), True),
+        ("連勤・連休の回数指定", lambda kw: {**kw, "consecutive_count_rules": []},
+         bool(base.get("consecutive_count_rules"))),
+        ("月末の最大4連勤（通常の連勤上限は維持）", lambda kw: _diagnostic_flag(kw, "month_end_four"), True),
+        ("月末月初の固定配置", lambda kw: {**kw, "disable_month_edge_rules": True},
+         not base.get("disable_month_edge_rules", False)),
+        ("休日数の固定指定（最低休日数は維持・本人確認が必要）",
+         lambda kw: {**kw, "exact_holiday_days": {}}, bool(base.get("exact_holiday_days"))),
+        ("個別の連休上限（本人確認が必要）",
+         lambda kw: {**kw, "employee_max_consecutive_off": {}},
+         bool(base.get("employee_max_consecutive_off"))),
+    ]
+    return [(label, transform) for label, transform, active in definitions if active]
 
 
 def probe_rule_relaxations(
     base_kwargs: dict,
     time_limit_per_probe: int = 20,
     progress_callback: Optional[Callable[[str], Any]] = None,
+    total_time_limit: int = 180,
+    max_pair_probes: int = 12,
 ) -> list[dict]:
-    """ルール群を1つずつ外して再生成を試し、原因の候補を特定する。
+    """通常条件、単独緩和、2条件の組合せの順に試算。保存・本シフトへの反映はしない。
 
-    Args:
-        base_kwargs: 本番の generate_shift に渡した引数一式
-        time_limit_per_probe: 1回の試算あたりのソルバー制限秒数
-        progress_callback: 進捗表示用（"月末月初の固定配置 を確認中..." など）
-
-    Returns:
-        list[dict]: {"外した条件", "結果", "所要秒"} のリスト。
-        「解あり」になった条件が、解なしの原因（の一部）。
+    本人×休み、出勤可能日、前月からの連勤、技能構成、人数下限は維持する。
+    全組合せを網羅しないため、失敗しても「どの条件も原因でない」とは断定しない。
     """
     from .generator import generate_shift
 
     valid_params = set(inspect.signature(generate_shift).parameters)
     results: list[dict] = []
 
-    for label, transform in PROBE_DEFINITIONS:
+    base = deepcopy(base_kwargs)
+    base["strict_warning_constraints"] = False
+    base.pop("_diagnostic_relaxations", None)
+    definitions = _probe_definitions(base)
+    started = monotonic()
+
+    def trial(selected, kind):
+        remaining = float(total_time_limit) - (monotonic() - started)
+        if remaining < 1:
+            return None
+        label = " + ".join(definitions[i][0] for i in selected) or "なし（現行の絶対条件を維持）"
         if progress_callback:
             try:
-                progress_callback(f"「{label}」を外して試算中...")
+                progress_callback(f"{kind}: {label} を確認中...")
             except Exception:
                 pass
-        kwargs = transform(dict(base_kwargs))
-        kwargs["time_limit_seconds"] = int(time_limit_per_probe)
+        kwargs = deepcopy(base)
+        for index in selected:
+            kwargs = definitions[index][1](kwargs)
+        kwargs["time_limit_seconds"] = max(1, min(int(time_limit_per_probe), int(remaining)))
         kwargs["verbose"] = False
         status_box: dict = {}
         kwargs["status_out"] = status_box
+        unsupported_diagnostic = bool(kwargs.get("_diagnostic_relaxations")) and "_diagnostic_relaxations" not in valid_params
         kwargs = {k: v for k, v in kwargs.items() if k in valid_params}
+        trial_started = monotonic()
         try:
+            if unsupported_diagnostic:
+                raise RuntimeError("generator.py に診断機能の更新が反映されていません")
             shift = generate_shift(**kwargs)
         except Exception as exc:
-            results.append({
-                "外した条件": label,
-                "結果": f"試算エラー（{type(exc).__name__}）",
-                "所要秒": "",
-            })
-            continue
-        if shift is not None:
-            outcome = "✅ 解あり（この条件が原因の可能性大）"
-        elif status_box.get("status") == "INFEASIBLE":
-            outcome = "解なし（この条件は原因ではない）"
+            status, outcome = "ERROR", f"試算エラー（{type(exc).__name__}）。条件緩和ではなくプログラムの確認が必要です"
         else:
-            outcome = "時間内に判定できず"
-        results.append({
-            "外した条件": label,
-            "結果": outcome,
-            "所要秒": status_box.get("wall_time_seconds", ""),
-        })
+            status = status_box.get("status", "FEASIBLE" if shift is not None else "UNKNOWN")
+            if shift is not None:
+                outcome = "✅ 解あり（保存・反映はしていません）"
+            elif status == "INFEASIBLE":
+                outcome = "解なし（この変更だけでは成立せず。原因候補からは除外できません）"
+            elif status == "MODEL_INVALID":
+                outcome = "モデル不正。ルールを外す前にプログラムの確認が必要です"
+            else:
+                outcome = "時間内に判定できず（成立しないとは断定できません）"
+        row = {"試算区分": kind, "検討順": ",".join(str(i + 1) for i in selected) or "-",
+               "外した条件": label, "結果": outcome, "判定": status,
+               "所要秒": round(monotonic() - trial_started, 2)}
+        results.append(row)
+        return row
+
+    baseline = trial((), "現行条件")
+    if not baseline or baseline["判定"] in ("FEASIBLE", "OPTIMAL", "MODEL_INVALID", "ERROR"):
+        return results
+    for index in range(len(definitions)):
+        if trial((index,), "単独の変更") is None:
+            break
+    if not any(row["判定"] in ("FEASIBLE", "OPTIMAL") for row in results):
+        # 影響の小さい変更群から先に比較。2条件を同時に変えないと成立しない場合も調べる。
+        pairs = sorted(combinations(range(len(definitions)), 2), key=lambda pair: (max(pair), sum(pair)))
+        for pair in pairs[:max(0, int(max_pair_probes))]:
+            row = trial(pair, "2条件の組み合わせ")
+            if row is None or row["判定"] in ("FEASIBLE", "OPTIMAL"):
+                break
+
+    if float(total_time_limit) - (monotonic() - started) < 1:
+        results.append({"試算区分": "調査上限", "検討順": "-", "外した条件": "未調査の候補あり",
+                        "結果": "調査時間の上限です。未調査の候補は成立可否不明です",
+                        "判定": "NOT_RUN", "所要秒": ""})
 
     return results
 
 
 def summarize_probe_results(results: list[dict]) -> str:
     """緩和探索の結果を1〜2文の日本語まとめにする。"""
+    if any(r.get("試算区分") == "現行条件" and r.get("判定") in ("FEASIBLE", "OPTIMAL") for r in results):
+        return "現行の絶対条件のまま完成案が見つかりました。ルール変更は不要です。試算案は保存していません。"
     culprits = [
         r["外した条件"] for r in results
         if str(r.get("結果", "")).startswith("✅")
@@ -474,14 +556,16 @@ def summarize_probe_results(results: list[dict]) -> str:
         return (
             "次の条件を外すと解が見つかりました: "
             + "、".join(culprits)
-            + "。この条件と他の条件の組み合わせが解なしの原因です。"
+            + "。変更候補であり、自動適用はしていません。×休み・必要人数・技能構成は維持しています。"
         )
+    if any(r.get("判定") in ("ERROR", "MODEL_INVALID") for r in results):
+        return "試算にプログラム上のエラーが含まれています。条件の矛盾とは区別して修正が必要です。"
     if any("時間内に判定できず" in str(r.get("結果", "")) for r in results):
         return (
-            "単独の条件では原因を特定できませんでした（一部は時間内に判定できず）。"
-            "複数条件の組み合わせ、または人員数そのものが原因の可能性があります。"
+            "調べた範囲では完成案が見つかりませんでした（一部は時間内に判定できず）。"
+            "成立不能の証明ではありません。未調査の組み合わせや日別の人員配置の確認が必要です。"
         )
     return (
-        "どの条件を単独で外しても解は見つかりませんでした。"
-        "複数条件の組み合わせ、または人員数そのものが原因の可能性があります。"
+        "調べた条件・組み合わせでは解が見つかりませんでした。"
+        "すべてのルールを網羅した調査ではありません。未調査の組み合わせや人員条件の確認が必要です。"
     )

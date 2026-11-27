@@ -5,6 +5,36 @@ from __future__ import annotations
 import re
 import unicodedata
 from calendar import monthrange
+from .models import OperationMode
+
+
+CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION = (
+    "本人の×休み希望・全店休業だけで必然的に生じる連休は、3連休禁止・個別の連休上限の例外。"
+    "システムが追加の休みを付けて上限を超える連休を作ることは不可。"
+    "省人員・最小営業・一部店舗だけの休業は、この例外の対象外。"
+)
+
+
+def unavoidable_off_days(requested_days, operation_modes):
+    """全員が休みの営業停止日だけを加える。提出された×希望自体は変更しない。"""
+    return {int(day) for day in requested_days} | {
+        int(day) for day, mode in operation_modes.items() if mode == OperationMode.CLOSED
+    }
+
+
+def consecutive_off_limit_windows(days_in_month, max_allowed, requested_days, operation_modes):
+    """連休上限を強制する窓と、全店休業を含む不可避の例外窓を分ける。"""
+    requested = {int(day) for day in requested_days}
+    unavoidable = unavoidable_off_days(requested, operation_modes)
+    constrained, closure_exceptions = [], []
+    for start in range(1, days_in_month - max_allowed + 1):
+        window = tuple(range(start, start + max_allowed + 1))
+        if set(window).issubset(unavoidable):
+            if not set(window).issubset(requested):
+                closure_exceptions.append(window)
+        else:
+            constrained.append(window)
+    return constrained, closure_exceptions
 
 
 def consecutive_count_label(rule: dict) -> str:

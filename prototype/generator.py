@@ -28,7 +28,7 @@ from time import monotonic
 from typing import Optional
 
 from ortools.sat.python import cp_model
-from .consecutive_counts import add_consecutive_count_constraints
+from .consecutive_counts import add_consecutive_count_constraints, consecutive_off_limit_windows
 from .staffing_events import add_staffing_event_goals, STAFFING_EVENT_REWARD
 from .staffing_policy import (
     ADVISOR_MAX_DAYS, ADVISOR_DAY_PENALTY, add_suzuran_backup_constraint,
@@ -405,6 +405,7 @@ def generate_shift(
     status_out: Optional[dict] = None,
     consecutive_count_rules: Optional[list[dict]] = None,
     conditional_store_requests: Optional[list[tuple[str, int, Store]]] = None,
+    _diagnostic_relaxations: Optional[set[str]] = None,
 ) -> Optional[MonthlyShift]:
     """
     Args:
@@ -419,6 +420,11 @@ def generate_shift(
     Returns:
         生成された MonthlyShift。解が見つからない場合は None。
     """
+    diagnostic_relaxations = frozenset(_diagnostic_relaxations or ())
+    if diagnostic_relaxations - {"suzuran_backup", "monthly_training", "month_end_four"}:
+        raise ValueError("未対応の診断条件です")
+    if diagnostic_relaxations and status_out is None:
+        raise ValueError("条件緩和は診断専用です。status_out が必要です")
     flexible_off = flexible_off or []
     holiday_overrides = holiday_overrides or {}
     exact_holiday_days = exact_holiday_days or {}
@@ -700,7 +706,8 @@ def generate_shift(
                     preferred_off_terms.append(off[name][d])
                     preferred_off_seen.add((name, d))
 
-    add_suzuran_backup_constraint(model, x, off, days, operation_modes)
+    if "suzuran_backup" not in diagnostic_relaxations:
+        add_suzuran_backup_constraint(model, x, off, days, operation_modes)
 
     # ============================================================
     # 制約 5: 配置不可な店舗には配置しない（Affinity.NONE）
@@ -722,7 +729,8 @@ def generate_shift(
         )
     )
     # 月限定: 田中さんの研修ペア勤務（西口・赤羽・東口）
-    tanaka_training = tanaka_pair_training_rule(year, month)
+    tanaka_training = (None if "monthly_training" in diagnostic_relaxations
+                       else tanaka_pair_training_rule(year, month))
     tanaka_employee = (
         str(tanaka_training.get("employee"))
         if tanaka_training else "田中"
@@ -753,9 +761,11 @@ def generate_shift(
         tanaka_training is not None
         and all(n in main_employee_names for n in tanaka_required_members)
     )
-    generic_training_plans = monthly_training_plans(year, month)
+    generic_training_plans = ([] if "monthly_training" in diagnostic_relaxations
+                              else monthly_training_plans(year, month))
     generic_training_allowed_days = {
-        e.name: monthly_training_store_days(year, month, e.name)
+        e.name: ({} if "monthly_training" in diagnostic_relaxations
+                 else monthly_training_store_days(year, month, e.name))
         for e in main_employees
     }
     for e in main_employees:
@@ -1046,11 +1056,8 @@ def generate_shift(
 
     # 月初固定勤務とつながって6連勤にならないよう、対象7名は
     # 月末の最後の5日を全勤務にしない（月末最大4連勤）。
-    _add_month_end_fixed_staff_consecutive_constraints(
-        model,
-        off,
-        days_in_month,
-    )
+    if "month_end_four" not in diagnostic_relaxations:
+        _add_month_end_fixed_staff_consecutive_constraints(model, off, days_in_month)
 
     # ============================================================
     # 制約 6: 各日・各店舗の必要人数
@@ -1485,9 +1492,9 @@ def generate_shift(
 
     # ============================================================
     # 制約 11: 3連休回避（ハード）
-    # 本人の×休み希望として3日連続で提出されている窓だけ例外として許容する。
-    # 2日希望休 + 1日自然休のように、システム側が3連休を完成させる形は不可。
+    # 本人×休み・全店休業だけの不可避な連休は例外。追加の自然休による連休は不可。
     # ============================================================
+    closure_off_exceptions = []
     for e in main_employees:
         if e.constraint_check_excluded or e.role == Role.ADVISOR:
             if e.name not in employee_max_consecutive_off:
@@ -1499,11 +1506,14 @@ def generate_shift(
         if emp_max_off > 0:
             max_off_days = min(max_off_days, emp_max_off)
 
-        for start in range(1, days_in_month - max_off_days + 1):
-            window = list(range(start, start + max_off_days + 1))
-            # 本人希望だけで上限を超える連休が成立している場合は例外。
-            if all(d in emp_off_days for d in window):
-                continue
+        limited_windows, exempt_windows = consecutive_off_limit_windows(
+            days_in_month, max_off_days, emp_off_days, operation_modes,
+        )
+        closure_off_exceptions.extend(
+            {"employee": e.name, "days": list(window), "max_off_days": max_off_days}
+            for window in exempt_windows
+        )
+        for window in limited_windows:
             model.Add(sum(off[e.name][d] for d in window) <= max_off_days)
 
     # ============================================================
@@ -1703,6 +1713,8 @@ def generate_shift(
         first_forced_off = set(off_requests.get(first_name, []))
         second_forced_off = set(off_requests.get(second_name, []))
         for d in days:
+            if not is_store_open_on_day(year, month, d, Store.SUZURAN, operation_modes.get(d, OperationMode.NORMAL)):
+                continue
             if d in first_forced_off and d in second_forced_off:
                 continue
             both_absent = model.NewBoolVar(
@@ -2061,6 +2073,10 @@ def generate_shift(
     if status_out is not None:
         # 解なしの原因調査用: INFEASIBLE(矛盾) と UNKNOWN(時間切れ) を区別できるようにする
         status_out["status"] = solver.StatusName(status)
+        status_out["diagnostic_relaxations"] = sorted(diagnostic_relaxations)
+        status_out["closure_off_exceptions"] = closure_off_exceptions
+        if status == cp_model.MODEL_INVALID:
+            status_out["model_validation_error"] = model.Validate()
         status_out["wall_time_seconds"] = support_search["wall_time_seconds"]
         status_out["eco_support_search"] = support_search
         status_out["advisor_policy"] = {"max_days": advisor_max_days, "day_penalty": ADVISOR_DAY_PENALTY}
