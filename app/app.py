@@ -365,6 +365,7 @@ def build_effective_rule_visibility_rows(
     from prototype.models import Store
     from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
     from prototype.staffing_policy import SUZURAN_BACKUP_DESCRIPTION, ADVISOR_DESCRIPTION
+    from prototype.consecutive_counts import CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION
     from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
 
     year = int(year)
@@ -514,10 +515,7 @@ def build_effective_rule_visibility_rows(
             "ルール": "3連休",
             "適用範囲": "全月固定",
             "強さ": "絶対条件 / ERROR",
-            "現在有効な内容": (
-                "システム都合で3連休を作らない。本人が×休み希望を"
-                "3日連続で提出した箇所だけ例外として許容する。"
-            ),
+            "現在有効な内容": CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION,
             "変更場所": "固定ルール",
         },
         {
@@ -903,7 +901,7 @@ from prototype.employees import ALL_EMPLOYEES, get_employee, shift_active_employ
 from prototype.backup import ShiftBackup
 from prototype.carryover import load_locked_previous_month_carryover, previous_year_month
 from prototype.export_config import EXPORT_COLUMN_ORDER, export_column_order
-from prototype.consecutive_counts import consecutive_count_label
+from prototype.consecutive_counts import consecutive_count_label, CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION
 from prototype.shift_lock import ShiftLockManager
 from prototype.rule_config import (
     CustomRule,
@@ -3642,6 +3640,9 @@ def render_generation_metadata_summary(metadata: dict, title: str = "保存済�
             st.write(f"- 休日日数の固定指定: {input_summary['exact_holiday_days']}")
         if input_summary.get("employee_max_consecutive_work"):
             st.write(f"- 個別の連勤上限: {input_summary['employee_max_consecutive_work']}")
+        for exemption in input_summary.get("closure_off_exceptions", []):
+            dates = "・".join(str(day) for day in exemption["days"])
+            st.write(f"- {exemption['employee']}: {dates}日は本人×休み・全店休業だけで生じる不可避の連休として許容。提出希望の変更なし。")
         support_search = input_summary.get("eco_support_search") or {}
         if support_search.get("fallback_used"):
             st.write("- エコサポート: 同伴ありでは成立せず、許可店舗での不足時例外を使用。対象日は検証警告を確認してください。")
@@ -5839,6 +5840,21 @@ if mode == "📊 経営者ビュー":
             if "input_summary" in _last_gen:
                 render_advisor_candidate_notice(_last_gen["input_summary"])
 
+            _attempts = _last_gen.get("input_summary", {}).get("generation_attempts", [])
+            if _attempts:
+                with st.expander("生成の経過・終了理由", expanded=(_gen_status in ("partial", "infeasible"))):
+                    _status_labels = {
+                        "INFEASIBLE": "条件が両立しない", "UNKNOWN": "時間内に判定できず",
+                        "MODEL_INVALID": "計算モデルの不正", "ERROR": "プログラムエラー",
+                        "FEASIBLE": "完成案あり", "OPTIMAL": "最適性を確認した完成案あり",
+                    }
+                    st.dataframe(pd.DataFrame([
+                        {"段階": row.get("段階"), "判定": _status_labels.get(row.get("状態"), row.get("状態")),
+                         "経過秒": row.get("経過秒"), "上限秒": row.get("上限秒"),
+                         "顧問上限": row.get("顧問上限")}
+                        for row in _attempts
+                    ]), use_container_width=True, hide_index=True)
+
             # ============================================================
             # 🔬 解なしの原因自動調査（未完成下書き・解なし時のみ表示）
             # ============================================================
@@ -5872,7 +5888,7 @@ if mode == "📊 経営者ビュー":
                             "下のボタンで詳しい自動調査ができます。"
                         )
 
-                    # 2) 緩和探索（ボタンで実行。条件を1つずつ外して原因を特定）
+                    # 2) 設定を保存せず、個別・組み合わせの緩和候補を試算。
                     _probe_results = st.session_state.get(
                         "last_infeasibility_probe_results"
                     )
@@ -5890,11 +5906,12 @@ if mode == "📊 経営者ビュー":
                     _probe_kwargs = st.session_state.get("last_generation_kwargs")
                     if _probe_kwargs is not None:
                         if st.button(
-                            "🔬 条件を1つずつ外して原因を自動調査する（2〜3分）",
+                            "🔬 条件の変更候補を優先順に調べる",
                             key="run_infeasibility_probe",
                             help=(
-                                "×休み・出勤希望・固定配置などの条件を1つずつ外して"
-                                "再計算し、どの条件が解なしの原因かを特定します。"
+                                "本人の×休み・必要人数・技能構成を維持した試算です。"
+                                "単独の変更と2条件の組み合わせを、最大約3分調べます。"
+                                "設定や本シフトは変更しません。全条件・全組み合わせの網羅ではありません。"
                             ),
                         ):
                             from prototype.infeasibility_diagnosis import (
@@ -6895,7 +6912,9 @@ if mode == "📊 経営者ビュー":
                         "attempted": False,
                         "applied": False,
                     }
-                    shift = generate_shift(**generation_kwargs)
+                    from prototype.infeasibility_diagnosis import run_generation_attempt
+                    generation_attempts = []
+                    shift = run_generation_attempt(generate_shift, generation_kwargs, generation_attempts, "通常条件")
                     relaxed_warning_constraints = False
                     relaxed_advisor_limit = False
                     if shift is None and "strict_warning_constraints" in generator_params:
@@ -6905,7 +6924,7 @@ if mode == "📊 経営者ビュー":
                         )
                         relaxed_kwargs = dict(generation_kwargs)
                         relaxed_kwargs["strict_warning_constraints"] = False
-                        shift = generate_shift(**relaxed_kwargs)
+                        shift = run_generation_attempt(generate_shift, relaxed_kwargs, generation_attempts, "警告候補のみ緩和")
                         relaxed_warning_constraints = shift is not None
                     if relaxed_warning_constraints:
                         data_source_msg += (
@@ -7042,14 +7061,14 @@ if mode == "📊 経営者ビュー":
                             advisor_probe_kwargs["advisor_max_days"] = advisor_candidate_limit(
                                 _saved_target_year, _saved_target_month,
                             )
-                        advisor_probe_shift = generate_shift(**advisor_probe_kwargs)
+                        advisor_probe_shift = run_generation_attempt(generate_shift, advisor_probe_kwargs, generation_attempts, "顧問候補枠で試算")
                         if (
                             advisor_probe_shift is None
                             and "strict_warning_constraints" in advisor_probe_kwargs
                         ):
                             relaxed_probe_kwargs = dict(advisor_probe_kwargs)
                             relaxed_probe_kwargs["strict_warning_constraints"] = False
-                            advisor_probe_shift = generate_shift(**relaxed_probe_kwargs)
+                            advisor_probe_shift = run_generation_attempt(generate_shift, relaxed_probe_kwargs, generation_attempts, "顧問候補枠・警告候補のみ緩和")
                         advisor_candidates = advisor_candidate_rows_from_shift(
                             advisor_probe_shift
                         )
@@ -7084,7 +7103,7 @@ if mode == "📊 経営者ビュー":
                             emergency_probe_kwargs["advisor_max_days"] = emergency_limit
                             if "strict_warning_constraints" in emergency_probe_kwargs:
                                 emergency_probe_kwargs["strict_warning_constraints"] = False
-                            emergency_probe_shift = generate_shift(**emergency_probe_kwargs)
+                            emergency_probe_shift = run_generation_attempt(generate_shift, emergency_probe_kwargs, generation_attempts, "緊急用の仮下書き（自動確定しない）")
                             if emergency_probe_shift is not None:
                                 shift = strip_advisor_assignments(emergency_probe_shift)
                                 support_search = generation_kwargs["status_out"].get("eco_support_search", {})
@@ -7127,6 +7146,7 @@ if mode == "📊 経営者ビュー":
 
                         # 解なしの原因を即時検査し、結果を画面用に保存する。
                         # 緩和探索（ボタン実行）用に生成条件一式も保存する。
+                        st.session_state["last_generation_kwargs"] = dict(generation_kwargs)
                         try:
                             from prototype.infeasibility_diagnosis import (
                                 diagnose_known_conflicts,
@@ -7151,17 +7171,20 @@ if mode == "📊 経営者ビュー":
                                     employee_max_consecutive_work=(
                                         use_employee_max_consecutive_work
                                     ),
+                                    employee_max_consecutive_off=use_employee_max_consecutive_off,
                                     exact_holiday_days=use_exact_holiday_days,
                                     holiday_overrides=use_holiday_overrides,
                                     operation_modes=modes,
                                     employees=_diag_employees,
                                 )
                             )
-                            st.session_state["last_generation_kwargs"] = dict(
-                                generation_kwargs
-                            )
-                        except Exception:
-                            pass
+                        except Exception as diagnosis_error:
+                            print(f"[shift-generation-diagnosis] {type(diagnosis_error).__name__}", flush=True)
+                            st.session_state["last_infeasibility_findings"] = [{
+                                "区分": "原因診断の実行エラー", "確度": "情報",
+                                "内容": "原因診断を実行できませんでした。条件が矛盾していると断定できません。管理ログと更新ファイルを確認してください。",
+                                "対処": "生成の経過・終了理由を確認してください。",
+                            }]
                         if not advisor_candidate_triggers:
                             advisor_candidate_triggers = [{
                                 "日付": "",
@@ -7248,6 +7271,8 @@ if mode == "📊 経営者ビュー":
                     "emergency_draft_used": bool(emergency_draft_used),
                     "incomplete_manual_draft_used": bool(incomplete_manual_draft_used),
                     "solver_limit_seconds": int(solver_limit_seconds),
+                    "generation_attempts": list(generation_attempts),
+                    "closure_off_exceptions": list(generation_kwargs["status_out"].get("closure_off_exceptions", [])),
                     "tobishi_definition": (
                         "休み・出勤・休みの1日だけの単独出勤"
                     ),
@@ -11106,7 +11131,7 @@ elif mode == "⚙️ 設定":
             "eco_required": "東口・西口の必須エコ要員",
             "consec_work": "最大連勤チェック",
             "holiday_days": "月内最低休日数",
-            "consec_off_3": "3連休禁止（希望休3連続は例外）",
+            "consec_off_3": "3連休禁止（本人×・全店休業だけの連休は例外）",
             "two_off_per_month": "月内 2連休回数（最低1回・最大2回）",
             "off_request": "休み希望厳守",
             "work_request": "出勤希望・希望店舗の考慮",
@@ -11510,7 +11535,7 @@ elif mode == "⚙️ 設定":
             ),
             _rule_row(
                 "連勤・休日", "3連休禁止",
-                "本人の×休み希望が3日連続で提出されている場合を除き、3連休は不可。",
+                CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION,
                 "反映中", "反映中", "検証結果に表示",
                 "コード固定", "反映中",
             ),
