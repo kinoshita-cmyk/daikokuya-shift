@@ -1156,13 +1156,12 @@ def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, s
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, d).weekday()
         day_assignments = shift.get_day_assignments(d)
         for store, keyholders in STORE_KEYHOLDERS.items():
             cap = capacity_map.get(store)
             if cap is None:
                 continue
-            if weekday in cap.closed_dow:
+            if not is_store_open_on_day(shift.year, shift.month, d, store, mode):
                 continue
             workers = [
                 a.employee for a in day_assignments
