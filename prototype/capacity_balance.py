@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 from calendar import monthrange
-from datetime import date
 from typing import Optional
 
 from .models import OperationMode, Skill, Store
@@ -25,6 +24,7 @@ from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     STORE_STAFFING_LIMITS,
     get_capacity,
+    is_store_open_on_day,
     get_monthly_work_target,
 )
 
@@ -91,12 +91,11 @@ def compute_monthly_capacity_balance(
         elif mode == OperationMode.CLOSED:
             closed_days += 1
         mode_capacity = get_capacity(mode)
-        weekday = date(int(year), int(month), d).weekday()
         for store, std in STORE_STAFFING_LIMITS.items():
             std_cap = get_capacity(OperationMode.NORMAL).get(store)
             if std_cap is None:
                 continue
-            if weekday in std_cap.closed_dow:
+            if not is_store_open_on_day(year, month, d, store, OperationMode.NORMAL):
                 if store == Store.HIGASHIGUCHI:
                     higashi_closed_days += 1
                 continue

@@ -28,7 +28,7 @@ from .models import MonthlyShift, Store, OperationMode
 from .paths import OUTPUT_DIR
 from .employees import ALL_EMPLOYEES
 from .export_config import EXPORT_COLUMN_ORDER, export_column_order
-from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity
+from .rules import STORE_KEYHOLDERS, SUZURAN_KEY_SUPPORT_FROM_OMIYA, get_capacity, is_store_open_on_day
 from .calendar_utils import is_weekend_or_japanese_holiday
 
 
@@ -117,13 +117,12 @@ def detect_key_warnings_by_store(shift: MonthlyShift) -> dict[int, dict[Store, s
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, d).weekday()
         day_assignments = shift.get_day_assignments(d)
         for store, keyholders in STORE_KEYHOLDERS.items():
             cap = capacity_map.get(store)
             if cap is None:
                 continue
-            if weekday in cap.closed_dow:
+            if not is_store_open_on_day(shift.year, shift.month, d, store, mode):
                 continue
             workers = [a.employee for a in day_assignments if a.store == store]
             if not workers:

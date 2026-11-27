@@ -228,6 +228,17 @@ def get_capacity(mode: OperationMode) -> dict[Store, StoreCapacity]:
     }[mode]
 
 
+# 承認済みの日付限定営業。保存済みの月別設定は上書きしない。
+SPECIAL_STORE_OPEN_DAYS = {
+    (2026, 12): {28: (Store.HIGASHIGUCHI,)},
+}
+
+
+def special_store_open_days(year: int, month: int) -> dict:
+    """その年月だけの特別営業日を返す。他の月の定休日は変更しない。"""
+    return dict(SPECIAL_STORE_OPEN_DAYS.get((int(year), int(month)), {}))
+
+
 def is_store_open_on_day(
     year: int,
     month: int,
@@ -239,6 +250,9 @@ def is_store_open_on_day(
     store_capacity = get_capacity(mode).get(store)
     if store_capacity is None:
         return False
+    # 全店休業・最小営業で閉める店舗は復活させず、定休日だけを解除する。
+    if store in special_store_open_days(year, month).get(int(day), ()):
+        return True
     return date(int(year), int(month), int(day)).weekday() not in store_capacity.closed_dow
 
 
@@ -956,6 +970,12 @@ def active_monthly_exception_descriptions(year: int, month: int) -> list[str]:
         notes.append(f"{first}・{second}: 同時休みをできるだけ回避" + (f"（{reason}）" if reason else ""))
     for day, mode in sorted(monthly_operation_mode_overrides(year, month).items()):
         notes.append(f"{day}日: 営業体制を{mode.value}に変更")
+    for day, stores in sorted(special_store_open_days(year, month).items()):
+        for store in stores:
+            notes.append(
+                f"{month}月{day}日: {store.display_name}を特別営業"
+                "（この日だけ定休日を解除。必要人数・技能・本人の×休みは従来どおり）"
+            )
     from .staffing_events import staffing_events
     notes.extend(event.description for event in staffing_events(year, month))
     from .staffing_policy import attendance_events, DECEMBER_SUPPORT_DESCRIPTION

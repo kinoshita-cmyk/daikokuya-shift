@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
-from datetime import date
 
 from .employees import get_employee, is_probationary_employee
 from .models import MonthlyShift, OperationMode, Skill, Store
-from .rules import get_capacity
+from .rules import get_capacity, is_store_open_on_day
 
 
 @dataclass(frozen=True)
@@ -88,10 +87,9 @@ def detect_short_staff_by_store(
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, day).weekday()
 
         for store, store_capacity in capacity_map.items():
-            if weekday in store_capacity.closed_dow:
+            if not is_store_open_on_day(shift.year, shift.month, day, store, mode):
                 continue
             staffing = effective_store_staffing(shift, day, store)
 

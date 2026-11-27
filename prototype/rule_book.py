@@ -139,6 +139,10 @@ def monthly_cards(year, month):
         metadata.append(("same-off:" + first + ":" + second, first + "さん・" + second + "さんの同時休み回避", "目標"))
     for day in sorted(rules.monthly_operation_mode_overrides(year, month)):
         metadata.append(("mode:" + str(day), f"{day}日の営業体制", "絶対"))
+    for day, stores in sorted(rules.special_store_open_days(year, month).items()):
+        for store in stores:
+            metadata.append((f"special-open:{day}:{store.name}",
+                             f"{month}月{day}日の{store.display_name}特別営業", "絶対"))
     from .staffing_events import staffing_events
     for event in staffing_events(year, month):
         metadata.append(("event:" + event.id, event.title, "目標"))

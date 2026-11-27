@@ -1142,12 +1142,10 @@ def generate_shift(
             * over_daily_standard
         )
 
-        weekday = date(year, month, d).weekday()
-
         # 各店舗ごとに必要人数を制約
         for s, store_cap in cap.items():
-            # 月曜休店チェック（東口）
-            if weekday in store_cap.closed_dow:
+            # 定休日と、その日だけの特別営業を共通判定する。
+            if not is_store_open_on_day(year, month, d, s, mode):
                 for e in main_employees:
                     model.Add(x[e.name][d][s] == 0)
                 continue

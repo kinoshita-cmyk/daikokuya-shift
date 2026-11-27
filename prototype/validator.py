@@ -543,7 +543,6 @@ def _check_store_capacity(
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, day).weekday()
 
         # シフト表は同一人物・同一日の最初の1件を表示するため、検証人数も
         # 同じ見え方に揃える。復元データ等の重複で人数だけ増えるのを防ぐ。
@@ -559,7 +558,7 @@ def _check_store_capacity(
             if cap is None:
                 continue
             # 休店曜日はスキップ
-            if weekday in cap.closed_dow:
+            if not is_store_open_on_day(shift.year, shift.month, day, store, mode):
                 continue
 
             # 補助要員は除外して人数集計
@@ -830,6 +829,9 @@ def _check_eco_placement(shift: MonthlyShift, result: ValidationResult, days: in
     """東口・西口に独り立ち済みエコが1名以上いるか。"""
     for day in range(1, days + 1):
         for store in (Store.HIGASHIGUCHI, Store.NISHIGUCHI):
+            mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+            if not is_store_open_on_day(shift.year, shift.month, day, store, mode):
+                continue
             day_assignments = shift.get_day_assignments(day)
             eco_at_store = [
                 a for a in day_assignments
@@ -840,15 +842,6 @@ def _check_eco_placement(shift: MonthlyShift, result: ValidationResult, days: in
                 )
             ]
             if not eco_at_store:
-                # その日の店舗が休店or閉店ならスキップ
-                mode = shift.operation_modes.get(day, OperationMode.NORMAL)
-                if mode in (OperationMode.MINIMUM, OperationMode.CLOSED):
-                    continue
-                # 東口の月曜は休店なのでスキップ
-                if store == Store.HIGASHIGUCHI:
-                    weekday = date(shift.year, shift.month, day).weekday()
-                    if weekday == 0:
-                        continue
                 result.issues.append(Issue(
                     severity="ERROR",
                     category="必須エコ",
@@ -1913,10 +1906,13 @@ def _check_monthly_training_plans(
 def _check_higashiguchi_monday_closed(
     shift: MonthlyShift, result: ValidationResult, days: int,
 ) -> None:
-    """東口は月曜休店（誰も配置されていてはいけない）"""
+    """東口の月曜休店を検証する。日付限定の特別営業は除く。"""
     for day in range(1, days + 1):
         weekday = date(shift.year, shift.month, day).weekday()
         if weekday != 0:
+            continue
+        mode = shift.operation_modes.get(day, OperationMode.NORMAL)
+        if is_store_open_on_day(shift.year, shift.month, day, Store.HIGASHIGUCHI, mode):
             continue
         higashi_workers = [
             a.employee for a in shift.get_day_assignments(day)
@@ -2215,10 +2211,9 @@ def _check_store_keyholders(
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, day).weekday()
         for store, keyholders in STORE_KEYHOLDERS.items():
             cap = capacity_map.get(store)
-            if cap is not None and weekday in cap.closed_dow:
+            if cap is None or not is_store_open_on_day(shift.year, shift.month, day, store, mode):
                 continue
             workers = _employee_names_at_store(shift, day, store)
             if not workers:
@@ -2584,12 +2579,11 @@ def _compute_stats(
         if mode == OperationMode.CLOSED:
             continue
         capacity_map = get_capacity(mode)
-        weekday = date(shift.year, shift.month, day).weekday()
 
         # 営業対象店舗の必要人数（休店曜日は除外）
         required_total = 0
         for store, cap in capacity_map.items():
-            if weekday in cap.closed_dow:
+            if not is_store_open_on_day(shift.year, shift.month, day, store, mode):
                 continue
             required_total += cap.eco_min + cap.ticket_min
 
@@ -2603,7 +2597,7 @@ def _compute_stats(
         )
         if actual_total < required_total:
             shortage = required_total - actual_total
-            short_days.append(f"5/{day}({actual_total}/{required_total}, -{shortage}名)")
+            short_days.append(f"{shift.month}/{day}({actual_total}/{required_total}, -{shortage}名)")
     if short_days:
         result.summary_stats["⚠ 人数不足日"] = ", ".join(short_days)
 

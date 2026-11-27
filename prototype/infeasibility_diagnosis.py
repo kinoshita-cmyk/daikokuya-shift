@@ -346,11 +346,10 @@ def diagnose_known_conflicts(
             if mode == OperationMode.CLOSED:
                 continue
             capacity = get_capacity(mode)
-            weekday = date(int(year), int(month), d).weekday()
             required_eco = 0
             required_total = 0
             for store, cap in capacity.items():
-                if cap is None or weekday in cap.closed_dow:
+                if cap is None or not is_store_open_on_day(year, month, d, store, mode):
                     continue
                 required_eco += int(cap.eco_min)
                 required_total += int(cap.eco_min) + int(cap.ticket_min)
