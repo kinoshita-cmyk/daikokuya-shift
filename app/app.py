@@ -6726,7 +6726,7 @@ if mode == "📊 経営者ビュー":
                                 f"\n（未提出 {len(sub_data.pending_employees)}名: "
                                 f"{', '.join(sub_data.pending_employees[:5])}"
                                 f"{'...' if len(sub_data.pending_employees) > 5 else ''}"
-                                    "は希望未指定として自由配置）"
+                                    "は本人希望未指定。出勤可能日・店舗区分などの設定は維持します）"
                                 )
                         admin_leave_days = admin_paid_leave_days_for_month(
                             _saved_target_year, _saved_target_month,
