@@ -59,6 +59,8 @@ from .rules import (
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTH_EDGE_FIXED_EMPLOYEES,
     MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
     OMIYA_TWO_PERSON_EXCLUDED_STAFF, avoid_same_off_rules,
+    OMIYA_FORBIDDEN_ONLY_CREW, OMIYA_FORBIDDEN_CREW_TITLE,
+    OMIYA_FORBIDDEN_CREW_DESCRIPTION,
     fixed_suzuran_core_presence_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
@@ -1422,6 +1424,15 @@ def _check_forbidden_same_store_pairings(
     """同じ店舗で一緒に勤務してはいけない組み合わせを検出する。"""
     for day in range(1, days + 1):
         day_assignments = shift.get_day_assignments(day)
+        omiya_workers = {a.employee for a in day_assignments if a.store == Store.OMIYA}
+        if omiya_workers == set(OMIYA_FORBIDDEN_ONLY_CREW):
+            result.issues.append(Issue(
+                severity="ERROR",
+                category=OMIYA_FORBIDDEN_CREW_TITLE,
+                day=day,
+                employee=None,
+                message=OMIYA_FORBIDDEN_CREW_DESCRIPTION,
+            ))
         for store, anchor_name, blocked_names in FORBIDDEN_SAME_STORE_PAIRINGS:
             store_workers = {
                 a.employee for a in day_assignments

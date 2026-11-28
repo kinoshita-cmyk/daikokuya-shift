@@ -49,8 +49,11 @@ from .shift_readjuster import (
     propose_yamamoto_cleanup,
 )
 from .validator import validate
-from .rules import STORE_STAFFING_LIMITS, IMAZU_MONDAY_DESCRIPTION, IMAZU_WEEKEND_DESCRIPTION
-from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+from .rules import (
+    STORE_STAFFING_LIMITS, IMAZU_MONDAY_DESCRIPTION, IMAZU_WEEKEND_DESCRIPTION,
+    OMIYA_FORBIDDEN_CREW_DESCRIPTION,
+)
+from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION, LONG_WORK_AVOIDANCE_DESCRIPTION
 
 
 logger = logging.getLogger(__name__)
@@ -125,7 +128,9 @@ SYSTEM_PROMPT += (
     "\n# 共通の現行ルール\n"
     f"- 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名。"
     "4名に増やす案で不足を解消しない。\n"
+    "- " + OMIYA_FORBIDDEN_CREW_DESCRIPTION + "\n"
     "- " + CLOSE_LONG_WORK_DESCRIPTION + "\n"
+    "- " + LONG_WORK_AVOIDANCE_DESCRIPTION + "\n"
     "- " + IMAZU_MONDAY_DESCRIPTION + "\n"
     "- " + IMAZU_WEEKEND_DESCRIPTION + "\n"
     "- 既存のエラー・重要な警告を増やす変更は検証で差し戻す。\n"

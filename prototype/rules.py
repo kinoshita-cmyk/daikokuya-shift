@@ -22,7 +22,7 @@ from typing import Optional
 from .models import Affinity, Store, Skill, OperationMode
 from .paths import CONFIG_DIR
 from .submission_window import now_jst
-from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+from .work_recovery import CLOSE_LONG_WORK_DESCRIPTION, LONG_WORK_AVOIDANCE_DESCRIPTION
 
 # ============================================================
 # 店舗別の必要人数（営業モードごと）
@@ -595,6 +595,15 @@ MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF = 4
 # 負担が大きいため、この2名を構成員にしない。3名以上の日は対象外。
 OMIYA_TWO_PERSON_EXCLUDED_STAFF: tuple[str, ...] = ("大塚", "南")
 
+OMIYA_FORBIDDEN_ONLY_CREW: tuple[str, ...] = ("鈴木", "岩野", "田中")
+OMIYA_FORBIDDEN_CREW_TITLE = "大宮駅前の禁止3名編成"
+OMIYA_FORBIDDEN_CREW_DESCRIPTION = (
+    "全月共通の絶対条件として、大宮駅前を鈴木・岩野・田中の3名だけで運営する配置は禁止。"
+    "各人の大宮勤務や、この3名の他店舗での勤務を禁止するものではない。"
+    "春山・下地の必須配置を緩和した月や省人員モードでも適用する。"
+    "大宮は最大3名のため、4人目を追加するのではなく構成員を交代する。"
+)
+
 # 赤羽東口店: 土井メイン。土井休みの日だけ指定エコスタッフが代替。
 HIGASHIGUCHI_PRIMARY_STAFF = "土井"
 HIGASHIGUCHI_SUBSTITUTE_STAFF: tuple[str, ...] = ("楯", "春山", "長尾", "今津")
@@ -852,10 +861,12 @@ def active_code_managed_monthly_rules(year: int, month: int, *, include_fixed: b
         from .eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
         notes.append("固定ルール（原則同伴・不足時のみ例外）: " + SUPPORT_DESCRIPTION)
         notes.append("固定の強い目標: " + OMIYA_PAIR_DESCRIPTION)
+        notes.append("固定絶対条件: " + OMIYA_FORBIDDEN_CREW_DESCRIPTION)
         notes.append(
             f"固定絶対条件: 大宮駅前の最大人数は{STORE_STAFFING_LIMITS[Store.OMIYA].max_total}名"
         )
         notes.append("固定の強い目標: " + CLOSE_LONG_WORK_DESCRIPTION)
+        notes.append("固定の強い目標: " + LONG_WORK_AVOIDANCE_DESCRIPTION)
         notes.append("固定の強い目標: " + IMAZU_MONDAY_DESCRIPTION)
         notes.append("固定の強い目標: " + IMAZU_WEEKEND_DESCRIPTION)
         if is_omiya_two_person_allowed_month(year, month):

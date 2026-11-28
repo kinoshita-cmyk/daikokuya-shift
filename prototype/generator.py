@@ -40,6 +40,7 @@ from .eco_support import (
 from .work_recovery import (
     CLOSE_LONG_WORK_DESCRIPTION, CLOSE_LONG_WORK_PENALTY,
     add_close_long_work_indicators, previous_working_map, work_recovery_applies,
+    LONG_WORK_AVOIDANCE_PENALTY, LONG_WORK_AVOIDANCE_DESCRIPTION, add_long_work_indicators,
 )
 
 from .models import (
@@ -68,6 +69,7 @@ from .rules import (
     MONTH_EDGE_HOME_STORE_ASSIGNMENTS, MONTH_EDGE_FIXED_EMPLOYEES,
     MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
     OMIYA_TWO_PERSON_EXCLUDED_STAFF, fixed_suzuran_core_presence_rules,
+    OMIYA_FORBIDDEN_ONLY_CREW, OMIYA_FORBIDDEN_CREW_DESCRIPTION,
     monthly_avoid_same_off_rules,
     is_omiya_anchor_relaxed_month, is_store_open_on_day,
     monthly_carryover_consecutive_allowances,
@@ -328,6 +330,18 @@ def _add_omiya_two_person_exclusion_constraints(
             model.Add(omiya_total >= 3).OnlyEnforceIf(
                 x[excluded_name][day][Store.OMIYA]
             )
+
+
+def _add_omiya_forbidden_crew_constraints(model, x, days, employee_names) -> None:
+    """人数・営業モードとは別に、指定3名だけの大宮運営を禁止する。"""
+    available = set(employee_names).intersection(x)
+    crew = set(OMIYA_FORBIDDEN_ONLY_CREW)
+    if not crew.issubset(available):
+        return
+    for day in days:
+        crew_count = sum(x[name][day][Store.OMIYA] for name in sorted(crew))
+        others = sum(x[name][day][Store.OMIYA] for name in sorted(available - crew))
+        model.Add(crew_count <= len(crew) - 1 + others)
 
 
 def _add_month_end_fixed_staff_consecutive_constraints(
@@ -628,6 +642,7 @@ def generate_shift(
         days,
         main_employee_names,
     )
+    _add_omiya_forbidden_crew_constraints(model, x, days, main_employee_names)
 
     # ============================================================
     # 制約 2: 休み希望厳守
@@ -1379,7 +1394,8 @@ def generate_shift(
 
         # ソフト制約：4連勤超え（5連勤）の発生数を計算してペナルティ
         emp_soft_threshold = min(soft_threshold, emp_hard_max)
-        if emp_hard_max > emp_soft_threshold:
+        # 推奨4連勤の場合は、下の共通5日窓で評価する（二重減点しない）。
+        if emp_hard_max > emp_soft_threshold and emp_soft_threshold != 4:
             for start_day in days:
                 window_days = list(range(start_day, min(start_day + emp_soft_threshold + 1, days_in_month + 1)))
                 if len(window_days) < emp_soft_threshold + 1:
@@ -1411,13 +1427,17 @@ def generate_shift(
                         sum(1 - off[e.name][d] for d in window) <= allowed_work
                     )
 
-    # 単発の5連勤より強く回避するが、絶対条件にはしない。
+    # 5連勤回避を全員に適用。近接する長い連勤には追加の減点を付ける。
+    long_work_by_employee = {}
     close_long_work_terms = []
     for e in main_employees:
         if not work_recovery_applies(e, year, month):
             continue
         working = previous_working_map(prev_month, e.name, year, month)
         working.update({d: 1 - off[e.name][d] for d in days})
+        long_work_by_employee[e.name] = add_long_work_indicators(
+            model, working, days_in_month, e.name,
+        )
         close_long_work_terms.extend(add_close_long_work_indicators(
             model, working, days_in_month, e.name,
         ).values())
@@ -1947,8 +1967,11 @@ def generate_shift(
         # 全体人数も11名を標準にし、13名を超える解は作らない。
         obj = obj - sum(over_daily_staffing_terms)
     if over_4_indicators:
-        # 4連勤超え1件あたり 50 ポイントのペナルティ（できる限り避けたい）
+        # 5連勤以外の推奨閾値に対する従来の目標は維持する。
         obj = obj - 50 * sum(over_4_indicators)
+    obj = obj - LONG_WORK_AVOIDANCE_PENALTY * sum(
+        term for indicators in long_work_by_employee.values() for term in indicators.values()
+    )
     if close_long_work_terms:
         obj = obj - CLOSE_LONG_WORK_PENALTY * sum(close_long_work_terms)
     if two_off_goal_terms:
@@ -2035,8 +2058,8 @@ def generate_shift(
         obj = obj - ADVISOR_DAY_PENALTY * sum(advisor_assignments)
     obj = obj + ATTENDANCE_EVENT_REWARD * sum(attendance_terms)
     obj = obj + 80 * sum(preferred_off_terms)
-    # 大宮の合計2名体制は需給調整として許容するが、店舗配分の
-    # 均等さより通常の合計3名体制を優先する。
+    # 大宮の合計2名体制は許可条件内で許容。5連勤回避(600)を優先しつつ、
+    # 店舗配分の均等さより合計3名体制(400)を優先する。
     # 顧問の少数日補助を含めて通常体制に近づける。
     obj = obj - OMIYA_SHORTAGE_PENALTY * sum(omiya_short.values())
     # 赤羽の正規2人日は「大宮の人数少より軽い」コスト。余剰配置だけが
@@ -2089,12 +2112,19 @@ def generate_shift(
         status_out["triangle_off_preferences"] = len(preferred_off_terms)
         status_out["december_support_restriction"] = (year, month) == (2026, 12)
         status_out["omiya_anchor_pair_rule"] = OMIYA_PAIR_DESCRIPTION
+        status_out["omiya_forbidden_crew_rule"] = OMIYA_FORBIDDEN_CREW_DESCRIPTION
         status_out["omiya_staffing_rule"] = {
             "normal": "エコ対応1名以上・合計3名",
             "reduced": "エコ対応1名以上・合計2名",
             "max_total": STORE_STAFFING_LIMITS[Store.OMIYA].max_total,
         }
         status_out["close_long_work_rule"] = CLOSE_LONG_WORK_DESCRIPTION
+        status_out["long_work_priority"] = {
+            "rule": LONG_WORK_AVOIDANCE_DESCRIPTION,
+            "five_day_window_penalty": LONG_WORK_AVOIDANCE_PENALTY,
+            "omiya_two_person_day_penalty": OMIYA_SHORTAGE_PENALTY,
+            "hard_max_consecutive": hard_max_consec,
+        }
         status_out["imazu_monday_preference"] = {
             "rule": IMAZU_MONDAY_DESCRIPTION,
             "target_days": imazu_monday_days,
@@ -2104,6 +2134,10 @@ def generate_shift(
             "target_days": imazu_weekend_days,
         }
         if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            status_out["long_work_priority"]["five_day_window_ends"] = {
+                name: [end for end, term in indicators.items() if solver.Value(term)]
+                for name, indicators in long_work_by_employee.items()
+            }
             status_out["advisor_policy"]["assigned_days"] = [
                 d for d in days if "顧問" in off and solver.Value(off["顧問"][d]) == 0
             ]
