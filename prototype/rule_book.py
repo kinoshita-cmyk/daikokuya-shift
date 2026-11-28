@@ -151,6 +151,10 @@ def monthly_cards(year, month):
         metadata.append(("event:" + event.id, event.title, "目標"))
     if ym == (2026, 12):
         metadata.append(("eco-support", "大類の単独エコ担当禁止", "絶対"))
+    from .employees import shift_active_employees, limited_staff_work_days
+    for employee in shift_active_employees(year, month):
+        if limited_staff_work_days(employee.name, year, month):
+            metadata.append(("limited-staff:" + employee.name, employee.name + "の臨時応援", "絶対"))
     descriptions = rules.active_monthly_exception_descriptions(year, month)
     if len(metadata) != len(descriptions):
         raise ValueError("月別条件の表示形式が更新されています。条件ブックの対応を確認してください")

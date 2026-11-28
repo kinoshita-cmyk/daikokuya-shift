@@ -20,6 +20,7 @@ from calendar import monthrange
 from typing import Optional
 
 from .models import OperationMode, Skill, Store
+from .employees import limited_staff_work_days
 from .rules import (
     MANDATORY_WORK_ON_REQUEST_EMPLOYEES,
     STORE_STAFFING_LIMITS,
@@ -146,7 +147,14 @@ def compute_monthly_capacity_balance(
         paid = int(submitted_paid_leave.get(name, 0) or 0) + int(
             admin_paid_leave.get(name, 0) or 0
         )
-        if name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES:
+        limited_days = limited_staff_work_days(name, year, month)
+        if limited_days is not None:
+            base = len(limited_days)
+            supply = max(0, base - paid)
+            formula = f"臨時応援の出勤可能日 最大{base}日（出勤確約ではない）"
+            if paid:
+                formula += f" − 有給{paid}日"
+        elif name in MANDATORY_WORK_ON_REQUEST_EMPLOYEES:
             base = int(work_request_counts.get(name, 0) or 0)
             if base <= 0:
                 base = int(ONLY_ON_REQUEST_TARGET_DAYS)

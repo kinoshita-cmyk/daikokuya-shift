@@ -38,7 +38,7 @@ from .models import (
     MonthlyShift, Store, Skill, OperationMode,
     PreferenceMark, PreviousMonthCarryover, Affinity,
 )
-from .employees import ALL_EMPLOYEES, get_employee
+from .employees import ALL_EMPLOYEES, get_employee, limited_staff_work_days
 try:
     from .employees import is_probationary_employee as _employee_is_probationary_employee
 except ImportError:
@@ -323,6 +323,13 @@ def validate(
             employee = get_employee(assignment.employee)
         except KeyError:
             continue
+        available = limited_staff_work_days(employee.name, shift.year, shift.month)
+        if available is not None and assignment.day not in available:
+            result.issues.append(Issue(
+                severity="ERROR", category="出勤可能日外", day=assignment.day,
+                employee=employee.name,
+                message="この日は臨時応援の出勤可能日ではありません。指定された日以外には配置できません。",
+            ))
         retired = _parse_iso_date(getattr(employee, "retired_at", None))
         if retired is not None and date(shift.year, shift.month, assignment.day) > retired:
             result.issues.append(Issue(

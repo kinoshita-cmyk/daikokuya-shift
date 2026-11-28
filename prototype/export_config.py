@@ -17,7 +17,9 @@ EXPORT_COLUMN_ORDER = [
 
 def export_column_order(year: int, month: int, assignments=()) -> list[str]:
     """退職後の空列は出さず、保存済みシフトの実データは隠さない。"""
-    from .employees import get_employee, employee_is_in_service
+    from .employees import (
+        get_employee, employee_is_in_service, shift_active_employees, limited_staff_work_days,
+    )
 
     recorded = {a.employee for a in assignments}
     names = []
@@ -28,5 +30,8 @@ def export_column_order(year: int, month: int, assignments=()) -> list[str]:
             active = False
         if active or name in recorded:
             names.append(name)
+    for employee in shift_active_employees(year, month):
+        if limited_staff_work_days(employee.name, year, month) and employee.name not in names:
+            names.insert(names.index("顧問") if "顧問" in names else len(names), employee.name)
     names.extend(sorted(recorded - set(names)))
     return names

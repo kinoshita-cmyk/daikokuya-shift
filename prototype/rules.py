@@ -982,6 +982,8 @@ def active_monthly_exception_descriptions(year: int, month: int) -> list[str]:
     notes.extend(event.description for event in attendance_events(year, month))
     if ym == (2026, 12):
         notes.append(DECEMBER_SUPPORT_DESCRIPTION)
+    from .employees import limited_staff_descriptions
+    notes.extend(limited_staff_descriptions(year, month))
     return notes
 
 # 月内の最低巡回条件。
@@ -1911,6 +1913,7 @@ CONSTRAINT_EXCLUDED: tuple[str, ...] = (
     "山本",   # 補助要員ロジックのため
     "南",     # 出勤希望日のみ
     "大塚",   # パート運用のため一部制約を除外（ただし最大4連勤は適用）
+    "粕谷",   # 指定日のみの臨時応援。店舗・出勤可能日・本人×は検証する
 )
 
 # 4連勤チェックは適用される（一部の制約のみ免除）

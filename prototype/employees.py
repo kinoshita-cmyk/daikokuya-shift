@@ -378,7 +378,56 @@ EXECUTIVES: list[Employee] = [
 # 全従業員リスト（シフト稼働対象）
 # ============================================================
 
-ALL_EMPLOYEES: list[Employee] = ECO_STAFF + TICKET_STAFF + EXECUTIVES
+APPROVED_STAFF_ADDITIONS = {
+    "kasuya-202612-20261128": Employee(
+        name="粕谷",
+        skill=Skill.TICKET,
+        employment_status=EmploymentStatus.PART_TIME,
+        affinities={
+            Store.OMIYA: Affinity.MEDIUM,
+            Store.SUZURAN: Affinity.MEDIUM,
+            Store.AKABANE: Affinity.MEDIUM,
+            Store.HIGASHIGUCHI: Affinity.NONE,
+            Store.NISHIGUCHI: Affinity.NONE,
+        },
+        annual_target_days=None,
+        only_on_request_days=True,
+        constraint_check_excluded=True,
+        notes="12月の臨時応援。2026年12月13・19・26日のみ配置可能。"
+              "チケット担当。大宮駅前・すずらん・赤羽駅前の3店舗。"
+              "出勤可能日であり、3日すべての出勤を強制しない。",
+    ),
+}
+
+LIMITED_STAFF_WORK_DAYS = {
+    "粕谷": {(2026, 12): frozenset({13, 19, 26})},
+}
+
+
+def limited_staff_work_days(name: str, year: int, month: int):
+    """Noneは日付限定なし。空集合は当月の配置不可を表す。"""
+    months = LIMITED_STAFF_WORK_DAYS.get(name)
+    return None if months is None else months.get((int(year), int(month)), frozenset())
+
+
+def limited_staff_descriptions(year: int, month: int) -> list[str]:
+    notes = []
+    for employee in shift_active_employees(year, month):
+        days = limited_staff_work_days(employee.name, year, month)
+        if not days:
+            continue
+        stores = "・".join(s.display_name for s, a in employee.affinities.items() if a != Affinity.NONE)
+        notes.append(
+            f"{employee.name}: {month}月{'・'.join(map(str, sorted(days)))}日のみ配置可能。"
+            f"{employee.skill.value}担当、{stores}。指定日以外は配置不可。"
+            "出勤可能日であり、すべての出勤を強制しない。"
+        )
+    return notes
+
+
+ALL_EMPLOYEES: list[Employee] = (
+    ECO_STAFF + TICKET_STAFF + list(APPROVED_STAFF_ADDITIONS.values()) + EXECUTIVES
+)
 
 
 # Approved retirement dates also apply when an older master is restored.
@@ -391,6 +440,9 @@ def employee_is_in_service(employee: Employee, year=None, month=None) -> bool:
     from .submission_window import now_jst
 
     target = date(int(year), int(month), 1) if year is not None and month is not None else now_jst().date()
+    available = limited_staff_work_days(employee.name, target.year, target.month)
+    if available is not None and not available:
+        return False
     retired = _parse_iso_date(getattr(employee, "retired_at", None) or APPROVED_RETIREMENT_DATES.get(employee.name))
     if retired is not None and target > retired:
         return False

@@ -40,7 +40,7 @@ except ImportError:
     HAS_OPENAI = False
 
 from .models import MonthlyShift, ShiftAssignment, Store
-from .employees import ALL_EMPLOYEES, get_employee, employee_is_in_service
+from .employees import ALL_EMPLOYEES, get_employee, employee_is_in_service, limited_staff_work_days
 from .shift_readjuster import (
     AdjustmentProposal,
     classify_tobishi_days,
@@ -500,6 +500,9 @@ class ShiftChatEngine:
             except (TypeError, ValueError):
                 messages.append(f"日付が数値ではありません: {change.day}")
                 continue
+            available = limited_staff_work_days(change.employee, self.shift.year, self.shift.month)
+            if change.store not in (None, Store.OFF) and available is not None and day not in available:
+                messages.append(f"{change.employee}さんの{self.shift.month}/{day}は出勤可能日ではありません。")
             if not 1 <= day <= days_in_month:
                 messages.append(
                     f"{self.shift.month}月に存在しない日付です: {day}日"

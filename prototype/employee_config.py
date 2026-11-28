@@ -21,6 +21,7 @@ employees.py のハードコード値を「初期値」として、JSON でオ�
 
 from __future__ import annotations
 import json
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional, Any
@@ -248,7 +249,14 @@ class EmployeeConfigManager:
             try:
                 with open(self.config_file, encoding="utf-8") as f:
                     data = json.load(f)
-                return [employee_from_dict(d) for d in data.get("employees", [])]
+                employees = [employee_from_dict(d) for d in data.get("employees", [])]
+                names = {employee.name for employee in employees}
+                applied = set(data.get("applied_staff_additions", []))
+                # 既存マスタは保持し、承認済みの追加分だけを補う。保存後の削除は尊重する。
+                for update_id, employee in _default_employees.APPROVED_STAFF_ADDITIONS.items():
+                    if update_id not in applied and employee.name not in names:
+                        employees.append(deepcopy(employee))
+                return employees
             except Exception as e:
                 # config/employees.json は運用中に手動編集・GitHubアップロードされるため、
                 # 1箇所でも表記ゆれがあるとアプリ全体が起動不能になる。
@@ -279,6 +287,7 @@ class EmployeeConfigManager:
             "updated_at": now_jst().isoformat(timespec="seconds"),
             "updated_by": actor,
             "employees": [employee_to_dict(e) for e in employees],
+            "applied_staff_additions": list(_default_employees.APPROVED_STAFF_ADDITIONS),
         }
         with open(self.config_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)

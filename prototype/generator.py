@@ -49,6 +49,7 @@ from .models import (
 from .employees import (
     ALL_EMPLOYEES, ECO_STAFF, TICKET_STAFF, get_employee,
     is_probationary_employee, shift_active_employees,
+    limited_staff_work_days,
 )
 from .rules import (
     NORMAL_CAPACITY, REDUCED_CAPACITY, MINIMUM_CAPACITY,
@@ -667,6 +668,13 @@ def generate_shift(
             if event.day not in off_requests.get(name, []):
                 request_allowed_days_by_employee.setdefault(name, set()).add(event.day)
     for e in main_employees:
+        limited_days = limited_staff_work_days(e.name, year, month)
+        if limited_days is not None:
+            # 提出の有無に関係なく臨時応援の配置可能日だけを使う。
+            request_allowed_days_by_employee[e.name] = set(limited_days)
+            for d in days:
+                if d not in limited_days:
+                    model.Add(off[e.name][d] == 1)
         if not getattr(e, "only_on_request_days", False):
             continue
         allowed_days = request_allowed_days_by_employee.get(e.name, set())
