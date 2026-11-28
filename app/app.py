@@ -177,10 +177,16 @@ NOTE_ADJUSTMENT_STATUS_OPTIONS = ["要確認", "確認済み", "補正のみ反�
 
 def load_rule_ledger_v1() -> dict:
     """ルール台帳 v1.0 を読み込む。壊れている場合は空の台帳を返す。"""
+    from prototype.work_recovery import LONG_WORK_AVOIDANCE_TITLE, LONG_WORK_AVOIDANCE_DESCRIPTION
+    from prototype.rules import OMIYA_FORBIDDEN_CREW_TITLE, OMIYA_FORBIDDEN_CREW_DESCRIPTION
+    fixed_priority = {"分類": "強い目標", "ルール": LONG_WORK_AVOIDANCE_TITLE,
+                      "内容": LONG_WORK_AVOIDANCE_DESCRIPTION}
+    fixed_crew = {"分類": "絶対条件", "ルール": OMIYA_FORBIDDEN_CREW_TITLE,
+                  "内容": OMIYA_FORBIDDEN_CREW_DESCRIPTION}
     fallback = {
         "version": "1.0",
         "title": "大黒屋シフト作成ルール台帳",
-        "rules": [],
+        "rules": [fixed_priority, fixed_crew],
         "employee_store_suitability": [],
         "numeric_parameters": [],
     }
@@ -193,7 +199,11 @@ def load_rule_ledger_v1() -> dict:
         return fallback
     if not isinstance(data, dict):
         return fallback
-    return {**fallback, **data}
+    merged = {**fallback, **data}
+    merged["rules"] = [row for row in merged["rules"]
+                       if row.get("ルール") not in (LONG_WORK_AVOIDANCE_TITLE, OMIYA_FORBIDDEN_CREW_TITLE)]
+    merged["rules"].extend([fixed_priority, fixed_crew])
+    return merged
 
 
 def build_employee_suitability_rows_from_master(year=None, month=None) -> list[dict]:
@@ -261,7 +271,7 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
     """台帳の数値基準欄が空の場合、現在の本設定から表示用に作る。"""
     from prototype.models import Store
     from prototype.rules import STORE_STAFFING_LIMITS, STORE_OVERAGE_PRIORITY
-    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION, LONG_WORK_AVOIDANCE_TITLE, LONG_WORK_AVOIDANCE_DESCRIPTION
 
     store_labels = {
         Store.AKABANE: "赤羽", Store.HIGASHIGUCHI: "東口", Store.OMIYA: "大宮",
@@ -330,6 +340,12 @@ def build_numeric_ledger_rows_from_parameters(parameters: dict) -> list[dict]:
             "備考": CLOSE_LONG_WORK_DESCRIPTION,
         },
         {
+            "分類": "強い目標",
+            "項目": LONG_WORK_AVOIDANCE_TITLE,
+            "現在値": "5連勤を減らす ＞ 大宮駅前の3名体制維持",
+            "備考": LONG_WORK_AVOIDANCE_DESCRIPTION,
+        },
+        {
             "分類": "運用設定",
             "項目": "ソルバー最大実行時間",
             "現在値": f"{parameters.get('solver_time_limit_seconds', 240)}秒",
@@ -357,6 +373,8 @@ def build_effective_rule_visibility_rows(
         MONTH_EDGE_FIXED_EMPLOYEES,
         MONTH_END_MAX_CONSECUTIVE_FOR_FIXED_STAFF,
         OMIYA_TWO_PERSON_EXCLUDED_STAFF,
+        OMIYA_FORBIDDEN_ONLY_CREW, OMIYA_FORBIDDEN_CREW_TITLE,
+        OMIYA_FORBIDDEN_CREW_DESCRIPTION,
         STORE_STAFFING_LIMITS,
         fixed_suzuran_core_presence_rules,
         load_monthly_exceptions_raw,
@@ -366,7 +384,7 @@ def build_effective_rule_visibility_rows(
     from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
     from prototype.staffing_policy import SUZURAN_BACKUP_DESCRIPTION, ADVISOR_DESCRIPTION
     from prototype.consecutive_counts import CONSECUTIVE_OFF_EXCEPTION_DESCRIPTION
-    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION
+    from prototype.work_recovery import CLOSE_LONG_WORK_DESCRIPTION, LONG_WORK_AVOIDANCE_TITLE, LONG_WORK_AVOIDANCE_DESCRIPTION
 
     year = int(year)
     month = int(month)
@@ -415,6 +433,9 @@ def build_effective_rule_visibility_rows(
     )
 
     rows = [
+        {"対象": "全スタッフ（個別の絶対条件・勤務上限は維持）", "ルール": LONG_WORK_AVOIDANCE_TITLE,
+         "適用範囲": "全月固定", "強さ": "強い目標（5連勤は禁止ではない）",
+         "現在有効な内容": LONG_WORK_AVOIDANCE_DESCRIPTION, "変更場所": "固定ルール"},
         {"対象": "長尾・鈴木", "ルール": "長尾不在時のすずらん担当", "適用範囲": "全月固定",
          "強さ": "絶対条件 / ERROR", "現在有効な内容": SUZURAN_BACKUP_DESCRIPTION, "変更場所": "固定ルール"},
         {"対象": "顧問", "ルール": "顧問の勤務", "適用範囲": "全月固定",
@@ -463,6 +484,14 @@ def build_effective_rule_visibility_rows(
                 "大宮駅前が終日2名体制になる日は、大塚・南を構成員に"
                 "しない。大塚・南を大宮へ配置する場合は合計3名以上にする。"
             ),
+            "変更場所": "固定ルール",
+        },
+        {
+            "対象": "大宮駅前店 / " + "・".join(OMIYA_FORBIDDEN_ONLY_CREW),
+            "ルール": OMIYA_FORBIDDEN_CREW_TITLE,
+            "適用範囲": "全月固定",
+            "強さ": "絶対条件 / ERROR",
+            "現在有効な内容": OMIYA_FORBIDDEN_CREW_DESCRIPTION,
             "変更場所": "固定ルール",
         },
         {
@@ -11447,7 +11476,14 @@ elif mode == "⚙️ 設定":
             }
 
         from prototype.eco_support import SUPPORT_DESCRIPTION, OMIYA_PAIR_DESCRIPTION
+        from prototype.rules import OMIYA_FORBIDDEN_CREW_TITLE, OMIYA_FORBIDDEN_CREW_DESCRIPTION
         rule_inventory = [
+            _rule_row(
+                "絶対条件", OMIYA_FORBIDDEN_CREW_TITLE,
+                OMIYA_FORBIDDEN_CREW_DESCRIPTION,
+                "反映中", "ERROR", "有効ルール・条件ブックに反映",
+                "コード固定", "反映中",
+            ),
             _rule_row(
                 "技能・配置", "エコサポートの配置",
                 SUPPORT_DESCRIPTION,
